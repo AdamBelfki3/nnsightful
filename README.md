@@ -1,4 +1,4 @@
-# nnterp-kit
+# nnsightful
 
 Interpretability tools for neural networks. This package provides both Python tools for running interpretability methods (logit lens, activation patching) and JavaScript/TypeScript visualizations for displaying the results.
 
