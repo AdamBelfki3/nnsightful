@@ -10,7 +10,7 @@ def activation_patching(
     src_pos: List[Union[int, List[int]]],
     tgt_pos: List[int],
     tgt_freeze: List[int],
-    backend,
+    backend = None,
     remote: bool = True,
 ):
     layers = len(model.model.layers)
@@ -68,7 +68,7 @@ def activation_patching(
 
                 patched_logits_per_layer.append(torch.nn.functional.softmax(model.lm_head.output[0, -1], dim=-1).save())
 
-    if remote:
+    if remote and backend is None:
         return session.backend.job_id
 
     return src_pred, clean_pred, patched_logits_per_layer, clean_logits

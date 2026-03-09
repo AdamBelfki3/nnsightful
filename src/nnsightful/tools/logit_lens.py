@@ -11,7 +11,7 @@ def logit_lens(
     prompt: str,
     model: "LanguageModel",
     remote: bool,
-    backend,
+    backend = None,
 ):
     with model.trace(
         prompt,
@@ -36,7 +36,7 @@ def logit_lens(
         # Save for remote execution
         all_logits.save()
 
-    if remote:
+    if remote and backend is None:
         return tracer.backend.job_id
 
     return all_logits
