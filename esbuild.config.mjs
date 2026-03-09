@@ -23,7 +23,7 @@ const esmBuild = {
 const iifeBuild = {
   ...common,
   entryPoints: ["src/charts/standalone.ts"],
-  outfile: "dist/standalone.js",
+  outfile: "src/nnsightful/viz/charts.js",
   format: "iife",
   globalName: "InterpTools",
   minify: true,

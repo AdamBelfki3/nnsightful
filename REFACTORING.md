@@ -1,6 +1,6 @@
 # Visualization Library Refactoring
 
-This document describes the refactoring of the Lens2 (LogitLens) and ActivationPatching (LinePlot) visualization components from tightly-coupled Next.js code into a standalone, framework-agnostic library under `nnterp-kit/visualizations/`.
+This document describes the refactoring of the Lens2 (LogitLens) and ActivationPatching (LinePlot) visualization components from tightly-coupled Next.js code into a standalone, framework-agnostic library under `nnsightful/visualizations/`.
 
 ---
 
@@ -272,14 +272,14 @@ This makes the visualization fully self-contained — a single notebook cell out
 The `interp-tools` package is linked via a `postinstall` script in `_web/package.json`:
 
 ```json
-"postinstall": "rm -rf node_modules/interp-tools && ln -s ../../../nnterp-kit/visualizations node_modules/interp-tools"
+"postinstall": "rm -rf node_modules/interp-tools && ln -s ../../../nnsightful/visualizations node_modules/interp-tools"
 ```
 
 A `file:` dependency was initially used but abandoned because **bun creates per-file symlinks** (each `.js`, `.json` gets its own symlink), which Turbopack cannot follow. A direct directory symlink works instead.
 
 ### Turbopack configuration
 
-Turbopack auto-detects its filesystem root by finding `bun.lock`. Since `bun.lock` lives in `_web/`, Turbopack's root was `workbench/_web/` — but the symlink points to `../../nnterp-kit/visualizations` which is **outside** that root. This caused `"Invalid symlink"` errors.
+Turbopack auto-detects its filesystem root by finding `bun.lock`. Since `bun.lock` lives in `_web/`, Turbopack's root was `workbench/_web/` — but the symlink points to `../../nnsightful/visualizations` which is **outside** that root. This caused `"Invalid symlink"` errors.
 
 Fix in `next.config.js`:
 
@@ -343,7 +343,7 @@ API-specific types (`Lens2ConfigData`) remain local.
 | `LogitLensWidgetWrapper.tsx` | Replaced by `LogitLensWidget` from `interp-tools` |
 | `LinePlotWidget.tsx` (activation-patching) | Replaced by `LinePlotWidget` from `interp-tools` |
 | `public/interp-tools/logit-lens-widget.js` | No longer loaded via `<script>` tag |
-| `nnterp-kit/visualizations/src/logit-lens-widget.js` | Replaced by TypeScript modules in `core/logit-lens/` |
+| `nnsightful/visualizations/src/logit-lens-widget.js` | Replaced by TypeScript modules in `core/logit-lens/` |
 
 ---
 
@@ -367,7 +367,7 @@ API-specific types (`Lens2ConfigData`) remain local.
 
 **Fix (two parts)**:
 - Replaced `file:` dependency with a `postinstall` script creating a direct directory symlink.
-- Added `turbopack.root` to `next.config.js` pointing to the repo root, so the symlinked `nnterp-kit/visualizations/` directory falls within Turbopack's filesystem scope.
+- Added `turbopack.root` to `next.config.js` pointing to the repo root, so the symlinked `nnsightful/visualizations/` directory falls within Turbopack's filesystem scope.
 
 ### 4. SVG `dataset` property is read-only
 

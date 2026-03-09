@@ -8,22 +8,22 @@ Interpretability tools for neural networks. This package provides both Python to
 
 ```bash
 # Base install (types only)
-pip install nnterp-kit
+pip install nnsightful
 
 # With interpretability tools (requires torch + nnsight)
-pip install "nnterp-kit[tools]"
+pip install "nnsightful[tools]"
 
 # With Jupyter visualization helpers
-pip install "nnterp-kit[viz]"
+pip install "nnsightful[viz]"
 
 # Everything
-pip install "nnterp-kit[all]"
+pip install "nnsightful[all]"
 ```
 
 ### JavaScript/TypeScript
 
 ```bash
-npm install github:AdamBelfki3/nnterp-kit
+npm install github:AdamBelfki3/nnsightful
 ```
 
 ## Usage
@@ -31,8 +31,8 @@ npm install github:AdamBelfki3/nnterp-kit
 ### Python: Running interpretability methods
 
 ```python
-from nnterp_kit.tools.logit_lens import logit_lens, format_data
-from nnterp_kit.tools.activation_patching import activation_patching, format_data
+from nnsightful.tools.logit_lens import logit_lens, format_data
+from nnsightful.tools.activation_patching import activation_patching, format_data
 
 # Run logit lens on a model
 all_logits = logit_lens(prompt, model, remote=False, backend=backend)
@@ -42,7 +42,7 @@ data = format_data(all_logits, input_tokens, topk=10, include_entropy=True, mode
 ### Python: Jupyter visualizations
 
 ```python
-from nnterp_kit.viz import display_logit_lens, display_line_plot
+from nnsightful.viz import display_logit_lens, display_line_plot
 
 # Display a logit lens heatmap + trajectory chart
 display_logit_lens(data, dark_mode=True)
@@ -73,13 +73,13 @@ import { LogitLensWidget, LinePlotWidget } from "interp-tools";
 ## Project Structure
 
 ```
-nnterp-kit/
+nnsightful/
 ├── src/
 │   ├── charts/              # JS/TS visualization library
 │   │   ├── core/            # Framework-agnostic widget implementations
 │   │   ├── react/           # Thin React wrappers
 │   │   └── types/           # TypeScript type definitions
-│   └── nnterp_kit/          # Python package
+│   └── nnsightful/          # Python package
 │       ├── tools/           # Interpretability methods (logit lens, activation patching)
 │       ├── types.py         # Pydantic data models
 │       └── viz/             # Jupyter display helpers

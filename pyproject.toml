@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nnterp-kit"
+name = "nnsightful"
 version = "0.1.0"
 description = "Interpretability tools for neural networks"
 requires-python = ">=3.10"
@@ -20,9 +20,9 @@ viz = [
     "ipython",
 ]
 all = [
-    "nnterp-kit[tools,viz]",
+    "nnsightful[tools,viz]",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["nnterp_kit*"]
+include = ["nnsightful*"]

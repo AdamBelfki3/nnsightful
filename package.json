@@ -11,7 +11,7 @@
       "import": "./dist/index.mjs",
       "types": "./dist/index.d.ts"
     },
-    "./standalone": "./dist/standalone.js"
+    "./standalone": "./src/nnsightful/viz/charts.js"
   },
   "files": [
     "dist",
@@ -19,6 +19,7 @@
   ],
   "private": true,
   "scripts": {
+    "prepare": "node esbuild.config.mjs && tsc",
     "build": "node esbuild.config.mjs && tsc",
     "build:watch": "node esbuild.config.mjs --watch",
     "typecheck": "tsc --noEmit"

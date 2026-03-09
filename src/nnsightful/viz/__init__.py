@@ -1,8 +1,8 @@
 """
-nnterp_kit.viz - Display interpretability visualizations in Jupyter notebooks.
+nnsightful.viz - Display interpretability visualizations in Jupyter notebooks.
 
 Usage:
-    from nnterp_kit.viz import display_logit_lens, display_line_plot
+    from nnsightful.viz import display_logit_lens, display_line_plot
 
     display_logit_lens(data)
     display_line_plot(data, options={"mode": "probability"})
@@ -19,11 +19,11 @@ def _get_standalone_js() -> str:
     """Load and cache the standalone JS bundle."""
     global _STANDALONE_JS
     if _STANDALONE_JS is None:
-        js_path = Path(__file__).resolve().parent.parent.parent.parent / "dist" / "standalone.js"
+        js_path = Path(__file__).resolve().parent / "charts.js"
         if not js_path.exists():
             raise FileNotFoundError(
                 f"standalone.js not found at {js_path}. "
-                "Run 'npm run build' in the nnterp-kit/ directory first."
+                "Run 'npm run build' in the nnsightful/ directory first."
             )
         _STANDALONE_JS = js_path.read_text(encoding="utf-8")
     return _STANDALONE_JS
