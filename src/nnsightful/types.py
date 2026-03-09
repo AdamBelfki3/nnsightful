@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+
 class LogitLensMeta(BaseModel):
     version: int = 2
     timestamp: str
@@ -13,6 +14,10 @@ class LogitLensData(BaseModel):
     topk: list[list[list[str]]]  # [layer][position] -> list of top-k tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
+    def display(self, **kwargs):
+        from nnsightful.viz import display_logit_lens
+        return display_logit_lens(self, **kwargs)
+
 
 # class ActivationsPatchingMeta(BaseModel):
 #     version: int = 1
@@ -25,3 +30,15 @@ class ActivationPatchingData(BaseModel):
     ranks: list[list[int]]  # Each inner list is ranks for one token across all layers
     prob_diffs: list[list[float]]  # Each inner list is probability differences for one token across all layers
     tokenLabels: list[str]  # Token text labels for each line
+
+    def display(self, tokens: list[int] | None = None, **kwargs):
+        from nnsightful.viz import display_line_plot
+        # Default: show only src_pred and tgt_pred (first 2 lines)
+        indices = tokens if tokens is not None else [0, 1]
+        sliced = {
+            "lines": [self.lines[i] for i in indices],
+            "labels": [self.tokenLabels[i] for i in indices],
+        }
+        if "options" not in kwargs:
+            kwargs["options"] = {"mode": "probability"}
+        return display_line_plot(sliced, **kwargs)
