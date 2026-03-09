@@ -14,9 +14,11 @@ class LogitLensData(BaseModel):
     topk: list[list[list[str]]]  # [layer][position] -> list of top-k tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
-    def display(self, **kwargs):
+    def display(self, return_fig: bool = False, **kwargs):
         from nnsightful.viz import display_logit_lens
-        return display_logit_lens(self, **kwargs)
+        result = display_logit_lens(self, **kwargs)
+        if return_fig:
+            return result
 
 
 # class ActivationsPatchingMeta(BaseModel):
@@ -31,7 +33,7 @@ class ActivationPatchingData(BaseModel):
     prob_diffs: list[list[float]]  # Each inner list is probability differences for one token across all layers
     tokenLabels: list[str]  # Token text labels for each line
 
-    def display(self, tokens: list[int] | None = None, **kwargs):
+    def display(self, tokens: list[int] | None = None, return_fig: bool = False, **kwargs):
         from nnsightful.viz import display_line_plot
         # Default: show only src_pred and tgt_pred (first 2 lines)
         indices = tokens if tokens is not None else [0, 1]
@@ -41,4 +43,6 @@ class ActivationPatchingData(BaseModel):
         }
         if "options" not in kwargs:
             kwargs["options"] = {"mode": "probability"}
-        return display_line_plot(sliced, **kwargs)
+        result = display_line_plot(sliced, **kwargs)
+        if return_fig:
+            return result
