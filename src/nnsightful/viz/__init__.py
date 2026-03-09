@@ -11,6 +11,14 @@ Usage:
 import json
 from pathlib import Path
 from IPython.display import HTML, display as ipython_display
+from pydantic import BaseModel
+
+
+def _to_dict(obj):
+    """Convert Pydantic models to dicts, pass dicts through."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump()
+    return obj
 
 _STANDALONE_JS: str | None = None
 
@@ -50,7 +58,7 @@ def display_logit_lens(
         IPython.display.HTML object.
     """
     js = _get_standalone_js()
-    data_json = json.dumps(data)
+    data_json = json.dumps(_to_dict(data))
     ui_state_json = json.dumps(ui_state or {})
 
     if dark_mode:
@@ -95,7 +103,7 @@ def display_line_plot(
         IPython.display.HTML object.
     """
     js = _get_standalone_js()
-    data_json = json.dumps(data)
+    data_json = json.dumps(_to_dict(data))
     options_json = json.dumps(options or {})
 
     html = f"""
