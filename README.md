@@ -1,73 +1,48 @@
 # nnsightful
 
-Interpretability tools for neural networks. This package provides both Python tools for running interpretability methods (logit lens, activation patching) and JavaScript/TypeScript visualizations for displaying the results.
+A higher-level extension of [NNsight](https://github.com/ndif-team/nnsight) providing ready-to-use mechanistic interpretability methods and interactive visualizations for exploring the results.
 
 ## Installation
 
-### Python
-
 ```bash
-# Base install (types only)
 pip install nnsightful
-
-# With interpretability tools (requires torch + nnsight)
-pip install "nnsightful[tools]"
-
-# With Jupyter visualization helpers
-pip install "nnsightful[viz]"
-
-# Everything
-pip install "nnsightful[all]"
-```
-
-### JavaScript/TypeScript
-
-```bash
-npm install github:AdamBelfki3/nnsightful
 ```
 
 ## Usage
 
-### Python: Running interpretability methods
+### Running interpretability methods
 
 ```python
-from nnsightful.tools.logit_lens import logit_lens, format_data
-from nnsightful.tools.activation_patching import activation_patching, format_data
+from nnsightful import logit_lens, activation_patching
 
-# Run logit lens on a model
-all_logits = logit_lens(prompt, model, remote=False, backend=backend)
-data = format_data(all_logits, input_tokens, topk=10, include_entropy=True, model_name="gpt2", tokenizer=tokenizer)
+# Logit lens
+all_logits = logit_lens.logit_lens(prompt, model, remote=False, backend=backend)
+data = logit_lens.format_data(all_logits, input_tokens, topk=10, include_entropy=True, model_name="gpt2", tokenizer=tokenizer)
+
+# Activation patching
+results = activation_patching.activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze, backend)
+data = activation_patching.format_data(patched_logits, tokenizer, src_pred, clean_pred, clean_logits)
 ```
 
-### Python: Jupyter visualizations
+### Jupyter visualizations
 
 ```python
-from nnsightful.viz import display_logit_lens, display_line_plot
+from nnsightful import display_logit_lens, display_line_plot
 
 # Display a logit lens heatmap + trajectory chart
 display_logit_lens(data, dark_mode=True)
 
-# Display a line plot
+# Display an activation patching line plot
 display_line_plot(data, options={"mode": "probability"})
 ```
 
-### React
+### React components
 
 ```tsx
-import { LogitLensWidget, LinePlotWidget } from "interp-tools";
+import { LogitLensWidget, LinePlotWidget } from "nnsightful";
 
 <LogitLensWidget data={data} darkMode={true} />
 <LinePlotWidget data={data} darkMode={true} />
-```
-
-### Standalone (vanilla JS)
-
-```html
-<script src="dist/standalone.js"></script>
-<script>
-  window.LogitLensWidget(container, data);
-  window.LinePlotWidget(container, data, options);
-</script>
 ```
 
 ## Project Structure
@@ -82,9 +57,9 @@ nnsightful/
 │   └── nnsightful/          # Python package
 │       ├── tools/           # Interpretability methods (logit lens, activation patching)
 │       ├── types.py         # Pydantic data models
-│       └── viz/             # Jupyter display helpers
+│       └── viz/             # Jupyter display helpers (includes bundled charts.js)
 ├── examples/                # Example notebooks
-├── dist/                    # JS build output (ESM + IIFE)
+├── dist/                    # JS build output (ESM for React/Next.js apps)
 ├── package.json             # npm package config
 └── pyproject.toml           # pip package config
 ```
@@ -100,10 +75,10 @@ npm run build
 
 This produces:
 - `dist/index.mjs` — ESM bundle (React externalized) for use in React/Next.js apps
-- `dist/standalone.js` — Self-contained IIFE bundle for Jupyter notebooks and standalone HTML
+- `src/nnsightful/viz/charts.js` — Self-contained IIFE bundle for Jupyter notebooks, bundled with the Python package
 
 ### Editable Python install
 
 ```bash
-pip install -e ".[all]"
+pip install -e .
 ```
