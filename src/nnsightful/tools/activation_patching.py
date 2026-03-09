@@ -76,9 +76,9 @@ def activation_patching(
 
 def format_data(
     tokenizer,
-    patched_logits: List[torch.Tensor],
     src_pred: int,
     clean_pred: int,
+    patched_logits: List[torch.Tensor],
     clean_logits: torch.Tensor,
 ):
     # [L, V]
