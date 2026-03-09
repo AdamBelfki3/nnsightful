@@ -22,7 +22,7 @@ def _get_standalone_js() -> str:
         js_path = Path(__file__).resolve().parent / "charts.js"
         if not js_path.exists():
             raise FileNotFoundError(
-                f"standalone.js not found at {js_path}. "
+                f"charts.js not found at {js_path}. "
                 "Run 'npm run build' in the nnsightful/ directory first."
             )
         _STANDALONE_JS = js_path.read_text(encoding="utf-8")

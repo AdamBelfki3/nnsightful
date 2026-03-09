@@ -16,3 +16,6 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["nnsightful*"]
+
+[tool.setuptools.package-data]
+nnsightful = ["viz/*.js"]
