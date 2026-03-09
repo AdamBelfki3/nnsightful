@@ -5,22 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nnsightful"
 version = "0.1.0"
-description = "Interpretability tools for neural networks"
+description = "A higher-level extension of NNsight providing ready-to-use mechanistic interpretability methods (logit lens, activation patching) and interactive visualizations for exploring the results"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-]
-
-[project.optional-dependencies]
-tools = [
-    "torch",
     "nnsight",
-]
-viz = [
     "ipython",
-]
-all = [
-    "nnsightful[tools,viz]",
 ]
 
 [tool.setuptools.packages.find]
