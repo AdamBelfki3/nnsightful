@@ -13,6 +13,9 @@ def logit_lens(
     remote: bool,
     backend = None,
 ):
+
+    input_tokens = [model.tokenizer.decode(token) for token in model.tokenizer.encode(prompt)]
+
     with model.trace(
         prompt,
         remote=remote,
@@ -39,16 +42,16 @@ def logit_lens(
     if remote and backend is None:
         return tracer.backend.job_id
 
-    return all_logits
+    return input_tokens, all_logits
 
 
 def format_data(
-    all_logits: list[torch.Tensor],
     input_tokens: list[str],
-    topk: int,
-    include_entropy: bool,
-    model_name: str,
+    all_logits: list[torch.Tensor],
     tokenizer,
+    topk: int = 5,
+    include_entropy: bool = True,
+    model_name: str = "",
 ):
     n_layers = len(all_logits)
     n_positions = len(input_tokens)

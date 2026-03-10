@@ -40,8 +40,8 @@ def _get_standalone_js() -> str:
 def display_logit_lens(
     data: dict,
     ui_state: dict | None = None,
-    width: str = "100%",
-    height: str = "600px",
+    width: str = "80%",
+    height: str = "450px",
     dark_mode: bool = False,
 ) -> HTML:
     """
@@ -87,8 +87,8 @@ def display_logit_lens(
 def display_line_plot(
     data: dict,
     options: dict | None = None,
-    width: str = "100%",
-    height: str = "400px",
+    width: str = "80%",
+    height: str = "300px",
 ) -> HTML:
     """
     Display a LinePlot visualization in a Jupyter notebook.
