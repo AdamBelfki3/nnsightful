@@ -1,7 +1,7 @@
 {
-  "name": "interp-tools",
+  "name": "nnsightful",
   "version": "1.0.0",
-  "description": "Interpretability visualization tools for the Workbench",
+  "description": "Interactive visualizations for mechanistic interpretability methods",
   "type": "module",
   "main": "dist/index.mjs",
   "module": "dist/index.mjs",
