@@ -14,13 +14,12 @@ def logit_lens(
     backend = None,
 ):
 
-    input_tokens = [model.tokenizer.decode(token) for token in model.tokenizer.encode(prompt)]
-
     with model.trace(
         prompt,
         remote=remote,
         backend=backend,
     ) as tracer:
+        input_tokens = list([model.tokenizer.decode(token) for token in model.tokenizer.encode(prompt)]).save()
         all_logits = []  # [n_layers, batch, seq, vocab]
 
         # Collect logits from each layer
@@ -39,7 +38,7 @@ def logit_lens(
         # Save for remote execution
         all_logits.save()
 
-    if remote and backend is None:
+    if remote and backend is not None:
         return tracer.backend.job_id
 
     return input_tokens, all_logits

@@ -68,7 +68,7 @@ def activation_patching(
 
                 patched_logits_per_layer.append(torch.nn.functional.softmax(model.lm_head.output[0, -1], dim=-1).save())
 
-    if remote and backend is None:
+    if remote and backend is not None:
         return session.backend.job_id
 
     return src_pred, clean_pred, patched_logits_per_layer, clean_logits
