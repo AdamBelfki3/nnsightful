@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback } from "react";
 import type { LogitLensData, LogitLensUIState } from "../types/logit-lens";
 import { LogitLensCore } from "../core/logit-lens";
 

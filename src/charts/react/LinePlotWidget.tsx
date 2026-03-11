@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import type { LinePlotData, LinePlotOptions } from "../types/line-plot";
 import { LinePlotCore } from "../core/line-plot";
 
