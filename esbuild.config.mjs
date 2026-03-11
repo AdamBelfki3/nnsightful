@@ -16,6 +16,7 @@ const esmBuild = {
   entryPoints: ["src/charts/index.ts"],
   outfile: "dist/index.mjs",
   format: "esm",
+  jsx: "automatic",
   external: ["react", "react-dom", "react/jsx-runtime"],
 };
 
