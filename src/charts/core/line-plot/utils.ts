@@ -1,3 +1,33 @@
+import type { LinePlotData } from "../../types/line-plot";
+
+export interface ResolvedLine {
+    values: (number | null)[];
+    label: string;
+    color?: string;
+    dashPattern?: string;
+    isOverlay?: boolean;
+    removable?: boolean;
+}
+
+/** Resolve lines from either richLines or basic lines array */
+export function resolveLines(data: LinePlotData): ResolvedLine[] {
+    if (data.richLines && data.richLines.length > 0) {
+        return data.richLines.map((rl, i) => ({
+            values: rl.values,
+            label: rl.label ?? `Line ${i + 1}`,
+            color: rl.color,
+            dashPattern: rl.dashPattern,
+            isOverlay: rl.isOverlay,
+            removable: rl.removable,
+        }));
+    }
+    const lines = data.lines ?? [];
+    return lines.map((line, i) => ({
+        values: line,
+        label: data.labels?.[i] ?? `Line ${i + 1}`,
+    }));
+}
+
 /**
  * Render token text with visual indicators for leading spaces and newlines.
  * Returns an HTML string for use in vanilla DOM.
@@ -31,7 +61,9 @@ export function renderTokenHTML(text: string | undefined): string {
 }
 
 export function escapeHTML(text: string): string {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }

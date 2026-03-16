@@ -1,4 +1,4 @@
-import type { LinePlotData, LinePlotOptions, LinePlotWidgetInterface } from "../../types/line-plot";
+import type { LinePlotData, LinePlotLine, LinePlotOptions, LinePlotWidgetInterface } from "../../types/line-plot";
 import { computeChartConfig, drawChart, type ChartConfig } from "./renderer";
 import {
     createTooltipElement,
@@ -26,6 +26,7 @@ export class LinePlotCore implements LinePlotWidgetInterface {
     private destroyed = false;
     private lastWidth = 0;
     private lastHeight = 0;
+    private overlay: LinePlotLine | null = null;
 
     constructor(container: HTMLElement, data: LinePlotData, options: LinePlotOptions = {}) {
         this.container = container;
@@ -36,7 +37,9 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         container.style.display = "flex";
         container.style.width = "100%";
         container.style.height = "100%";
-        container.style.minHeight = "300px";
+        if (!container.style.minHeight) {
+            container.style.minHeight = "300px";
+        }
         container.style.gap = "12px";
         container.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
         container.style.overflow = "hidden";
@@ -55,6 +58,9 @@ export class LinePlotCore implements LinePlotWidgetInterface {
 
         // Legend
         this.legendEl = createLegendElement(this.options.darkMode ?? false);
+        if (this.options.legendPosition === "none") {
+            this.legendEl.style.display = "none";
+        }
         container.appendChild(this.legendEl);
 
         // Events
@@ -62,7 +68,6 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.canvas.addEventListener("mouseleave", this.handleMouseLeave);
 
         // Resize — only redraw when container size actually changes to avoid infinite loops
-        // (drawChart sets canvas.width/height which can re-trigger ResizeObserver)
         this.resizeObserver = new ResizeObserver((entries) => {
             if (this.destroyed) return;
             const entry = entries[0];
@@ -80,8 +85,15 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.updateLegendUI();
     }
 
+    private getLabels(): string[] {
+        if (this.data.richLines && this.data.richLines.length > 0) {
+            return this.data.richLines.map((rl, i) => rl.label ?? `Line ${i + 1}`);
+        }
+        return this.data.labels || (this.data.lines ?? []).map((_, i) => `Line ${i + 1}`);
+    }
+
     private draw(): void {
-        this.config = computeChartConfig(this.data, this.options);
+        this.config = computeChartConfig(this.data, this.options, this.overlay);
         if (!this.config) return;
 
         this.geometry = drawChart(
@@ -92,14 +104,26 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.config,
             this.hiddenLines,
             this.tooltip,
+            this.overlay,
         );
     }
 
     private updateLegendUI(): void {
-        const labels = this.data.labels || this.data.lines.map((_, i) => `Line ${i + 1}`);
+        if (this.options.legendPosition === "none") {
+            this.legendEl.style.display = "none";
+            return;
+        }
+        this.legendEl.style.display = "";
+        const labels = this.getLabels();
         updateLegend(this.legendEl, labels, this.hiddenLines, this.options.darkMode ?? false, {
             onToggle: (idx) => this.toggleLine(idx),
-        });
+            onRemove: this.options.onLineRemoved ? (idx) => {
+                this.removeLine(idx, true);
+                this.draw();
+                this.updateLegendUI();
+                this.options.onLineRemoved!(idx);
+            } : undefined,
+        }, this.data);
     }
 
     private handleMouseMove = (e: MouseEvent): void => {
@@ -121,7 +145,14 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.config.maxValue,
         );
 
-        updateTooltipDOM(this.tooltipEl, this.tooltip, this.geometry.width, this.options.darkMode ?? false);
+        updateTooltipDOM(
+            this.tooltipEl,
+            this.tooltip,
+            this.geometry.width,
+            this.options.darkMode ?? false,
+            this.data.xLabels,
+            this.options.xAxisLabel,
+        );
         this.draw();
     };
 
@@ -137,12 +168,20 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.data = data;
         this.hiddenLines.clear();
         this.tooltip = null;
+        this.overlay = null;
         this.draw();
         this.updateLegendUI();
     }
 
     setOptions(opts: Partial<LinePlotOptions>): void {
         this.options = { ...this.options, ...opts };
+        if (opts.legendPosition !== undefined) {
+            if (opts.legendPosition === "none") {
+                this.legendEl.style.display = "none";
+            } else {
+                this.legendEl.style.display = "";
+            }
+        }
         this.draw();
         this.updateLegendUI();
     }
@@ -161,6 +200,45 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         }
         this.draw();
         this.updateLegendUI();
+    }
+
+    addLine(line: LinePlotLine): number {
+        if (!this.data.richLines) {
+            // Convert existing lines to richLines
+            this.data.richLines = (this.data.lines ?? []).map((values, i) => ({
+                values,
+                label: this.data.labels?.[i],
+            }));
+        }
+        this.data.richLines.push(line);
+        this.draw();
+        this.updateLegendUI();
+        return this.data.richLines.length - 1;
+    }
+
+    removeLine(lineIdx: number, skipRedraw = false): void {
+        if (this.data.richLines) {
+            this.data.richLines.splice(lineIdx, 1);
+        } else {
+            this.data.lines?.splice(lineIdx, 1);
+            if (this.data.labels) this.data.labels.splice(lineIdx, 1);
+        }
+        // Adjust hidden lines indices
+        const newHidden = new Set<number>();
+        for (const idx of this.hiddenLines) {
+            if (idx < lineIdx) newHidden.add(idx);
+            else if (idx > lineIdx) newHidden.add(idx - 1);
+        }
+        this.hiddenLines = newHidden;
+        if (!skipRedraw) {
+            this.draw();
+            this.updateLegendUI();
+        }
+    }
+
+    setOverlay(line: LinePlotLine | null): void {
+        this.overlay = line;
+        this.draw();
     }
 
     destroy(): void {

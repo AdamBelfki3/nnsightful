@@ -1,6 +1,6 @@
-import type { LinePlotData, LinePlotOptions } from "../../types/line-plot";
+import type { LinePlotData, LinePlotLine, LinePlotOptions } from "../../types/line-plot";
 import { LINE_COLORS } from "./colors";
-import { renderTokenHTML } from "./utils";
+import { renderTokenHTML, resolveLines } from "./utils";
 
 export interface TooltipState {
     visible: boolean;
@@ -42,6 +42,8 @@ export function hitTest(
     maxValue: number,
 ): TooltipState | null {
     const { margin, chartWidth, chartHeight } = geometry;
+    const xRangeStart = options.xRangeStart ?? 0;
+    const effectiveRange = (numLayers - 1) - xRangeStart;
 
     if (
         mouseX < margin.left ||
@@ -52,21 +54,23 @@ export function hitTest(
         return null;
     }
 
-    const labels = data.labels || data.lines.map((_, i) => `Line ${i + 1}`);
+    const resolved = resolveLines(data);
     let nearest: TooltipState | null = null;
     let minDist = Infinity;
     const maxDist = 20;
 
-    for (let lineIdx = 0; lineIdx < data.lines.length; lineIdx++) {
+    for (let lineIdx = 0; lineIdx < resolved.length; lineIdx++) {
         if (hiddenLines.has(lineIdx)) continue;
-        const line = data.lines[lineIdx];
+        const line = resolved[lineIdx];
+        if (line.isOverlay) continue;
 
-        for (let layerIdx = 0; layerIdx < line.length; layerIdx++) {
-            const value = line[layerIdx];
-            const x =
-                numLayers <= 1
-                    ? margin.left + chartWidth / 2
-                    : margin.left + (layerIdx / (numLayers - 1)) * chartWidth;
+        for (let layerIdx = 0; layerIdx < line.values.length; layerIdx++) {
+            const value = line.values[layerIdx];
+            if (value === null) continue;
+
+            const x = effectiveRange <= 0
+                ? margin.left + chartWidth / 2
+                : margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
             const normalized = (value - minValue) / (maxValue - minValue);
             const y = options.invertYAxis
                 ? margin.top + normalized * chartHeight
@@ -82,8 +86,8 @@ export function hitTest(
                     lineIdx,
                     layerIdx,
                     value,
-                    label: labels[lineIdx] || `Line ${lineIdx + 1}`,
-                    color: LINE_COLORS[lineIdx % LINE_COLORS.length],
+                    label: line.label,
+                    color: line.color ?? LINE_COLORS[lineIdx % LINE_COLORS.length],
                 };
             }
         }
@@ -97,6 +101,8 @@ export function updateTooltipDOM(
     tip: TooltipState | null,
     totalWidth: number,
     darkMode: boolean,
+    xLabels?: (string | number)[],
+    xAxisLabel?: string,
 ): void {
     if (!tip) {
         el.style.opacity = "0";
@@ -115,6 +121,8 @@ export function updateTooltipDOM(
         `position:absolute;pointer-events:none;z-index:50;opacity:1;` +
         `left:${tip.x}px;top:${tip.y}px;transform:translate(${tx},-50%);`;
 
+    const layerLabel = xLabels ? String(xLabels[tip.layerIdx] ?? tip.layerIdx) : String(tip.layerIdx);
+
     el.innerHTML = `
         <div style="background:${bg};border:1px solid ${border};border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.12);padding:8px 12px;min-width:120px;backdrop-filter:blur(8px);">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -123,8 +131,8 @@ export function updateTooltipDOM(
             </div>
             <div style="font-size:11px;">
                 <div style="display:flex;justify-content:space-between;gap:16px;">
-                    <span style="color:${muted}">Layer</span>
-                    <span style="font-weight:500;color:${fg}">${tip.layerIdx}</span>
+                    <span style="color:${muted}">${xAxisLabel ?? "Layer"}</span>
+                    <span style="font-weight:500;color:${fg}">${layerLabel}</span>
                 </div>
                 <div style="display:flex;justify-content:space-between;gap:16px;margin-top:2px;">
                     <span style="color:${muted}">Value</span>

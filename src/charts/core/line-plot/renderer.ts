@@ -1,6 +1,7 @@
-import type { LinePlotData, LinePlotOptions } from "../../types/line-plot";
+import type { LinePlotData, LinePlotLine, LinePlotOptions } from "../../types/line-plot";
 import type { ChartGeometry, TooltipState } from "./tooltip";
 import { LINE_COLORS } from "./colors";
+import { resolveLines } from "./utils";
 
 export interface ChartConfig {
     numLayers: number;
@@ -9,22 +10,58 @@ export interface ChartConfig {
     numLines: number;
 }
 
+/** Round to a nice display threshold (used for autoScale) */
+function niceMax(p: number): number {
+    if (p >= 0.95) return 1.0;
+    const niceValues = [0.003, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0];
+    for (const v of niceValues) {
+        if (p <= v) return v;
+    }
+    return 1.0;
+}
+
 export function computeChartConfig(
     data: LinePlotData,
     options: LinePlotOptions,
+    overlay?: LinePlotLine | null,
 ): ChartConfig | null {
-    if (!data.lines || data.lines.length === 0) return null;
+    const resolved = resolveLines(data);
 
-    const numLayers = data.lines[0]?.length || 0;
+    const numLayers = resolved.length > 0
+        ? resolved[0].values.length
+        : overlay?.values.length
+            ?? data.xLabels?.length
+            ?? 0;
+
+    if (numLayers === 0) return null;
+
     const mode = options.mode || "probability";
 
     let minValue = options.minValue;
     let maxValue = options.maxValue;
 
-    if (minValue === undefined || maxValue === undefined) {
-        const allValues = data.lines.flat();
-        const dataMin = Math.min(...allValues);
-        const dataMax = Math.max(...allValues);
+    if (minValue === undefined || maxValue === undefined || options.autoScale) {
+        // Collect all non-null values
+        const allValues: number[] = [];
+        for (const line of resolved) {
+            if (!line.isOverlay) {
+                for (const v of line.values) {
+                    if (v !== null) allValues.push(v);
+                }
+            }
+        }
+        if (overlay) {
+            for (const v of overlay.values) {
+                if (v !== null) allValues.push(v);
+            }
+        }
+
+        if (allValues.length === 0) {
+            return { numLayers, minValue: 0, maxValue: 1, numLines: resolved.length };
+        }
+
+        let dataMin = Infinity, dataMax = -Infinity;
+        for (const v of allValues) { if (v < dataMin) dataMin = v; if (v > dataMax) dataMax = v; }
 
         if (options.centerYAxisAtZero) {
             const absMax = Math.max(Math.abs(dataMin), Math.abs(dataMax));
@@ -35,11 +72,11 @@ export function computeChartConfig(
             if (minValue === undefined) {
                 minValue = mode === "probability" ? 0 : Math.floor(dataMin * 0.9);
             }
-            if (maxValue === undefined) {
+            if (maxValue === undefined || options.autoScale) {
                 if (mode === "rank") {
                     maxValue = Math.ceil(dataMax * 1.1);
                 } else if (mode === "probability") {
-                    maxValue = Math.min(dataMax * 1.1, 1.0);
+                    maxValue = options.autoScale ? niceMax(Math.max(dataMax, 0.001)) : Math.min(dataMax * 1.1, 1.0);
                 } else {
                     maxValue = dataMax * 1.1;
                 }
@@ -47,7 +84,7 @@ export function computeChartConfig(
         }
     }
 
-    return { numLayers, minValue, maxValue, numLines: data.lines.length };
+    return { numLayers, minValue, maxValue, numLines: resolved.length };
 }
 
 export function drawChart(
@@ -58,6 +95,7 @@ export function drawChart(
     config: ChartConfig,
     hiddenLines: Set<number>,
     tooltip: TooltipState | null,
+    overlay?: LinePlotLine | null,
 ): ChartGeometry {
     const ctx = canvas.getContext("2d")!;
 
@@ -78,6 +116,12 @@ export function drawChart(
     const centerYAxisAtZero = options.centerYAxisAtZero ?? false;
     const xAxisLabel = options.xAxisLabel || "Layer";
     const yAxisLabel = options.yAxisLabel || "Probability";
+    let xRangeStart = options.xRangeStart ?? 0;
+    if (xRangeStart >= config.numLayers - 1) {
+        console.warn(`xRangeStart (${xRangeStart}) is >= numLayers-1 (${config.numLayers - 1}), clamping to 0`);
+        xRangeStart = 0;
+    }
+    const showDataPoints = options.showDataPoints ?? true;
 
     const margin = { top: title ? 48 : 24, right: 24, bottom: 56, left: 72 };
     const chartWidth = width - margin.left - margin.right;
@@ -111,10 +155,11 @@ export function drawChart(
     }
 
     // Scale functions
-    const xScale = (layerIdx: number) =>
-        config.numLayers <= 1
-            ? margin.left + chartWidth / 2
-            : margin.left + (layerIdx / (config.numLayers - 1)) * chartWidth;
+    const effectiveRange = (config.numLayers - 1) - xRangeStart;
+    const xScale = (layerIdx: number) => {
+        if (effectiveRange <= 0) return margin.left + chartWidth / 2;
+        return margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
+    };
 
     const yScale = (value: number) => {
         const normalized = (value - config.minValue) / (config.maxValue - config.minValue);
@@ -187,13 +232,21 @@ export function drawChart(
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
 
+    const hasCustomXLabels = data.xLabels && data.xLabels.length > 0;
     const layerStep = Math.max(1, Math.ceil(config.numLayers / 8));
+
     for (let i = 0; i < config.numLayers; i += layerStep) {
-        ctx.fillText(i.toString(), xScale(i), margin.top + chartHeight + 12);
+        const x = xScale(i);
+        if (x < margin.left - 5 || x > margin.left + chartWidth + 5) continue;
+        const label = hasCustomXLabels ? String(data.xLabels![i] ?? i) : i.toString();
+        ctx.fillText(label, x, margin.top + chartHeight + 12);
     }
     if ((config.numLayers - 1) % layerStep !== 0) {
+        const lastLabel = hasCustomXLabels
+            ? String(data.xLabels![config.numLayers - 1] ?? (config.numLayers - 1))
+            : (config.numLayers - 1).toString();
         ctx.fillText(
-            (config.numLayers - 1).toString(),
+            lastLabel,
             xScale(config.numLayers - 1),
             margin.top + chartHeight + 12,
         );
@@ -223,78 +276,106 @@ export function drawChart(
     ctx.fillText(yAxisLabel.toUpperCase(), 0, 0);
     ctx.restore();
 
+    // Resolve lines
+    const resolved = resolveLines(data);
+
+    // Draw helper for a single line path with null-gap support
+    function drawLinePath(
+        values: (number | null)[],
+        color: string,
+        lineWidth: number,
+        dashPattern?: string,
+        alpha?: number,
+    ): void {
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        if (alpha !== undefined) ctx.globalAlpha = alpha;
+        if (dashPattern) {
+            ctx.setLineDash(dashPattern.split(",").map(Number));
+        } else {
+            ctx.setLineDash([]);
+        }
+
+        let penDown = false;
+        for (let layerIdx = 0; layerIdx < values.length; layerIdx++) {
+            const value = values[layerIdx];
+            if (value === null) {
+                penDown = false;
+                continue;
+            }
+            const x = xScale(layerIdx);
+            const y = yScale(value);
+            if (!penDown) {
+                ctx.moveTo(x, y);
+                penDown = true;
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (alpha !== undefined) ctx.globalAlpha = 1;
+    }
+
     // Draw lines
     const fadedColor = darkMode ? "#3f3f46" : "#d4d4d8";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
     // Hidden lines (faded)
-    data.lines.forEach((line, lineIdx) => {
-        if (!hiddenLines.has(lineIdx)) return;
-        ctx.beginPath();
-        ctx.strokeStyle = fadedColor;
-        ctx.lineWidth = 2;
-        ctx.globalAlpha = 0.35;
-        line.forEach((value, layerIdx) => {
-            const x = xScale(layerIdx);
-            const y = yScale(value);
-            if (layerIdx === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-        ctx.globalAlpha = 1;
+    resolved.forEach((line, lineIdx) => {
+        if (!hiddenLines.has(lineIdx) || line.isOverlay) return;
+        drawLinePath(line.values, fadedColor, 2, undefined, 0.35);
     });
 
-    // Active lines
-    data.lines.forEach((line, lineIdx) => {
-        if (hiddenLines.has(lineIdx)) return;
-        const color = LINE_COLORS[lineIdx % LINE_COLORS.length];
+    // Active lines (non-overlay)
+    resolved.forEach((line, lineIdx) => {
+        if (hiddenLines.has(lineIdx) || line.isOverlay) return;
+        const color = line.color ?? LINE_COLORS[lineIdx % LINE_COLORS.length];
 
         // Shadow
-        ctx.beginPath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
-        ctx.globalAlpha = 0.15;
-        line.forEach((value, layerIdx) => {
-            const x = xScale(layerIdx);
-            const y = yScale(value);
-            if (layerIdx === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-        ctx.globalAlpha = 1;
+        drawLinePath(line.values, color, 4, line.dashPattern, 0.15);
 
         // Main line
-        ctx.beginPath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        line.forEach((value, layerIdx) => {
-            const x = xScale(layerIdx);
-            const y = yScale(value);
-            if (layerIdx === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
+        drawLinePath(line.values, color, 2, line.dashPattern);
 
         // Data points
-        line.forEach((value, layerIdx) => {
-            const x = xScale(layerIdx);
-            const y = yScale(value);
-            const isHovered =
-                tooltip?.lineIdx === lineIdx && tooltip?.layerIdx === layerIdx;
+        if (showDataPoints) {
+            line.values.forEach((value, layerIdx) => {
+                if (value === null) return;
+                const x = xScale(layerIdx);
+                const y = yScale(value);
+                const isHovered =
+                    tooltip?.lineIdx === lineIdx && tooltip?.layerIdx === layerIdx;
 
-            ctx.beginPath();
-            ctx.strokeStyle = color;
-            ctx.lineWidth = isHovered ? 2 : 1.5;
-            ctx.arc(x, y, isHovered ? 5 : 3.5, 0, Math.PI * 2);
-            ctx.stroke();
+                ctx.beginPath();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = isHovered ? 2 : 1.5;
+                ctx.arc(x, y, isHovered ? 5 : 3.5, 0, Math.PI * 2);
+                ctx.stroke();
 
-            ctx.beginPath();
-            ctx.fillStyle = darkMode ? "#18181b" : "#ffffff";
-            ctx.arc(x, y, isHovered ? 3.5 : 2.5, 0, Math.PI * 2);
-            ctx.fill();
-        });
+                ctx.beginPath();
+                ctx.fillStyle = darkMode ? "#18181b" : "#ffffff";
+                ctx.arc(x, y, isHovered ? 3.5 : 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
     });
+
+    // Overlay lines from richLines
+    resolved.forEach((line, lineIdx) => {
+        if (!line.isOverlay || hiddenLines.has(lineIdx)) return;
+        const color = line.color ?? "#999";
+        drawLinePath(line.values, color, 1.5, line.dashPattern ?? "4,2", 0.7);
+    });
+
+    // External overlay (from setOverlay)
+    if (overlay) {
+        const color = overlay.color ?? "#999";
+        drawLinePath(overlay.values, color, 1.5, overlay.dashPattern ?? "4,2", 0.7);
+        // No data points for overlay
+    }
 
     return geometry;
 }

@@ -6,8 +6,9 @@ export function generateStyles(uid: string): string {
     return `
         #${uid} {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 20px 0; padding: 0; position: relative;
+            margin: 0; padding: 0; position: relative;
             -webkit-user-select: none; user-select: none;
+            display: flex; flex-direction: column; height: 100%;
         }
         #${uid} .ll-title { font-size: var(--ll-title-size, 20px); font-weight: 600; margin-bottom: 8px; padding: 2px 0; }
         #${uid} .color-mode-btn {
@@ -38,7 +39,7 @@ export function generateStyles(uid: string): string {
             background: #f5f5f5; font-size: calc(var(--ll-content-size, 14px) * 0.9); position: relative;
         }
         #${uid} .corner-hdr { padding: 4px 8px; text-align: right; font-weight: 500; color: #666; background: white; position: relative; }
-        #${uid} .chart-container { margin-top: 8px; background: #fafafa; border-radius: 4px; padding: 8px 0; }
+        #${uid} .chart-container { margin-top: 8px; background: transparent; border-radius: 4px; padding: 8px 0; flex: 1; min-height: 120px; }
         #${uid} .chart-container svg { display: block; margin: 0; padding: 0; }
         #${uid} .popup {
             display: none; position: absolute; background: white; border: 1px solid #ddd;
@@ -117,7 +118,7 @@ export function generateStyles(uid: string): string {
         #${uid}.dark-mode tr:has(.input-token:hover) .input-token { background: #4a4a00 !important; color: #fff !important; }
         #${uid}.dark-mode .layer-hdr { background: #2d2d2d; color: #aaa; }
         #${uid}.dark-mode .corner-hdr { background: #1e1e1e; color: #aaa; }
-        #${uid}.dark-mode .chart-container { background: #252525; }
+        #${uid}.dark-mode .chart-container { background: transparent; }
         #${uid}.dark-mode .popup { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
         #${uid}.dark-mode .popup-header { border-bottom-color: #444; }
         #${uid}.dark-mode .popup-header code { background: #3d3d3d; color: #e0e0e0; }

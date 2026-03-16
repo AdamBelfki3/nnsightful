@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback } from "react";
 import type { LogitLensData, LogitLensUIState } from "../types/logit-lens";
-import { LogitLensCore } from "../core/logit-lens";
+import { LogitLensCore } from "../visualizations/logit-lens";
 
 interface LogitLensWidgetProps {
     data: LogitLensData | null;
@@ -95,6 +95,8 @@ export function LogitLensWidget({
             ref={containerRef}
             className={className}
             style={{
+                width: "100%",
+                height: "100%",
                 // @ts-expect-error CSS custom properties
                 "--ll-title-size": titleSize,
                 "--ll-content-size": contentSize,

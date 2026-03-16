@@ -17,11 +17,13 @@
  */
 
 import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
+import type { LinePlotLine } from "../../types/line-plot";
 import { normalizeData } from "./normalize";
-import { generateUid, escapeHtml, niceMax, formatPct, visualizeSpaces, hasSimilarTokensInList } from "./utils";
+import { generateUid, escapeHtml, visualizeSpaces, hasSimilarTokensInList } from "./utils";
 import { PALETTE, LINE_STYLES, probToColor } from "./colors";
 import { injectStyles, applyDarkMode } from "./styles";
 import { createInitialState, emitEvent, addEventListener, removeEventListener, type WidgetState } from "./state";
+import { LinePlotCore } from "../../core/line-plot";
 
 interface CreateWidgetResult {
     widget: LogitLensWidgetInterface;
@@ -68,7 +70,7 @@ export function createWidget(
             </div>
             <div class="resize-hint" id="${uid}_resize_hint">drag column borders to resize</div>
             <div class="chart-container" id="${uid}_chart_container">
-                <svg id="${uid}_chart" height="140"></svg>
+                <div id="${uid}_chart_div" style="width:100%;height:100%;min-height:120px;"></div>
             </div>
             <div class="popup" id="${uid}_popup">
                 <span class="popup-close" id="${uid}_popup_close">&times;</span>
@@ -111,13 +113,16 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     const state = createInitialState(uiState, nLayers, nPositions, defaultNextToken);
 
+    // LinePlotCore instance (created lazily after DOM is ready)
+    let linePlot: LinePlotCore | null = null;
+
     // ═══════════════════════════════════════════════════════════════
     // DOM HELPERS
     // ═══════════════════════════════════════════════════════════════
     const dom = {
         widget: () => document.getElementById(uid)!,
         table: () => document.getElementById(uid + "_table")!,
-        chart: () => document.getElementById(uid + "_chart")!,
+        chartDiv: () => document.getElementById(uid + "_chart_div")!,
         popup: () => document.getElementById(uid + "_popup")!,
         popupClose: () => document.getElementById(uid + "_popup_close")!,
         popupLayer: () => document.getElementById(uid + "_popup_layer")!,
@@ -185,21 +190,6 @@ export function createWidget(
 
     function getActualChartHeight(): number {
         return state.chartHeight !== null ? state.chartHeight : getDefaultChartHeight();
-    }
-
-    function getChartMargin() {
-        const fontSize = getContentFontSizePx();
-        return {
-            top: Math.max(10, fontSize * 1.2),
-            right: 8,
-            bottom: Math.max(25, fontSize * 1.5),
-            left: 10,
-        };
-    }
-
-    function getChartInnerHeight(): number {
-        const m = getChartMargin();
-        return getActualChartHeight() - m.top - m.bottom;
     }
 
     function isDarkMode(): boolean {
@@ -419,19 +409,119 @@ export function createWidget(
         return { stride, indices };
     }
 
-    function updateChartDimensions(): number {
+    function updateChartDimensions(): void {
         const table = dom.table();
         const tableWidth = table.offsetWidth;
-        const svg = dom.chart();
-        svg.setAttribute("width", String(tableWidth));
-        svg.setAttribute("height", String(getActualChartHeight()));
-        const firstInputCell = table.querySelector(".input-token");
-        if (firstInputCell) {
-            const tableRect = table.getBoundingClientRect();
-            const inputCellRect = firstInputCell.getBoundingClientRect();
-            return tableWidth - (inputCellRect.right - tableRect.left);
+        const chartContainer = dom.chartContainer();
+        // Match chart container width to table width
+        chartContainer.style.width = tableWidth + "px";
+    }
+
+    // Stable reference for current positions used by onLineRemoved
+    let currentPositionsToShow: number[] = [];
+
+    // Stable onLineRemoved callback — only created once, references currentPositionsToShow
+    const stableOnLineRemoved = (lineIdx: number) => {
+        // Map lineIdx back to group
+        let idx = 0;
+        for (let pi = 0; pi < currentPositionsToShow.length; pi++) {
+            for (let gi = 0; gi < state.pinnedGroups.length; gi++) {
+                const traj = getGroupTrajectory(state.pinnedGroups[gi], currentPositionsToShow[pi]);
+                if (!traj) continue;
+                if (idx === lineIdx) {
+                    state.pinnedGroups.splice(gi, 1);
+                    if (state.lastPinnedGroupIndex >= state.pinnedGroups.length) {
+                        state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
+                    }
+                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
+                    return;
+                }
+                idx++;
+            }
         }
-        return tableWidth - state.inputTokenWidth;
+    };
+
+    /**
+     * Update LinePlotCore with current trajectory data.
+     * Replaces the old SVG-based drawAllTrajectories.
+     */
+    function updateChart(
+        hoverTrajectory: number[] | null,
+        hoverColor: string | null,
+        hoverLabel: string | null,
+        pos: number,
+    ): void {
+        updateChartDimensions();
+
+        const isRankMode = state.trajectoryMetric === "rank";
+        currentPositionsToShow = state.pinnedRows.length > 0
+            ? state.pinnedRows.map((pr) => pr.pos)
+            : [pos];
+
+        // Build richLines from pinned groups
+        const richLines: LinePlotLine[] = [];
+        currentPositionsToShow.forEach((showPos) => {
+            const lineStyle = getLineStyleForRow(showPos);
+            state.pinnedGroups.forEach((group) => {
+                const traj = getGroupTrajectory(group, showPos);
+                if (!traj) return;
+                const values = traj.map(v => v === null ? null : v) as (number | null)[];
+                let label = getGroupLabel(group);
+                if (state.pinnedRows.length > 1) {
+                    label += " (" + visualizeSpaces(widgetData.tokens[showPos]) + ")";
+                }
+                richLines.push({
+                    values,
+                    label,
+                    color: group.color,
+                    dashPattern: lineStyle.dash || undefined,
+                    removable: true,
+                });
+            });
+        });
+
+        // Build xLabels from layer indices
+        const xLabels = widgetData.layers.map((l: number) => l);
+
+        const plotData = {
+            lines: [] as number[][],
+            richLines,
+            xLabels,
+        };
+
+        const plotOptions: Record<string, unknown> = {
+            darkMode: isDarkMode(),
+            mode: isRankMode ? "rank" as const : "probability" as const,
+            invertYAxis: isRankMode,
+            autoScale: true,
+            legendPosition: "right" as const,
+            showDataPoints: true,
+            xRangeStart: state.plotMinLayer,
+            xAxisLabel: "Layer",
+            yAxisLabel: isRankMode ? "Rank" : "Probability",
+            transparentBackground: true,
+        };
+
+        if (!linePlot) {
+            const chartDiv = dom.chartDiv();
+            linePlot = new LinePlotCore(chartDiv, plotData, { ...plotOptions, onLineRemoved: stableOnLineRemoved } as any);
+        } else {
+            linePlot.setData(plotData);
+            linePlot.setOptions(plotOptions as any);
+        }
+
+        // Set overlay for hover trajectory
+        if (hoverTrajectory && hoverLabel) {
+            linePlot.setOverlay({
+                values: hoverTrajectory,
+                label: hoverLabel,
+                color: hoverColor || "#999",
+                dashPattern: "4,2",
+                isOverlay: true,
+            });
+        } else {
+            linePlot.setOverlay(null);
+        }
     }
 
     function buildTable(cellWidth: number, visibleLayerIndices: number[], maxRows: number | null, stride?: number) {
@@ -590,8 +680,7 @@ export function createWidget(
         attachCellListeners();
         attachResizeListeners();
 
-        const chartInnerWidth = updateChartDimensions();
-        drawAllTrajectories(null, null, null, chartInnerWidth, state.currentHoverPos);
+        updateChart(null, null, null, state.currentHoverPos);
         updateTitle();
 
         const hint = dom.resizeHint();
@@ -816,25 +905,23 @@ export function createWidget(
 
             cell.addEventListener("mouseenter", function () {
                 state.currentHoverPos = pos;
-                const chartInnerWidth = updateChartDimensions();
                 if (isInputToken) {
                     const bestToken = findHighestProbToken(pos, 2, 0.05);
                     if (bestToken && findGroupForToken(bestToken) < 0) {
                         const traj = getTrajectoryForToken(bestToken, pos);
-                        drawAllTrajectories(traj, "#999", bestToken, chartInnerWidth, pos);
+                        updateChart(traj, "#999", bestToken, pos);
                     } else {
-                        drawAllTrajectories(null, null, null, chartInnerWidth, pos);
+                        updateChart(null, null, null, pos);
                     }
                 } else {
                     const li = cell.dataset.li ? parseInt(cell.dataset.li) : 0;
                     const cellData = widgetData.cells[pos][li] || widgetData.cells[pos][0];
-                    drawAllTrajectories(cellData.trajectory, "#999", cellData.token, chartInnerWidth, pos);
+                    updateChart(cellData.trajectory, "#999", cellData.token, pos);
                 }
             });
 
             cell.addEventListener("mouseleave", function () {
-                const chartInnerWidth = updateChartDimensions();
-                drawAllTrajectories(null, null, null, chartInnerWidth, state.currentHoverPos);
+                updateChart(null, null, null, state.currentHoverPos);
             });
         });
 
@@ -947,13 +1034,11 @@ export function createWidget(
             item.addEventListener("mouseenter", function () {
                 document.querySelectorAll("#" + uid + "_popup_content .topk-item").forEach((it) => it.classList.remove("active"));
                 item.classList.add("active");
-                const cw = updateChartDimensions();
-                drawAllTrajectories(tokData.trajectory, "#999", tokData.token, cw, pos);
+                updateChart(tokData.trajectory, "#999", tokData.token, pos);
             });
             item.addEventListener("mouseleave", function () {
                 item.classList.remove("active");
-                const cw = updateChartDimensions();
-                drawAllTrajectories(null, null, null, cw, pos);
+                updateChart(null, null, null, pos);
             });
             item.addEventListener("click", function (e) {
                 e.stopPropagation();
@@ -971,8 +1056,7 @@ export function createWidget(
             popup.style.left = (rect.left - containerRect.left - popupRect.width - gap) + "px";
         }
         showOverlay(closePopup);
-        const cw = updateChartDimensions();
-        drawAllTrajectories(cellData.trajectory, "#999", cellData.token, cw, pos);
+        updateChart(cellData.trajectory, "#999", cellData.token, pos);
     }
 
     function togglePinnedTrajectory(token: string, addToGroup: boolean): boolean {
@@ -1051,8 +1135,8 @@ export function createWidget(
         });
     }
 
-    // Document-level listeners for drag handling
-    document.addEventListener("mousemove", (e) => {
+    // Document-level listeners for drag handling (named for cleanup in destroy)
+    const handleColResizeMove = (e: MouseEvent) => {
         if (!state.colResizeDrag.active) return;
         const delta = e.clientX - state.colResizeDrag.startX;
         if (state.colResizeDrag.type === "input") {
@@ -1071,9 +1155,10 @@ export function createWidget(
                 notifyLinkedWidgets();
             }
         }
-    });
+    };
+    document.addEventListener("mousemove", handleColResizeMove);
 
-    document.addEventListener("mouseup", () => {
+    const handleGlobalMouseUp = () => {
         if (state.colResizeDrag.active) {
             state.colResizeDrag.active = false;
             document.querySelectorAll("#" + uid + " .resize-handle-input, #" + uid + " .resize-handle").forEach((h) => h.classList.remove("dragging"));
@@ -1085,30 +1170,34 @@ export function createWidget(
             state.rightEdgeDrag.active = false;
             dom.resizeRight().classList.remove("dragging");
         }
-    });
+    };
+    document.addEventListener("mouseup", handleGlobalMouseUp);
 
-    document.addEventListener("mousemove", (e) => {
+    const handleXAxisDragMove = (e: MouseEvent) => {
         if (!state.xAxisDrag.active) return;
         const delta = e.clientY - state.xAxisDrag.startY;
         const newHeight = Math.max(minChartHeight, Math.min(maxChartHeight, state.xAxisDrag.startHeight + delta));
         if (Math.abs(newHeight - getActualChartHeight()) > 2) {
             state.chartHeight = newHeight;
-            dom.chart().setAttribute("height", String(state.chartHeight));
-            const cw = updateChartDimensions();
-            drawAllTrajectories(null, null, null, cw, state.currentHoverPos);
+            const chartContainer = dom.chartContainer();
+            chartContainer.style.flex = "none";
+            chartContainer.style.height = newHeight + "px";
+            updateChart(null, null, null, state.currentHoverPos);
         }
-    });
+    };
+    document.addEventListener("mousemove", handleXAxisDragMove);
 
-    document.addEventListener("mousemove", (e) => {
+    const handleYAxisDragMove = (e: MouseEvent) => {
         if (!state.yAxisDrag.active) return;
         const delta = e.clientX - state.yAxisDrag.startX;
         state.inputTokenWidth = Math.max(40, Math.min(200, state.yAxisDrag.startWidth + delta));
         const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
         buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
         notifyLinkedWidgets();
-    });
+    };
+    document.addEventListener("mousemove", handleYAxisDragMove);
 
-    document.addEventListener("mousemove", (e) => {
+    const handlePlotMinLayerDragMove = (e: MouseEvent) => {
         if (!state.plotMinLayerDrag.active) return;
         const delta = e.clientX - state.plotMinLayerDrag.startX;
         const dr = state.plotMinLayerDrag.dotRadius;
@@ -1121,42 +1210,43 @@ export function createWidget(
         newMinLayer = Math.max(0, Math.min(layerIdx - 0.1, newMinLayer));
         if (Math.abs(newMinLayer - state.plotMinLayer) > 0.01) {
             state.plotMinLayer = newMinLayer;
-            const cw = updateChartDimensions();
-            drawAllTrajectories(null, null, null, cw, state.currentHoverPos);
+            updateChart(null, null, null, state.currentHoverPos);
         }
-    });
+    };
+    document.addEventListener("mousemove", handlePlotMinLayerDragMove);
 
     // Bottom resize handle
-    (function () {
+    let bottomDragActive = false, bottomStartY = 0, bottomStartMaxRows: number | null = null, bottomMeasuredRowHeight = 20;
+    {
         const handle = dom.resizeBottom();
         const table = dom.table();
-        let isDragging = false, startY = 0, startMaxRows: number | null = null, measuredRowHeight = 20;
-
         handle.addEventListener("mousedown", (e: MouseEvent) => {
             closePopup();
-            isDragging = true;
-            startY = e.clientY;
-            startMaxRows = state.currentMaxRows;
+            bottomDragActive = true;
+            bottomStartY = e.clientY;
+            bottomStartMaxRows = state.currentMaxRows;
             const rows = table.querySelectorAll("tr");
-            if (rows.length >= 2) measuredRowHeight = rows[1].getBoundingClientRect().height;
+            if (rows.length >= 2) bottomMeasuredRowHeight = rows[1].getBoundingClientRect().height;
             handle.classList.add("dragging");
             e.preventDefault();
             e.stopPropagation();
         });
-        document.addEventListener("mousemove", (e) => {
-            if (!isDragging) return;
-            const delta = e.clientY - startY;
-            const rowDelta = Math.round(delta / measuredRowHeight);
-            const totalTokens = widgetData.tokens.length;
-            const startRows = startMaxRows === null ? totalTokens : startMaxRows;
-            let newMaxRows: number | null = Math.max(1, Math.min(totalTokens, startRows + rowDelta));
-            if (newMaxRows >= totalTokens) newMaxRows = null;
-            if (newMaxRows !== state.currentMaxRows) buildTable(state.currentCellWidth, state.currentVisibleIndices, newMaxRows);
-        });
-        document.addEventListener("mouseup", () => {
-            if (isDragging) { isDragging = false; handle.classList.remove("dragging"); }
-        });
-    })();
+    }
+    const handleBottomResizeMove = (e: MouseEvent) => {
+        if (!bottomDragActive) return;
+        const delta = e.clientY - bottomStartY;
+        const rowDelta = Math.round(delta / bottomMeasuredRowHeight);
+        const totalTokens = widgetData.tokens.length;
+        const startRows = bottomStartMaxRows === null ? totalTokens : bottomStartMaxRows;
+        let newMaxRows: number | null = Math.max(1, Math.min(totalTokens, startRows + rowDelta));
+        if (newMaxRows >= totalTokens) newMaxRows = null;
+        if (newMaxRows !== state.currentMaxRows) buildTable(state.currentCellWidth, state.currentVisibleIndices, newMaxRows);
+    };
+    document.addEventListener("mousemove", handleBottomResizeMove);
+    const handleBottomResizeUp = () => {
+        if (bottomDragActive) { bottomDragActive = false; dom.resizeBottom().classList.remove("dragging"); }
+    };
+    document.addEventListener("mouseup", handleBottomResizeUp);
 
     // Right edge resize handle
     (function () {
@@ -1176,7 +1266,7 @@ export function createWidget(
         });
     })();
 
-    document.addEventListener("mousemove", (e) => {
+    const handleRightEdgeResizeMove = (e: MouseEvent) => {
         if (!state.rightEdgeDrag.active) return;
         const delta = e.clientX - state.rightEdgeDrag.startX;
         const actualContainerWidth = getActualContainerWidth();
@@ -1212,506 +1302,15 @@ export function createWidget(
             buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
             notifyLinkedWidgets();
         }
-    });
+    };
+    document.addEventListener("mousemove", handleRightEdgeResizeMove);
 
     // ═══════════════════════════════════════════════════════════════
-    // CHART RENDERING (SVG)
+    // CHART RENDERING (now delegated to LinePlotCore via updateChart above)
+    // The old SVG-based drawAllTrajectories and drawSingleTrajectory have been
+    // replaced by updateChart() which uses LinePlotCore for canvas rendering.
     // ═══════════════════════════════════════════════════════════════
 
-    function drawAllTrajectories(hoverTrajectory: number[] | null, hoverColor: string | null, hoverLabel: string | null, chartInnerWidth: number, pos: number) {
-        const svg = dom.chart();
-        svg.innerHTML = "";
-        const table = dom.table();
-        const firstInputCell = table.querySelector(".input-token");
-        if (!firstInputCell) return;
-        const tableRect = table.getBoundingClientRect();
-        const inputCellRect = firstInputCell.getBoundingClientRect();
-        const actualInputRight = inputCellRect.right - tableRect.left;
-
-        const legendG = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        legendG.setAttribute("class", "legend-area");
-        svg.appendChild(legendG);
-
-        const chartMargin = getChartMargin();
-        const chartInnerHeight = getChartInnerHeight();
-
-        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        g.setAttribute("transform", "translate(" + actualInputRight + "," + chartMargin.top + ")");
-        svg.appendChild(g);
-
-        // X-axis drag for chart height resize
-        const xAxisGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        xAxisGroup.style.cursor = "row-resize";
-        const xAxisHoverBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        xAxisHoverBg.setAttribute("x", "0"); xAxisHoverBg.setAttribute("y", String(chartInnerHeight - 2));
-        xAxisHoverBg.setAttribute("width", String(chartInnerWidth)); xAxisHoverBg.setAttribute("height", "4");
-        xAxisHoverBg.setAttribute("fill", "rgba(33, 150, 243, 0.3)");
-        xAxisHoverBg.style.display = "none";
-        xAxisGroup.appendChild(xAxisHoverBg);
-
-        const xAxisHitTarget = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        xAxisHitTarget.setAttribute("x", "0"); xAxisHitTarget.setAttribute("y", String(chartInnerHeight - 4));
-        xAxisHitTarget.setAttribute("width", String(chartInnerWidth)); xAxisHitTarget.setAttribute("height", "8");
-        xAxisHitTarget.setAttribute("fill", "transparent");
-        xAxisGroup.appendChild(xAxisHitTarget);
-
-        const xAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        xAxis.setAttribute("x1", "0"); xAxis.setAttribute("y1", String(chartInnerHeight));
-        xAxis.setAttribute("x2", String(chartInnerWidth)); xAxis.setAttribute("y2", String(chartInnerHeight));
-        xAxis.setAttribute("stroke", "#ccc");
-        xAxisGroup.appendChild(xAxis);
-        g.appendChild(xAxisGroup);
-
-        xAxisGroup.addEventListener("mouseenter", () => { xAxisHoverBg.style.display = "block"; });
-        xAxisGroup.addEventListener("mouseleave", () => { xAxisHoverBg.style.display = "none"; });
-        xAxisGroup.addEventListener("mousedown", (e) => {
-            closePopup();
-            state.xAxisDrag = { active: true, startY: e.clientY, startHeight: getActualChartHeight() };
-            e.preventDefault();
-            e.stopPropagation();
-        });
-
-        const fontScale = getContentFontSizePx() / 10;
-        const dotRadius = 3 * fontScale;
-        const strokeWidth = 2 * fontScale;
-        const strokeWidthHover = 1.5 * fontScale;
-        const labelMargin = chartMargin.right;
-        const usableWidth = chartInnerWidth - labelMargin;
-
-        function layerToXForLabels(layerIdx: number): number {
-            if (nLayers <= 1) return usableWidth / 2;
-            const visibleLayerRange = (nLayers - 1) - state.plotMinLayer;
-            if (visibleLayerRange <= 0) return usableWidth / 2;
-            return dotRadius + ((layerIdx - state.plotMinLayer) / visibleLayerRange) * (usableWidth - 2 * dotRadius);
-        }
-
-        // Clip paths
-        const clipId = uid + "_chart_clip";
-        const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-        const clipPath = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
-        clipPath.setAttribute("id", clipId);
-        const clipFontSize = getContentFontSizePx();
-        const clipLeftExtent = 10 + clipFontSize * 5;
-        const clipTopExtent = clipFontSize * 1.2;
-        const clipRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        clipRect.setAttribute("x", String(-clipLeftExtent));
-        clipRect.setAttribute("y", String(-clipTopExtent));
-        clipRect.setAttribute("width", String(chartInnerWidth + clipLeftExtent));
-        clipRect.setAttribute("height", String(chartInnerHeight + clipTopExtent + chartMargin.bottom + clipFontSize * 0.5));
-        clipPath.appendChild(clipRect);
-        defs.appendChild(clipPath);
-        svg.appendChild(defs);
-        g.setAttribute("clip-path", "url(#" + clipId + ")");
-
-        const trajClipId = uid + "_traj_clip";
-        const trajClipPath = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
-        trajClipPath.setAttribute("id", trajClipId);
-        const trajClipRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        trajClipRect.setAttribute("x", "0");
-        trajClipRect.setAttribute("y", String(-clipTopExtent));
-        trajClipRect.setAttribute("width", String(chartInnerWidth));
-        trajClipRect.setAttribute("height", String(chartInnerHeight + clipTopExtent + 10));
-        trajClipPath.appendChild(trajClipRect);
-        defs.appendChild(trajClipPath);
-
-        const trajG = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        trajG.setAttribute("clip-path", "url(#" + trajClipId + ")");
-        g.appendChild(trajG);
-
-        // X-axis tick labels
-        const minTickGap = 24;
-        let labelStride = 1;
-        if (state.currentVisibleIndices.length >= 2) {
-            const firstX = layerToXForLabels(state.currentVisibleIndices[0]);
-            const secondX = layerToXForLabels(state.currentVisibleIndices[1]);
-            const pixelsPerIndex = Math.abs(secondX - firstX);
-            if (pixelsPerIndex >= 1 && pixelsPerIndex < minTickGap) labelStride = Math.ceil(minTickGap / pixelsPerIndex);
-        }
-
-        const lastIdx = state.currentVisibleIndices.length - 1;
-        const showAtIndex = new Set<number>();
-        for (let i = lastIdx; i >= 0; i -= labelStride) showAtIndex.add(i);
-        showAtIndex.add(0);
-        if (labelStride > 1) {
-            for (let i = lastIdx; i > 0; i -= labelStride) {
-                if (i < labelStride) { showAtIndex.delete(i); break; }
-            }
-        }
-
-        state.currentVisibleIndices.forEach((layerIdx, i) => {
-            if (!showAtIndex.has(i)) return;
-            const x = layerToXForLabels(layerIdx);
-            if (state.plotMinLayer > 0 && x < 8) return;
-            const isLast = i === lastIdx;
-            const isDraggable = !isLast && layerIdx > 0;
-
-            const tickGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-            const fontSize = getContentFontSizePx();
-
-            if (isDraggable) {
-                const hoverBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-                const bgWidth = Math.max(16, fontSize * 1.6);
-                hoverBg.setAttribute("x", String(x - bgWidth / 2));
-                hoverBg.setAttribute("y", String(chartInnerHeight + 2));
-                hoverBg.setAttribute("width", String(bgWidth));
-                hoverBg.setAttribute("height", String(fontSize + 2));
-                hoverBg.setAttribute("rx", "2");
-                hoverBg.setAttribute("fill", "rgba(33, 150, 243, 0.3)");
-                hoverBg.style.display = "none";
-                hoverBg.classList.add("tick-hover-bg");
-                tickGroup.appendChild(hoverBg);
-            }
-
-            const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            label.setAttribute("x", String(x));
-            label.setAttribute("y", String(chartInnerHeight + 2 + fontSize));
-            label.setAttribute("text-anchor", "middle");
-            label.style.fontSize = "var(--ll-content-size, 14px)";
-            label.setAttribute("fill", isDarkMode() ? "#aaa" : "#666");
-            label.textContent = String(widgetData.layers[layerIdx]);
-            tickGroup.appendChild(label);
-
-            if (isDraggable) {
-                tickGroup.style.cursor = "col-resize";
-                tickGroup.setAttribute("data-layer-idx", String(layerIdx));
-                tickGroup.addEventListener("mouseenter", () => {
-                    const bg = tickGroup.querySelector(".tick-hover-bg") as SVGElement;
-                    if (bg) bg.style.display = "block";
-                });
-                tickGroup.addEventListener("mouseleave", () => {
-                    const bg = tickGroup.querySelector(".tick-hover-bg") as SVGElement;
-                    if (bg) bg.style.display = "none";
-                });
-                tickGroup.addEventListener("mousedown", (e) => {
-                    closePopup();
-                    state.plotMinLayerDrag = {
-                        active: true, startX: e.clientX, startMinLayer: state.plotMinLayer,
-                        layerIdx, layerXAtStart: layerToXForLabels(layerIdx),
-                        usableWidth, dotRadius,
-                    };
-                    e.preventDefault();
-                    e.stopPropagation();
-                });
-            }
-
-            g.appendChild(tickGroup);
-        });
-
-        // Y-axis
-        const yAxisGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        yAxisGroup.style.cursor = "col-resize";
-        const yAxisHoverBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        yAxisHoverBg.setAttribute("x", "-2"); yAxisHoverBg.setAttribute("y", "0");
-        yAxisHoverBg.setAttribute("width", "4"); yAxisHoverBg.setAttribute("height", String(chartInnerHeight));
-        yAxisHoverBg.setAttribute("fill", "rgba(33, 150, 243, 0.3)");
-        yAxisHoverBg.style.display = "none";
-        yAxisGroup.appendChild(yAxisHoverBg);
-
-        const yAxisHitTarget = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        yAxisHitTarget.setAttribute("x", "-4"); yAxisHitTarget.setAttribute("y", "0");
-        yAxisHitTarget.setAttribute("width", "8"); yAxisHitTarget.setAttribute("height", String(chartInnerHeight));
-        yAxisHitTarget.setAttribute("fill", "transparent");
-        yAxisGroup.appendChild(yAxisHitTarget);
-
-        const yAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        yAxis.setAttribute("x1", "0"); yAxis.setAttribute("y1", "0");
-        yAxis.setAttribute("x2", "0"); yAxis.setAttribute("y2", String(chartInnerHeight));
-        yAxis.setAttribute("stroke", "#ccc");
-        yAxisGroup.appendChild(yAxis);
-        g.appendChild(yAxisGroup);
-
-        yAxisGroup.addEventListener("mouseenter", () => { yAxisHoverBg.style.display = "block"; });
-        yAxisGroup.addEventListener("mouseleave", () => { yAxisHoverBg.style.display = "none"; });
-        yAxisGroup.addEventListener("mousedown", (e) => {
-            closePopup();
-            state.yAxisDrag = { active: true, startX: e.clientX, startWidth: state.inputTokenWidth };
-            e.preventDefault();
-            e.stopPropagation();
-        });
-
-        const yLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        yLabel.setAttribute("x", String(-chartInnerHeight / 2));
-        yLabel.setAttribute("y", String(-actualInputRight + 15));
-        yLabel.setAttribute("text-anchor", "middle");
-        yLabel.style.fontSize = "var(--ll-content-size, 14px)";
-        yLabel.setAttribute("fill", "#666");
-        yLabel.setAttribute("transform", "rotate(-90)");
-        yLabel.textContent = state.trajectoryMetric === "rank" ? "Rank" : "Probability";
-        svg.appendChild(yLabel);
-
-        // Collect values for scale
-        const positionsToShow: number[] = state.pinnedRows.length > 0
-            ? state.pinnedRows.map((pr) => pr.pos)
-            : [pos];
-
-        const allValues: number[] = [];
-        positionsToShow.forEach((showPos) => {
-            state.pinnedGroups.forEach((group) => {
-                const traj = getGroupTrajectory(group, showPos);
-                if (traj) traj.forEach((v) => { if (v !== null) allValues.push(v as number); });
-            });
-        });
-        if (hoverTrajectory) hoverTrajectory.forEach((v) => { if (v !== null) allValues.push(v); });
-
-        const isRankMode = state.trajectoryMetric === "rank";
-        let maxValue: number;
-        if (isRankMode) {
-            maxValue = Math.max(allValues.length > 0 ? Math.max(...allValues) : 10, 2);
-        } else {
-            maxValue = niceMax(allValues.length > 0 ? Math.max(...allValues, 0.001) : 0.001);
-        }
-
-        // Y-axis scale tick
-        const hasData = state.pinnedGroups.length > 0 || (hoverTrajectory && hoverLabel);
-        if (hasData) {
-            const tickLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            tickLine.setAttribute("x1", "-3"); tickLine.setAttribute("y1", "0");
-            tickLine.setAttribute("x2", "3"); tickLine.setAttribute("y2", "0");
-            tickLine.setAttribute("stroke", "#999");
-            g.appendChild(tickLine);
-
-            const tickFontSize = getContentFontSizePx() * 0.9;
-            const tickLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            tickLabel.setAttribute("x", "-5");
-            tickLabel.setAttribute("y", String(tickFontSize * 0.35));
-            tickLabel.setAttribute("text-anchor", "end");
-            tickLabel.style.fontSize = "calc(var(--ll-content-size, 14px) * 0.9)";
-            tickLabel.setAttribute("fill", isDarkMode() ? "#aaa" : "#666");
-            tickLabel.textContent = isRankMode ? "1" : formatPct(maxValue);
-            g.appendChild(tickLabel);
-        }
-
-        // Legend
-        let legendEntryCount = 0;
-        if (state.pinnedRows.length > 1 && state.pinnedGroups.length === 1) {
-            legendEntryCount = 1 + state.pinnedRows.length;
-        } else {
-            legendEntryCount = state.pinnedGroups.length;
-        }
-        if (hoverTrajectory && hoverLabel) legendEntryCount += 1;
-
-        const legendEntryHeight = 14 * fontScale;
-        const legendTextX = 25 * fontScale;
-        const legendTextY = 4 * fontScale;
-        const legendCloseX = -12 * fontScale;
-        const legendIndent = 18 * fontScale;
-        const legendTotalHeight = legendEntryCount * legendEntryHeight;
-        let legendY = chartMargin.top + Math.max(10 * fontScale, (chartInnerHeight - legendTotalHeight) / 2);
-
-        // Draw trajectories
-        positionsToShow.forEach((showPos) => {
-            const lineStyle = getLineStyleForRow(showPos);
-            state.pinnedGroups.forEach((group) => {
-                const traj = getGroupTrajectory(group, showPos);
-                drawSingleTrajectory(trajG, traj, group.color, maxValue, getGroupLabel(group), false, chartInnerWidth, lineStyle.dash, isRankMode);
-            });
-        });
-
-        // Legend entries
-        if (state.pinnedRows.length > 1 && state.pinnedGroups.length === 1) {
-            const group = state.pinnedGroups[0];
-            const groupLabel = getGroupLabel(group);
-
-            const titleItem = document.createElementNS("http://www.w3.org/2000/svg", "g");
-            titleItem.setAttribute("transform", "translate(5, " + legendY + ")");
-            const titleText = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            titleText.setAttribute("x", "0"); titleText.setAttribute("y", String(legendTextY));
-            titleText.style.fontSize = "var(--ll-content-size, 14px)";
-            titleText.setAttribute("fill", group.color);
-            titleText.setAttribute("font-weight", "600");
-            titleText.textContent = groupLabel;
-            titleItem.appendChild(titleText);
-            legendG.appendChild(titleItem);
-            legendY += legendEntryHeight;
-
-            state.pinnedRows.forEach((pr, prIdx) => {
-                const rowToken = widgetData.tokens[pr.pos];
-                const prLineStyle = pr.lineStyle;
-                const legendItem = document.createElementNS("http://www.w3.org/2000/svg", "g");
-                legendItem.setAttribute("transform", "translate(" + legendIndent + ", " + legendY + ")");
-                legendItem.style.cursor = "pointer";
-
-                const closeBtn = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                closeBtn.setAttribute("class", "legend-close");
-                closeBtn.setAttribute("x", String(legendCloseX)); closeBtn.setAttribute("y", "4");
-                closeBtn.style.fontSize = "var(--ll-title-size, 20px)";
-                closeBtn.setAttribute("fill", "#999");
-                closeBtn.style.display = "none";
-                closeBtn.textContent = "\u00d7";
-                legendItem.appendChild(closeBtn);
-
-                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                line.setAttribute("x1", "0"); line.setAttribute("y1", "0");
-                line.setAttribute("x2", String(20 * fontScale)); line.setAttribute("y2", "0");
-                line.setAttribute("stroke", group.color);
-                line.setAttribute("stroke-width", String(strokeWidth));
-                if (prLineStyle.dash) {
-                    line.setAttribute("stroke-dasharray", prLineStyle.dash.split(",").map((v) => parseFloat(v) * fontScale).join(","));
-                }
-                legendItem.appendChild(line);
-
-                const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                text.setAttribute("x", String(legendTextX)); text.setAttribute("y", String(legendTextY));
-                text.style.fontSize = "var(--ll-content-size, 14px)";
-                text.setAttribute("fill", isDarkMode() ? "#ddd" : "#333");
-                text.textContent = visualizeSpaces(rowToken);
-                legendItem.appendChild(text);
-
-                legendItem.addEventListener("mouseenter", () => { closeBtn.style.display = "block"; });
-                legendItem.addEventListener("mouseleave", () => { closeBtn.style.display = "none"; });
-                closeBtn.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    state.pinnedRows.splice(prIdx, 1);
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                });
-
-                legendG.appendChild(legendItem);
-                legendY += legendEntryHeight;
-            });
-        } else {
-            state.pinnedGroups.forEach((group, groupIdx) => {
-                const groupLabel = getGroupLabel(group);
-                const legendItem = document.createElementNS("http://www.w3.org/2000/svg", "g");
-                legendItem.setAttribute("transform", "translate(" + legendIndent + ", " + legendY + ")");
-                legendItem.style.cursor = "pointer";
-
-                const closeBtn = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                closeBtn.setAttribute("class", "legend-close");
-                closeBtn.setAttribute("x", String(legendCloseX)); closeBtn.setAttribute("y", "4");
-                closeBtn.style.fontSize = "var(--ll-title-size, 20px)";
-                closeBtn.setAttribute("fill", "#999");
-                closeBtn.style.display = "none";
-                closeBtn.textContent = "\u00d7";
-                legendItem.appendChild(closeBtn);
-
-                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                line.setAttribute("x1", "0"); line.setAttribute("y1", "0");
-                line.setAttribute("x2", String(15 * fontScale)); line.setAttribute("y2", "0");
-                line.setAttribute("stroke", group.color);
-                line.setAttribute("stroke-width", String(strokeWidth));
-                legendItem.appendChild(line);
-
-                const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                text.setAttribute("x", String(20 * fontScale)); text.setAttribute("y", String(legendTextY));
-                text.style.fontSize = "var(--ll-content-size, 14px)";
-                text.setAttribute("fill", isDarkMode() ? "#ddd" : "#333");
-                text.textContent = groupLabel;
-                legendItem.appendChild(text);
-
-                legendItem.addEventListener("mouseenter", () => { closeBtn.style.display = "block"; });
-                legendItem.addEventListener("mouseleave", () => { closeBtn.style.display = "none"; });
-                closeBtn.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    state.pinnedGroups.splice(groupIdx, 1);
-                    if (state.lastPinnedGroupIndex >= state.pinnedGroups.length) state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                });
-
-                legendG.appendChild(legendItem);
-                legendY += legendEntryHeight;
-            });
-        }
-
-        // Hover trajectory
-        if (hoverTrajectory && hoverLabel) {
-            drawSingleTrajectory(trajG, hoverTrajectory, hoverColor || "#999", maxValue, hoverLabel, true, chartInnerWidth, "", isRankMode);
-
-            const legendItem = document.createElementNS("http://www.w3.org/2000/svg", "g");
-            legendItem.setAttribute("transform", "translate(" + legendIndent + ", " + legendY + ")");
-
-            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            line.setAttribute("x1", "0"); line.setAttribute("y1", "0");
-            line.setAttribute("x2", String(15 * fontScale)); line.setAttribute("y2", "0");
-            line.setAttribute("stroke", hoverColor || "#999");
-            line.setAttribute("stroke-width", String(strokeWidthHover));
-            line.setAttribute("stroke-dasharray", (4 * fontScale) + "," + (2 * fontScale));
-            line.style.opacity = "0.7";
-            legendItem.appendChild(line);
-
-            const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            text.setAttribute("x", String(20 * fontScale)); text.setAttribute("y", String(legendTextY));
-            text.style.fontSize = "var(--ll-content-size, 14px)";
-            text.setAttribute("fill", isDarkMode() ? "#aaa" : "#666");
-            text.textContent = visualizeSpaces(hoverLabel);
-            legendItem.appendChild(text);
-
-            legendG.appendChild(legendItem);
-        }
-    }
-
-    function drawSingleTrajectory(g: SVGGElement, trajectory: (number | null)[] | null, color: string, maxValue: number, label: string, isHover: boolean, chartInnerWidth: number, dashPattern: string, isRankMode: boolean) {
-        if (!trajectory || trajectory.length === 0) return;
-
-        const chartMarginVal = getChartMargin();
-        const chartInnerHeight = getChartInnerHeight();
-        const fontScaleVal = getContentFontSizePx() / 10;
-        const dr = (isHover ? 2 : 3) * fontScaleVal;
-        const sw = (isHover ? 1.5 : 2) * fontScaleVal;
-        const labelMarginVal = chartMarginVal.right;
-        const usableWidthVal = chartInnerWidth - labelMarginVal;
-
-        function layerToX(layerIdx: number): number {
-            if (nLayers <= 1) return usableWidthVal / 2;
-            const visibleLayerRange = (nLayers - 1) - state.plotMinLayer;
-            if (visibleLayerRange <= 0) return usableWidthVal / 2;
-            return dr + ((layerIdx - state.plotMinLayer) / visibleLayerRange) * (usableWidthVal - 2 * dr);
-        }
-
-        function valueToY(value: number | null): number | null {
-            if (value === null) return null;
-            if (isRankMode) return ((value - 1) / (maxValue - 1)) * chartInnerHeight;
-            return chartInnerHeight - (value / maxValue) * chartInnerHeight;
-        }
-
-        const pathEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        if (isHover) pathEl.style.opacity = "0.7";
-
-        let d = "";
-        let firstPoint = true;
-        trajectory.forEach((p, layerIdx) => {
-            if (p === null) return;
-            const x = layerToX(layerIdx);
-            const y = valueToY(p);
-            if (y === null) return;
-            d += (firstPoint ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
-            firstPoint = false;
-        });
-
-        if (d) {
-            pathEl.setAttribute("d", d);
-            pathEl.setAttribute("fill", "none");
-            pathEl.setAttribute("stroke", color);
-            pathEl.setAttribute("stroke-width", String(sw));
-            if (isHover) {
-                pathEl.setAttribute("stroke-dasharray", (4 * fontScaleVal) + "," + (2 * fontScaleVal));
-            } else if (dashPattern) {
-                pathEl.setAttribute("stroke-dasharray", dashPattern.split(",").map((v) => parseFloat(v) * fontScaleVal).join(","));
-            }
-            g.appendChild(pathEl);
-        }
-
-        state.currentVisibleIndices.forEach((layerIdx) => {
-            const p = trajectory[layerIdx];
-            if (p === null) return;
-            const x = layerToX(layerIdx);
-            const y = valueToY(p);
-            if (y === null) return;
-
-            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-            circle.setAttribute("cx", x.toFixed(1));
-            circle.setAttribute("cy", y.toFixed(1));
-            circle.setAttribute("r", String(dr));
-            circle.setAttribute("fill", color);
-            if (isHover) circle.style.opacity = "0.7";
-
-            const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-            title.textContent = isRankMode
-                ? (label || "") + " L" + widgetData.layers[layerIdx] + ": rank " + p
-                : (label || "") + " L" + widgetData.layers[layerIdx] + ": " + (p * 100).toFixed(2) + "%";
-            circle.appendChild(title);
-            g.appendChild(circle);
-        });
-    }
 
     // ═══════════════════════════════════════════════════════════════
     // WIDGET LINKING + STATE SERIALIZATION
@@ -1772,8 +1371,7 @@ export function createWidget(
     dom.widget().addEventListener("mousedown", (e) => { if (e.shiftKey) e.preventDefault(); });
     dom.widget().addEventListener("mouseleave", () => {
         state.currentHoverPos = widgetData.tokens.length - 1;
-        const cw = updateChartDimensions();
-        drawAllTrajectories(null, null, null, cw, state.currentHoverPos);
+        updateChart(null, null, null, state.currentHoverPos);
     });
 
     const colorPicker = dom.colorPicker();
@@ -1795,8 +1393,26 @@ export function createWidget(
     const result = computeVisibleLayers(state.currentCellWidth, containerWidth);
     buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
 
-    const svg = dom.chart();
-    if (svg) svg.setAttribute("height", String(getActualChartHeight()));
+    // If user previously set a specific chart height, apply it; otherwise let flex fill
+    if (state.chartHeight !== null) {
+        const chartContainer = dom.chartContainer();
+        chartContainer.style.flex = "none";
+        chartContainer.style.height = state.chartHeight + "px";
+    }
+
+    // Observe container resizes (window resize, panel resize, etc.)
+    let lastContainerWidth = containerWidth;
+    const containerResizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const newWidth = Math.round(entry.contentRect.width);
+        if (newWidth === lastContainerWidth || newWidth === 0) return;
+        lastContainerWidth = newWidth;
+        const r = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
+        buildTable(state.currentCellWidth, r.indices, state.currentMaxRows, r.stride);
+        notifyLinkedWidgets();
+    });
+    containerResizeObserver.observe(container);
 
     applyDarkMode(dom.widget(), isDarkMode());
 
@@ -1868,6 +1484,17 @@ export function createWidget(
         off: (eventName: string, callback: (data: unknown) => void) => { removeEventListener(state, eventName, callback); },
         destroy: () => {
             styleObserver.disconnect();
+            containerResizeObserver.disconnect();
+            // Remove all document-level event listeners
+            document.removeEventListener("mousemove", handleColResizeMove);
+            document.removeEventListener("mouseup", handleGlobalMouseUp);
+            document.removeEventListener("mousemove", handleXAxisDragMove);
+            document.removeEventListener("mousemove", handleYAxisDragMove);
+            document.removeEventListener("mousemove", handlePlotMinLayerDragMove);
+            document.removeEventListener("mousemove", handleBottomResizeMove);
+            document.removeEventListener("mouseup", handleBottomResizeUp);
+            document.removeEventListener("mousemove", handleRightEdgeResizeMove);
+            if (linePlot) { linePlot.destroy(); linePlot = null; }
             if (container) container.innerHTML = "";
         },
     };
