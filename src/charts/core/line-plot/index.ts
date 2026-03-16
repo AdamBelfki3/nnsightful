@@ -113,8 +113,12 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.legendEl.style.display = "none";
             return;
         }
-        this.legendEl.style.display = "";
         const labels = this.getLabels();
+        if (labels.length === 0) {
+            this.legendEl.style.display = "none";
+            return;
+        }
+        this.legendEl.style.display = "";
         updateLegend(this.legendEl, labels, this.hiddenLines, this.options.darkMode ?? false, {
             onToggle: (idx) => this.toggleLine(idx),
             onRemove: this.options.onLineRemoved ? (idx) => {
