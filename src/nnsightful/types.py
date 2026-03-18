@@ -9,16 +9,15 @@ class LogitLensMeta(BaseModel):
 class LogitLensData(BaseModel):
     meta: LogitLensMeta
     layers: list[int]
-    input: list[str]  # Input tokens as strings
+    input: list[str]  # Input tokens as strings (always dense, all tokens)
+    positions: list[int] | None = None  # Computed position indices; None = all
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
-    topk: list[list[list[str]]]  # [layer][position] -> list of top-k tokens
+    topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
-    def display(self, return_fig: bool = False, **kwargs):
+    def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
-        result = display_logit_lens(self, **kwargs)
-        if return_fig:
-            return result
+        return display_logit_lens(self, **kwargs)
 
 
 # class ActivationsPatchingMeta(BaseModel):
@@ -28,12 +27,12 @@ class LogitLensData(BaseModel):
 
 class ActivationPatchingData(BaseModel):
     # meta: ActivationsPatchingMeta
-    lines: list[list[float]]  # Each inner list is probabilities for one token across all layers
-    ranks: list[list[int]]  # Each inner list is ranks for one token across all layers
-    prob_diffs: list[list[float]]  # Each inner list is probability differences for one token across all layers
+    lines: list[list[float]]  # [token][layer] probabilities
+    ranks: list[list[int]]  # [token][layer] ranks
+    prob_diffs: list[list[float]]  # [token][layer] prob diffs
     tokenLabels: list[str]  # Token text labels for each line
 
-    def display(self, tokens: list[int] | None = None, return_fig: bool = False, **kwargs):
+    def display(self, tokens: list[int] | None = None, **kwargs):
         from nnsightful.viz import display_line_plot
         # Default: show only src_pred and tgt_pred (first 2 lines)
         indices = tokens if tokens is not None else [0, 1]
@@ -43,6 +42,4 @@ class ActivationPatchingData(BaseModel):
         }
         if "options" not in kwargs:
             kwargs["options"] = {"mode": "probability"}
-        result = display_line_plot(sliced, **kwargs)
-        if return_fig:
-            return result
+        return display_line_plot(sliced, **kwargs)
