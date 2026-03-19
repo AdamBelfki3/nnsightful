@@ -101,12 +101,11 @@ class TestLogitLensEndToEnd:
         for pos_tracked in data.tracked:
             assert token_0_str in pos_tracked
 
-    def test_no_selection_raises(self):
+    def test_no_selection_raises(self, model):
         """Must specify at least one of top_k or top_p."""
-        from unittest.mock import MagicMock
-
+        raw = logit_lens._run(model, PROMPT, layers=[0])
         with pytest.raises(AssertionError, match="top_k or top_p"):
-            logit_lens(MagicMock(), "test", top_k=None, top_p=None)
+            logit_lens._format(raw, top_k=None, top_p=None)
 
     def test_json_roundtrip(self, model):
         """LogitLensData should survive JSON serialization."""
@@ -125,3 +124,42 @@ class TestLogitLensEndToEnd:
             for trajectory in pos_tracked.values():
                 for prob in trajectory:
                     assert 0.0 <= prob <= 1.0
+
+
+class TestLogitLensRunFormat:
+    """Tests for the _run / _format split."""
+
+    def test_run_returns_expected_keys(self, model):
+        raw = logit_lens._run(model, PROMPT)
+        assert "input_tokens" in raw
+        assert "all_logits" in raw
+        assert "tokenizer" in raw
+        assert "layer_indices" in raw
+        assert "model_name" in raw
+        assert isinstance(raw["input_tokens"], list)
+        assert isinstance(raw["layer_indices"], list)
+        assert len(raw["all_logits"]) == len(raw["layer_indices"])
+
+    def test_run_with_sparse_layers(self, model):
+        raw = logit_lens._run(model, PROMPT, layers=[0, -1])
+        assert len(raw["layer_indices"]) == 2
+        assert len(raw["all_logits"]) == 2
+
+    def test_format_from_raw(self, model):
+        """_format should produce LogitLensData from a _run result."""
+        raw = logit_lens._run(model, PROMPT, layers=[0, 1])
+        data = logit_lens._format(raw, top_k=3)
+        assert isinstance(data, LogitLensData)
+        assert len(data.layers) == 2
+        assert len(data.input) == len(raw["input_tokens"])
+
+    def test_run_then_format_matches_call(self, model):
+        """_run + _format should produce the same result as __call__."""
+        raw = logit_lens._run(model, PROMPT, layers=[0, -1])
+        data_split = logit_lens._format(raw, top_k=3, include_entropy=False)
+        data_direct = logit_lens(model, PROMPT, layers=[0, -1], top_k=3, include_entropy=False)
+        assert data_split.layers == data_direct.layers
+        assert data_split.input == data_direct.input
+        assert len(data_split.tracked) == len(data_direct.tracked)
+        assert data_split.entropy is None
+        assert data_direct.entropy is None

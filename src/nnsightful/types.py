@@ -1,4 +1,15 @@
+from abc import abstractmethod
+
 from pydantic import BaseModel
+
+
+class ToolData(BaseModel):
+    """Abstract base for nnsightful tool output data."""
+
+    @abstractmethod
+    def display(self, **kwargs):
+        """Display a visualization of the data."""
+        ...
 
 
 class LogitLensMeta(BaseModel):
@@ -6,7 +17,8 @@ class LogitLensMeta(BaseModel):
     timestamp: str
     model: str
 
-class LogitLensData(BaseModel):
+
+class LogitLensData(ToolData):
     meta: LogitLensMeta
     layers: list[int]
     input: list[str]  # Input tokens as strings (always dense, all tokens)
@@ -17,16 +29,11 @@ class LogitLensData(BaseModel):
 
     def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
+
         return display_logit_lens(self, **kwargs)
 
 
-# class ActivationsPatchingMeta(BaseModel):
-#     version: int = 1
-#     timestamp: str
-#     model: str
-
-class ActivationPatchingData(BaseModel):
-    # meta: ActivationsPatchingMeta
+class ActivationPatchingData(ToolData):
     lines: list[list[float]]  # [token][layer] probabilities
     ranks: list[list[int]]  # [token][layer] ranks
     prob_diffs: list[list[float]]  # [token][layer] prob diffs
@@ -34,6 +41,7 @@ class ActivationPatchingData(BaseModel):
 
     def display(self, tokens: list[int] | None = None, **kwargs):
         from nnsightful.viz import display_line_plot
+
         # Default: show only src_pred and tgt_pred (first 2 lines)
         indices = tokens if tokens is not None else [0, 1]
         sliced = {

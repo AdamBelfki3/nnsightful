@@ -106,3 +106,43 @@ class TestActivationPatchingEndToEnd:
         restored = ActivationPatchingData(**json.loads(json_str))
         assert restored.tokenLabels == data.tokenLabels
         assert len(restored.lines) == len(data.lines)
+
+
+class TestActivationPatchingRunFormat:
+    """Tests for the _run / _format split."""
+
+    def test_run_returns_expected_keys(self, model):
+        raw = activation_patching._run(
+            model, SRC_PROMPT, TGT_PROMPT,
+            src_pos=[3], tgt_pos=[3], tgt_freeze=[3],
+        )
+        assert "tokenizer" in raw
+        assert "src_pred" in raw
+        assert "clean_pred" in raw
+        assert "patched_logits" in raw
+        assert "clean_logits" in raw
+
+    def test_format_from_raw(self, model):
+        """_format should produce ActivationPatchingData from a _run result."""
+        raw = activation_patching._run(
+            model, SRC_PROMPT, TGT_PROMPT,
+            src_pos=[3], tgt_pos=[3], tgt_freeze=[3],
+        )
+        data = activation_patching._format(raw)
+        assert isinstance(data, ActivationPatchingData)
+        assert len(data.lines) > 0
+        assert len(data.tokenLabels) == len(data.lines)
+
+    def test_run_then_format_matches_call(self, model):
+        """_run + _format should produce the same result as __call__."""
+        raw = activation_patching._run(
+            model, SRC_PROMPT, TGT_PROMPT,
+            src_pos=[3], tgt_pos=[3], tgt_freeze=[3],
+        )
+        data_split = activation_patching._format(raw)
+        data_direct = activation_patching(
+            model, SRC_PROMPT, TGT_PROMPT,
+            src_pos=[3], tgt_pos=[3], tgt_freeze=[3],
+        )
+        assert data_split.tokenLabels == data_direct.tokenLabels
+        assert len(data_split.lines) == len(data_direct.lines)
