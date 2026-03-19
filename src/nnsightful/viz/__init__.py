@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import uuid
 from pathlib import Path
 from IPython.display import HTML, display as ipython_display
 from pydantic import BaseModel
@@ -66,15 +67,59 @@ def display_logit_lens(
         ui_state_dict["darkMode"] = True
         ui_state_json = json.dumps(ui_state_dict)
 
+    container_id = f"ll_{uuid.uuid4().hex[:12]}"
     html = f"""
-    <div id="ll_container" style="width:{width};min-height:{height};"></div>
+    <div id="{container_id}" style="width:{width};min-height:{height};"></div>
     <script>
     (function() {{
         {js}
-        var container = document.getElementById('ll_container');
+        var container = document.getElementById('{container_id}');
         var data = {data_json};
         var uiState = {ui_state_json};
         window.LogitLensWidget(container, data, uiState);
+    }})();
+    </script>
+    """
+
+    result = HTML(html)
+    ipython_display(result)
+    return result
+
+
+def display_activation_patching(
+    data: dict,
+    options: dict | None = None,
+    width: str = "80%",
+    height: str = "400px",
+) -> HTML:
+    """
+    Display an Activation Patching visualization in a Jupyter notebook.
+
+    The widget includes built-in mode switching buttons (Probability, Prob Δ, Rank).
+
+    Args:
+        data: ActivationPatchingData dict with 'lines', 'ranks', 'prob_diffs', 'tokenLabels'.
+        options: Optional ActivationPatchingOptions dict (mode, darkMode, title, etc.).
+        width: CSS width of the container.
+        height: CSS height of the container.
+
+    Returns:
+        IPython.display.HTML object.
+    """
+    js = _get_standalone_js()
+    data_json = json.dumps(_to_dict(data))
+    options_json = json.dumps(options or {})
+
+    container_id = f"ap_{uuid.uuid4().hex[:12]}"
+    html = f"""
+    <div id="{container_id}" style="width:{width};min-height:{height};"></div>
+    <script>
+    (function() {{
+        {js}
+        var container = document.getElementById('{container_id}');
+        var data = {data_json};
+        var options = {options_json};
+        window.ActivationPatchingWidget(container, data, options);
     }})();
     </script>
     """
@@ -106,12 +151,13 @@ def display_line_plot(
     data_json = json.dumps(_to_dict(data))
     options_json = json.dumps(options or {})
 
+    container_id = f"lp_{uuid.uuid4().hex[:12]}"
     html = f"""
-    <div id="lp_container" style="width:{width};height:{height};"></div>
+    <div id="{container_id}" style="width:{width};height:{height};"></div>
     <script>
     (function() {{
         {js}
-        var container = document.getElementById('lp_container');
+        var container = document.getElementById('{container_id}');
         var data = {data_json};
         var options = {options_json};
         window.LinePlotWidget(container, data, options);

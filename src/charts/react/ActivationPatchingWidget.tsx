@@ -7,6 +7,7 @@ interface ActivationPatchingWidgetProps {
     mode?: ActivationPatchingMode;
     darkMode?: boolean;
     title?: string;
+    transparentBackground?: boolean;
 }
 
 export function ActivationPatchingWidget({
@@ -14,6 +15,7 @@ export function ActivationPatchingWidget({
     mode = "probability",
     darkMode = false,
     title,
+    transparentBackground = false,
 }: ActivationPatchingWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const coreRef = useRef<ActivationPatchingCore | null>(null);
@@ -21,7 +23,7 @@ export function ActivationPatchingWidget({
     useEffect(() => {
         if (!containerRef.current) return;
         containerRef.current.innerHTML = "";
-        coreRef.current = new ActivationPatchingCore(containerRef.current, data, { mode, darkMode, title });
+        coreRef.current = new ActivationPatchingCore(containerRef.current, data, { mode, darkMode, title, transparentBackground });
         return () => {
             coreRef.current?.destroy();
             coreRef.current = null;
@@ -29,6 +31,7 @@ export function ActivationPatchingWidget({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [data]);
 
+    // Sync mode from external prop (e.g. if parent still controls mode)
     useEffect(() => {
         coreRef.current?.setMode(mode);
     }, [mode]);

@@ -15,4 +15,5 @@ export interface ActivationPatchingOptions {
     mode?: ActivationPatchingMode;
     darkMode?: boolean;
     title?: string;
+    transparentBackground?: boolean;
 }
