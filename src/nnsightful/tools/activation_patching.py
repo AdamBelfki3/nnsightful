@@ -31,6 +31,10 @@ class ActivationPatchingTool(Tool):
         n_layers = model.num_layers
         src_acts: list[list[torch.Tensor]] = []
         clean_hs: list[torch.Tensor] = []
+        src_pred = None
+        clean_pred = None
+        clean_logits = None
+        patched_logits_per_layer = None
 
         with model.session(remote=remote, backend=backend) as session:
             with model.trace(src_prompt):
