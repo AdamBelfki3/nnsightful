@@ -15,6 +15,37 @@ import { HeatmapTableCore } from "./core/heatmap-table";
 import type { ActivationPatchingOptions } from "./types/activation-patching";
 import { ActivationPatchingCore } from "./visualizations/activation-patching";
 
+/**
+ * Auto-detect dark mode from the notebook/browser environment.
+ * Checks (in order): JupyterLab theme attribute, Colab body class,
+ * computed background luminance of the container, system preference.
+ */
+function detectDarkMode(container?: HTMLElement | null): boolean {
+    // JupyterLab: data-jp-theme-light on <body>
+    if (typeof document !== "undefined" && document.body?.dataset?.jpThemeLight !== undefined) {
+        return document.body.dataset.jpThemeLight === "false";
+    }
+    // Google Colab: .dark class on <body>
+    if (typeof document !== "undefined" && document.body?.classList?.contains("dark")) {
+        return true;
+    }
+    // Computed background luminance of the output cell
+    if (container) {
+        const bg = getComputedStyle(container).backgroundColor;
+        const match = bg.match(/\d+/g);
+        if (match && match.length >= 3) {
+            const [r, g, b] = match.map(Number);
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            return luminance < 0.5;
+        }
+    }
+    // System preference
+    if (typeof window !== "undefined" && window.matchMedia) {
+        return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+    return false;
+}
+
 // Backward-compatible factory functions
 function createLogitLensWidget(
     container: HTMLElement | string,
@@ -39,7 +70,11 @@ function createLinePlotWidget(
         console.error("Container not found:", container);
         return null;
     }
-    return new LinePlotCore(el, data, options);
+    const resolvedOptions: Partial<LinePlotOptions> = {
+        darkMode: detectDarkMode(el),
+        ...options,
+    };
+    return new LinePlotCore(el, data, resolvedOptions);
 }
 
 function createHeatmapTableWidget(
@@ -75,7 +110,12 @@ function createActivationPatchingWidget(
         console.error("Container not found:", container);
         return null;
     }
-    return new ActivationPatchingCore(el, data, options);
+    // Auto-detect dark mode if not explicitly set
+    const resolvedOptions: ActivationPatchingOptions = {
+        darkMode: detectDarkMode(el),
+        ...options,
+    };
+    return new ActivationPatchingCore(el, data, resolvedOptions);
 }
 
 // Expose on window for backward compatibility

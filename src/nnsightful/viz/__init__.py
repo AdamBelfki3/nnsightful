@@ -139,7 +139,6 @@ def display_logit_lens(
     data = _densify_logit_lens_data(data)
     js = _get_standalone_js()
     data_json = json.dumps(data)
-    container_id = f"ll-{uuid.uuid4().hex}"
 
     ui_state_dict = ui_state or {}
     if dark_mode is not None:
@@ -175,13 +174,14 @@ def display_logit_lens(
             new MutationObserver(function() { disableEmptyRows(container); })
                 .observe(container, { childList: true, subtree: true });"""
 
+    container_id = f"ll_{uuid.uuid4().hex[:12]}"
     html = f"""
     <div id="{container_id}" style="width:{width};min-height:{height};"></div>
     <script>
-    {js}
     (function() {{
+        {js}
+        var container = document.getElementById('{container_id}');
         var data = {data_json};
-        var container = document.getElementById("{container_id}");
         if (typeof LogitLensWidget !== "undefined") {{
             LogitLensWidget(container, data, {ui_state_json});
             {disable_js}
@@ -212,6 +212,49 @@ def _validate_line_plot_data(data: dict) -> None:
         )
 
 
+def display_activation_patching(
+    data: dict,
+    options: dict | None = None,
+    width: str = "80%",
+    height: str = "400px",
+) -> HTML:
+    """
+    Display an Activation Patching visualization in a Jupyter notebook.
+
+    The widget includes built-in mode switching buttons (Probability, Prob Δ, Rank).
+
+    Args:
+        data: ActivationPatchingData dict with 'lines', 'ranks', 'prob_diffs', 'tokenLabels'.
+        options: Optional ActivationPatchingOptions dict (mode, darkMode, title, etc.).
+        width: CSS width of the container.
+        height: CSS height of the container.
+
+    Returns:
+        IPython.display.HTML object.
+    """
+    js = _get_standalone_js()
+    data_json = json.dumps(_to_dict(data))
+    options_json = json.dumps(options or {})
+
+    container_id = f"ap_{uuid.uuid4().hex[:12]}"
+    html = f"""
+    <div id="{container_id}" style="width:{width};min-height:{height};"></div>
+    <script>
+    (function() {{
+        {js}
+        var container = document.getElementById('{container_id}');
+        var data = {data_json};
+        var options = {options_json};
+        window.ActivationPatchingWidget(container, data, options);
+    }})();
+    </script>
+    """
+
+    result = HTML(html)
+    ipython_display(result)
+    return result
+
+
 def display_line_plot(
     data: dict | BaseModel,
     options: dict | None = None,
@@ -235,15 +278,15 @@ def display_line_plot(
     js = _get_standalone_js()
     data_json = json.dumps(data)
     options_json = json.dumps(options or {})
-    container_id = f"lp-{uuid.uuid4().hex}"
 
+    container_id = f"lp_{uuid.uuid4().hex[:12]}"
     html = f"""
     <div id="{container_id}" style="width:{width};height:{height};"></div>
     <script>
-    {js}
     (function() {{
+        {js}
+        var container = document.getElementById('{container_id}');
         var data = {data_json};
-        var container = document.getElementById("{container_id}");
         if (typeof LinePlotWidget !== "undefined") {{
             var options = {options_json};
             LinePlotWidget(container, data, options);

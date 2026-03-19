@@ -56,8 +56,8 @@ class TestDisplayLogitLens:
     def test_unique_container_ids(self, _mock):
         h1 = display_logit_lens(_make_logit_lens_data(), return_html=True)
         h2 = display_logit_lens(_make_logit_lens_data(), return_html=True)
-        id1 = re.search(r'id="(ll-[a-f0-9]+)"', h1.data)
-        id2 = re.search(r'id="(ll-[a-f0-9]+)"', h2.data)
+        id1 = re.search(r'id="(ll_[a-f0-9]+)"', h1.data)
+        id2 = re.search(r'id="(ll_[a-f0-9]+)"', h2.data)
         assert id1 and id2
         assert id1.group(1) != id2.group(1)
 
@@ -102,8 +102,8 @@ class TestDisplayLinePlot:
     def test_unique_container_ids(self, _mock):
         h1 = display_line_plot(_make_line_plot_data(), return_html=True)
         h2 = display_line_plot(_make_line_plot_data(), return_html=True)
-        id1 = re.search(r'id="(lp-[a-f0-9]+)"', h1.data)
-        id2 = re.search(r'id="(lp-[a-f0-9]+)"', h2.data)
+        id1 = re.search(r'id="(lp_[a-f0-9]+)"', h1.data)
+        id2 = re.search(r'id="(lp_[a-f0-9]+)"', h2.data)
         assert id1 and id2
         assert id1.group(1) != id2.group(1)
 

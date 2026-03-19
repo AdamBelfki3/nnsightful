@@ -39,15 +39,19 @@ class ActivationPatchingData(ToolData):
     prob_diffs: list[list[float]]  # [token][layer] prob diffs
     tokenLabels: list[str]  # Token text labels for each line
 
-    def display(self, tokens: list[int] | None = None, **kwargs):
-        from nnsightful.viz import display_line_plot
+    def display(self, tokens: list[int] | None = None, return_fig: bool = False, **kwargs):
+        from nnsightful.viz import display_activation_patching
 
         # Default: show only src_pred and tgt_pred (first 2 lines)
-        indices = tokens if tokens is not None else [0, 1]
+        n = len(self.lines)
+        indices = tokens if tokens is not None else list(range(min(2, n)))
+        indices = [i for i in indices if i < n]
         sliced = {
             "lines": [self.lines[i] for i in indices],
-            "labels": [self.tokenLabels[i] for i in indices],
+            "ranks": [self.ranks[i] for i in indices],
+            "prob_diffs": [self.prob_diffs[i] for i in indices],
+            "tokenLabels": [self.tokenLabels[i] for i in indices],
         }
-        if "options" not in kwargs:
-            kwargs["options"] = {"mode": "probability"}
-        return display_line_plot(sliced, **kwargs)
+        result = display_activation_patching(sliced, **kwargs)
+        if return_fig:
+            return result
