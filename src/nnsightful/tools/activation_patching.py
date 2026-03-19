@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Tuple
 import torch
 
 from ..types import ActivationPatchingData
@@ -12,7 +12,8 @@ def activation_patching(
     tgt_freeze: List[int],
     backend = None,
     remote: bool = True,
-):
+    return_format: bool = True
+) -> Union[str | ActivationPatchingData | Tuple]:
     layers = len(model.model.layers)
 
     with model.session(remote=remote, backend=backend) as session:
@@ -34,7 +35,7 @@ def activation_patching(
 
             src_pred = model.lm_head.output[0, -1].argmax(dim=-1).save()
 
-        clean_hs = list()
+        clean_hs: List[torch.Tensor] = list()
         with model.trace(tgt_prompt):
             for l_idx in range(layers):
                 clean_hs.append(model.model.layers[l_idx].output)
@@ -42,7 +43,7 @@ def activation_patching(
             clean_pred = model.lm_head.output[0, -1].argmax(dim=-1).save()
             clean_logits = torch.nn.functional.softmax(model.lm_head.output[0, -1], dim=-1).save()
 
-        patched_logits_per_layer = list().save()
+        patched_logits_per_layer: List[torch.Tensor] = list().save()
         for l_idx in range(layers):
             with model.trace(tgt_prompt):
                 for layer_to_skip in range(l_idx+1):
@@ -70,6 +71,15 @@ def activation_patching(
 
     if remote and backend is not None:
         return session.backend.job_id
+
+    if return_format:
+        return format_data(
+            model.tokenizer,
+            src_pred,
+            clean_pred,
+            patched_logits_per_layer,
+            clean_logits
+        )
 
     return src_pred, clean_pred, patched_logits_per_layer, clean_logits
 

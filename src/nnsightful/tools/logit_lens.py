@@ -1,8 +1,9 @@
-from typing import TYPE_CHECKING
-import torch
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Tuple, Union
 
-from ..types import LogitLensMeta, LogitLensData
+import torch
+
+from ..types import LogitLensData, LogitLensMeta
 
 if TYPE_CHECKING:
     from nnsight import LanguageModel
@@ -10,10 +11,10 @@ if TYPE_CHECKING:
 def logit_lens(
     prompt: str,
     model: "LanguageModel",
-    remote: bool,
     backend = None,
-):
-
+    remote: bool = True,
+    return_format: bool = True
+) -> Union[str | LogitLensData | Tuple]:
     with model.trace(
         prompt,
         remote=remote,
@@ -40,6 +41,14 @@ def logit_lens(
 
     if remote and backend is not None:
         return tracer.backend.job_id
+
+    if return_format:
+        return format_data(
+            input_tokens,
+            all_logits,
+            model.tokenizer,
+            model_name=model.repo_id
+        )
 
     return input_tokens, all_logits
 
