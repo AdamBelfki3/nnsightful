@@ -34,7 +34,7 @@ class ActivationPatchingTool(Tool):
         src_pred = None
         clean_pred = None
         clean_logits = None
-        patched_logits_per_layer = None
+        patched_logits = None
 
         with model.session(remote=remote, backend=backend) as session:
             with model.trace(src_prompt):
@@ -52,12 +52,12 @@ class ActivationPatchingTool(Tool):
 
             with model.trace(tgt_prompt):
                 for l_idx in range(n_layers):
-                    clean_hs.append(model.layers_output[l_idx])
+                    clean_hs.append(model.layers[l_idx].output)
 
                 clean_pred = model.logits[0, -1].argmax(dim=-1).save()
                 clean_logits = F.softmax(model.logits[0, -1], dim=-1).save()
 
-            patched_logits_per_layer = list().save()
+            patched_logits = list().save()
             for l_idx in range(n_layers):
                 with model.trace(tgt_prompt):
                     for layer_to_skip in range(l_idx + 1):
@@ -72,9 +72,11 @@ class ActivationPatchingTool(Tool):
                         else:
                             for pos_to_freeze in tgt_freeze:
                                 hs_freeze = clean_hs[sub_l_idx]
+                                if isinstance(hs_freeze, tuple):
+                                    hs_freeze = hs_freeze[0]
                                 hs[0, pos_to_freeze][:] = hs_freeze[0, pos_to_freeze]
 
-                    patched_logits_per_layer.append(
+                    patched_logits.append(
                         F.softmax(model.logits[0, -1], dim=-1).save()
                     )
 
@@ -82,7 +84,7 @@ class ActivationPatchingTool(Tool):
             "tokenizer": model.tokenizer,
             "src_pred": src_pred,
             "clean_pred": clean_pred,
-            "patched_logits": patched_logits_per_layer,
+            "patched_logits": patched_logits,
             "clean_logits": clean_logits,
         }
 

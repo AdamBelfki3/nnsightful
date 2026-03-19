@@ -78,12 +78,13 @@ class LogitLensTool(Tool):
             for token in model.tokenizer.encode(prompt)
         ]
 
-        all_logits = []
+        all_logits = None
         with model.trace(prompt, remote=remote, backend=backend) as tracer:
+            all_logits = list().save()
             for i in layer_indices:
                 hs = model.layers_output[i]
                 logits = model.project_on_vocab(hs)
-                all_logits.append(logits.cpu().save())
+                all_logits.append(logits)
 
         raw: dict[str, Any] = {
             "input_tokens": input_tokens,
