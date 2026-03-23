@@ -1,6 +1,8 @@
 import type { ActivationPatchingData, ActivationPatchingMode, ActivationPatchingOptions } from "../../types/activation-patching";
 import type { LinePlotData, LinePlotOptions } from "../../types/line-plot";
 import { LinePlotCore } from "../../core/line-plot";
+import { LINE_COLORS } from "../../core/line-plot/colors";
+import { createTokenSelector, updateTokenSelector, destroyTokenSelector, setsEqual } from "./token-selector";
 
 const MODE_LABELS: Record<ActivationPatchingMode, string> = {
     probability: "Probability",
@@ -12,12 +14,11 @@ const MODES: ActivationPatchingMode[] = ["probability", "prob_diff", "rank"];
 
 /**
  * ActivationPatchingCore wraps LinePlotCore with activation-patching-specific defaults.
- * It manages mode switching between probability, rank, and prob_diff views,
- * and renders a built-in mode toggle bar.
+ * It manages mode switching, token selection, and renders built-in controls.
  */
 export class ActivationPatchingCore {
     private linePlot: LinePlotCore;
-    private apData: ActivationPatchingData;
+    private allData: ActivationPatchingData;
     private mode: ActivationPatchingMode;
     private darkMode: boolean;
     private transparentBackground: boolean;
@@ -26,16 +27,31 @@ export class ActivationPatchingCore {
     private container: HTMLElement;
     private modeBar: HTMLDivElement;
     private modeButtons: Map<ActivationPatchingMode, HTMLButtonElement> = new Map();
+    private tokenSelectorEl: HTMLDivElement;
+
+    private selectedTokens: Set<number>;
+    private defaultTokens: Set<number>;
+    private onTokenSelectionChange?: (indices: number[]) => void;
+    private onModeChange?: (mode: ActivationPatchingMode) => void;
 
     constructor(container: HTMLElement, data: ActivationPatchingData, options: ActivationPatchingOptions = {}) {
         this.container = container;
-        this.apData = data;
+        this.allData = data;
         this.mode = options.mode ?? "probability";
         this.darkMode = options.darkMode ?? false;
         this.transparentBackground = options.transparentBackground ?? false;
         this.title = options.title;
+        this.onTokenSelectionChange = options.onTokenSelectionChange;
+        this.onModeChange = options.onModeChange;
 
-        // Outer layout: column with mode bar on top, chart below
+        const n = data.tokenLabels?.length ?? data.lines?.length ?? 0;
+        const defaultArr = options.defaultSelectedTokens ?? Array.from({ length: Math.min(2, n) }, (_, i) => i);
+        this.defaultTokens = new Set(defaultArr);
+        this.selectedTokens = new Set(
+            options.selectedTokens ?? defaultArr
+        );
+
+        // Outer layout: column with controls on top, chart below
         container.style.display = "flex";
         container.style.flexDirection = "column";
         container.style.width = "100%";
@@ -45,19 +61,38 @@ export class ActivationPatchingCore {
         this.modeBar = this.createModeBar();
         container.appendChild(this.modeBar);
 
+        // Token selector
+        this.tokenSelectorEl = createTokenSelector(this.buildTokenSelectorConfig());
+        container.appendChild(this.tokenSelectorEl);
+
         // Chart container takes remaining space
         const plotContainer = document.createElement("div");
         plotContainer.style.cssText = "flex:1;min-height:0;overflow:hidden;";
         container.appendChild(plotContainer);
 
-        const plotData = this.buildPlotData();
-        const plotOptions = this.buildPlotOptions();
+        this.linePlot = new LinePlotCore(plotContainer, this.buildPlotData(), this.buildPlotOptions());
 
-        this.linePlot = new LinePlotCore(plotContainer, plotData, plotOptions);
-
-        // LinePlotCore sets height:100% on its container, which conflicts with
-        // flex:1 sizing inside our column layout. Override to let flex handle it.
+        // LinePlotCore sets height:100% which conflicts with flex:1.
         plotContainer.style.height = "auto";
+    }
+
+    // ── Token selector integration ───────────────────────────────────
+
+    private buildTokenSelectorConfig() {
+        return {
+            allLabels: this.allData.tokenLabels ?? [],
+            selectedIndices: this.selectedTokens,
+            defaultIndices: this.defaultTokens,
+            darkMode: this.darkMode,
+            onChange: (indices: number[]) => this.handleTokenSelectionChange(indices),
+        };
+    }
+
+    private handleTokenSelectionChange(indices: number[]): void {
+        this.selectedTokens = new Set(indices);
+        updateTokenSelector(this.tokenSelectorEl, this.buildTokenSelectorConfig());
+        this.linePlot.setData(this.buildPlotData());
+        this.onTokenSelectionChange?.(indices);
     }
 
     // ── Mode bar UI ──────────────────────────────────────────────────
@@ -101,9 +136,8 @@ export class ActivationPatchingCore {
     }
 
     private applyModeButtonStyles(btn: HTMLButtonElement, isActive: boolean): void {
-        const fg = this.darkMode ? "rgba(250,250,250,0.8)" : "rgba(24,24,27,0.8)";
         const fgMuted = this.darkMode ? "rgba(250,250,250,0.5)" : "rgba(24,24,27,0.5)";
-        const activeBg = this.darkMode ? "rgba(139,92,246,0.9)" : "rgba(139,92,246,0.9)";
+        const activeBg = "rgba(139,92,246,0.9)";
 
         btn.style.cssText =
             `padding:3px 10px;border-radius:4px;border:none;cursor:pointer;` +
@@ -122,19 +156,26 @@ export class ActivationPatchingCore {
 
     // ── Data/options builders ────────────────────────────────────────
 
+    private getModeLines(): number[][] {
+        if (this.mode === "rank") return this.allData.ranks ?? [];
+        if (this.mode === "prob_diff") return this.allData.prob_diffs ?? [];
+        return this.allData.lines ?? [];
+    }
+
     private buildPlotData(): LinePlotData {
-        let lines: number[][];
-        if (this.mode === "rank") {
-            lines = this.apData.ranks;
-        } else if (this.mode === "prob_diff") {
-            lines = this.apData.prob_diffs;
-        } else {
-            lines = this.apData.lines;
-        }
-        return {
-            lines,
-            labels: this.apData.tokenLabels,
-        };
+        const modeLines = this.getModeLines();
+        const labels = this.allData.tokenLabels ?? [];
+        const sortedIndices = Array.from(this.selectedTokens).sort((a, b) => a - b);
+
+        const richLines = sortedIndices
+            .filter(i => i < modeLines.length)
+            .map(i => ({
+                values: modeLines[i],
+                label: labels[i] ?? `Token ${i}`,
+                color: LINE_COLORS[i % LINE_COLORS.length],
+            }));
+
+        return { richLines };
     }
 
     private getModeTitle(): string {
@@ -159,7 +200,7 @@ export class ActivationPatchingCore {
             plotOptions.yAxisLabel = "Rank";
         } else if (this.mode === "prob_diff") {
             plotOptions.centerYAxisAtZero = true;
-            plotOptions.yAxisLabel = "Prob Δ (Patched - Clean)";
+            plotOptions.yAxisLabel = "Prob \u0394 (Patched - Clean)";
         } else {
             plotOptions.yAxisLabel = "Probability";
         }
@@ -175,10 +216,17 @@ export class ActivationPatchingCore {
         this.linePlot.setData(this.buildPlotData());
         this.linePlot.setOptions(this.buildPlotOptions());
         this.updateModeBarUI();
+        this.onModeChange?.(mode);
     }
 
     setData(data: ActivationPatchingData): void {
-        this.apData = data;
+        this.allData = data;
+        const n = data.tokenLabels?.length ?? data.lines?.length ?? 0;
+        this.defaultTokens = new Set(Array.from({ length: Math.min(2, n) }, (_, i) => i));
+        // Preserve existing selection if indices are still valid; fall back to defaults
+        const valid = new Set([...this.selectedTokens].filter(i => i < n));
+        this.selectedTokens = valid.size > 0 ? valid : new Set(this.defaultTokens);
+        updateTokenSelector(this.tokenSelectorEl, this.buildTokenSelectorConfig());
         this.linePlot.setData(this.buildPlotData());
     }
 
@@ -186,6 +234,7 @@ export class ActivationPatchingCore {
         this.darkMode = dark;
         this.linePlot.setDarkMode(dark);
         this.updateModeBarUI();
+        updateTokenSelector(this.tokenSelectorEl, this.buildTokenSelectorConfig());
     }
 
     setTitle(title: string): void {
@@ -193,7 +242,18 @@ export class ActivationPatchingCore {
         this.linePlot.setOptions(this.buildPlotOptions());
     }
 
+    /** Programmatic selection update (does not fire onTokenSelectionChange). */
+    setSelectedTokens(indices: number[]): void {
+        const n = this.allData.lines?.length ?? 0;
+        const newSet = new Set(indices.filter(i => i < n));
+        if (setsEqual(newSet, this.selectedTokens)) return;
+        this.selectedTokens = newSet;
+        updateTokenSelector(this.tokenSelectorEl, this.buildTokenSelectorConfig());
+        this.linePlot.setData(this.buildPlotData());
+    }
+
     destroy(): void {
+        destroyTokenSelector(this.tokenSelectorEl);
         this.linePlot.destroy();
         this.container.innerHTML = "";
     }

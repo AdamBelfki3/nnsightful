@@ -35,16 +35,14 @@ class ActivationPatchingData(BaseModel):
 
     def display(self, tokens: list[int] | None = None, return_fig: bool = False, **kwargs):
         from nnsightful.viz import display_activation_patching
-        # Default: show only src_pred and tgt_pred (first 2 lines)
+        # Pass all data to the widget — the built-in token selector lets the user
+        # choose which tokens to display. `tokens` controls the initial selection.
+        data = self.model_dump()
         n = len(self.lines)
-        indices = tokens if tokens is not None else list(range(min(2, n)))
-        indices = [i for i in indices if i < n]
-        sliced = {
-            "lines": [self.lines[i] for i in indices],
-            "ranks": [self.ranks[i] for i in indices],
-            "prob_diffs": [self.prob_diffs[i] for i in indices],
-            "tokenLabels": [self.tokenLabels[i] for i in indices],
-        }
-        result = display_activation_patching(sliced, **kwargs)
+        selected = tokens if tokens is not None else list(range(min(2, n)))
+        selected = [i for i in selected if i < n]
+        options = kwargs.pop("options", {}) or {}
+        options["selectedTokens"] = selected
+        result = display_activation_patching(data, options=options, **kwargs)
         if return_fig:
             return result
