@@ -1,4 +1,15 @@
+from abc import abstractmethod
+
 from pydantic import BaseModel
+
+
+class ToolData(BaseModel):
+    """Abstract base for nnsightful tool output data."""
+
+    @abstractmethod
+    def display(self, **kwargs):
+        """Display a visualization of the data."""
+        ...
 
 
 class LogitLensMeta(BaseModel):
@@ -6,31 +17,26 @@ class LogitLensMeta(BaseModel):
     timestamp: str
     model: str
 
-class LogitLensData(BaseModel):
+
+class LogitLensData(ToolData):
     meta: LogitLensMeta
     layers: list[int]
-    input: list[str]  # Input tokens as strings
+    input: list[str]  # Input tokens as strings (always dense, all tokens)
+    positions: list[int] | None = None  # Computed position indices; None = all
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
-    topk: list[list[list[str]]]  # [layer][position] -> list of top-k tokens
+    topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
-    def display(self, return_fig: bool = False, **kwargs):
+    def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
-        result = display_logit_lens(self, **kwargs)
-        if return_fig:
-            return result
+
+        return display_logit_lens(self, **kwargs)
 
 
-# class ActivationsPatchingMeta(BaseModel):
-#     version: int = 1
-#     timestamp: str
-#     model: str
-
-class ActivationPatchingData(BaseModel):
-    # meta: ActivationsPatchingMeta
-    lines: list[list[float]]  # Each inner list is probabilities for one token across all layers
-    ranks: list[list[int]]  # Each inner list is ranks for one token across all layers
-    prob_diffs: list[list[float]]  # Each inner list is probability differences for one token across all layers
+class ActivationPatchingData(ToolData):
+    lines: list[list[float]]  # [token][layer] probabilities
+    ranks: list[list[int]]  # [token][layer] ranks
+    prob_diffs: list[list[float]]  # [token][layer] prob diffs
     tokenLabels: list[str]  # Token text labels for each line
 
     def display(self, tokens: list[int] | None = None, return_fig: bool = False, **kwargs):

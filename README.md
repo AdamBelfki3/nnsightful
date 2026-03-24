@@ -13,15 +13,19 @@ pip install nnsightful
 ### Running interpretability methods
 
 ```python
+from nnterp import StandardizedTransformer
 from nnsightful import logit_lens, activation_patching
 
-# Logit lens
-all_logits = logit_lens.logit_lens(prompt, model, remote=False, backend=backend)
-data = logit_lens.format_data(all_logits, input_tokens, topk=10, include_entropy=True, model_name="gpt2", tokenizer=tokenizer)
+model = StandardizedTransformer("gpt2")
 
-# Activation patching
-results = activation_patching.activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze, backend)
-data = activation_patching.format_data(patched_logits, tokenizer, src_pred, clean_pred, clean_logits)
+# Logit lens — returns LogitLensData directly
+data = logit_lens.logit_lens(model, prompt, top_k=10)
+
+# With sparse layer/position selection
+data = logit_lens.logit_lens(model, prompt, layers=[0, 5, -1], positions=-1, top_k=5, top_p=0.9)
+
+# Activation patching — returns ActivationPatchingData directly
+data = activation_patching.activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
 ```
 
 ### Jupyter visualizations
