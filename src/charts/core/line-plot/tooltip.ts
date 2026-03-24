@@ -44,6 +44,8 @@ export function hitTest(
     const { margin, chartWidth, chartHeight } = geometry;
     const xRangeStart = options.xRangeStart ?? 0;
     const effectiveRange = (numLayers - 1) - xRangeStart;
+    const logMin = options.logScale ? Math.log(Math.max(1, minValue)) : 0;
+    const logMax = options.logScale ? Math.log(Math.max(1, maxValue)) : 0;
 
     if (
         mouseX < margin.left ||
@@ -71,7 +73,13 @@ export function hitTest(
             const x = effectiveRange <= 0
                 ? margin.left + chartWidth / 2
                 : margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
-            const normalized = (value - minValue) / (maxValue - minValue);
+            let normalized: number;
+            if (options.logScale) {
+                const logVal = Math.log(Math.max(1, value));
+                normalized = (logMax - logMin) > 0 ? (logVal - logMin) / (logMax - logMin) : 0.5;
+            } else {
+                normalized = (value - minValue) / (maxValue - minValue);
+            }
             const y = options.invertYAxis
                 ? margin.top + normalized * chartHeight
                 : margin.top + chartHeight - normalized * chartHeight;
@@ -103,6 +111,7 @@ export function updateTooltipDOM(
     darkMode: boolean,
     xLabels?: (string | number)[],
     xAxisLabel?: string,
+    mode?: string,
 ): void {
     if (!tip) {
         el.style.opacity = "0";
@@ -136,7 +145,7 @@ export function updateTooltipDOM(
                 </div>
                 <div style="display:flex;justify-content:space-between;gap:16px;margin-top:2px;">
                     <span style="color:${muted}">Value</span>
-                    <span style="font-weight:500;color:${fg}">${tip.value.toFixed(4)}</span>
+                    <span style="font-weight:500;color:${fg}">${mode === "rank" ? Math.round(tip.value).toString() : tip.value.toFixed(4)}</span>
                 </div>
             </div>
         </div>`;

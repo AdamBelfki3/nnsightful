@@ -156,6 +156,7 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.options.darkMode ?? false,
             this.data.xLabels,
             this.options.xAxisLabel,
+            this.options.mode,
         );
         this.draw();
     };

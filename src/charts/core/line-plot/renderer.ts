@@ -57,7 +57,7 @@ export function computeChartConfig(
         }
 
         if (allValues.length === 0) {
-            return { numLayers, minValue: 0, maxValue: 1, numLines: resolved.length };
+            return { numLayers, minValue: options.logScale ? 1 : 0, maxValue: 1, numLines: resolved.length };
         }
 
         let dataMin = Infinity, dataMax = -Infinity;
@@ -68,9 +68,20 @@ export function computeChartConfig(
             const paddedMax = absMax * 1.1;
             minValue = -paddedMax;
             maxValue = paddedMax;
+        } else if (options.logScale) {
+            // Log scale: min must be >= 1, pad max in log space.
+            // Note: the outer if may enter via autoScale even when minValue is explicit,
+            // but this guard only overwrites when minValue was not provided by the caller.
+            if (minValue === undefined) minValue = Math.max(1, Math.floor(dataMin));
+            if (maxValue === undefined || options.autoScale) {
+                const logDataMin = Math.log(Math.max(1, dataMin));
+                const logDataMax = Math.log(Math.max(1, dataMax));
+                const logPadded = logDataMax + 0.15 * Math.max(1, logDataMax - logDataMin);
+                maxValue = Math.ceil(Math.exp(logPadded));
+            }
         } else {
             if (minValue === undefined) {
-                minValue = mode === "probability" ? 0 : Math.floor(dataMin * 0.9);
+                minValue = mode === "probability" ? 0 : mode === "rank" ? Math.max(1, Math.floor(dataMin)) : Math.floor(dataMin * 0.9);
             }
             if (maxValue === undefined || options.autoScale) {
                 if (mode === "rank") {
@@ -114,6 +125,7 @@ export function drawChart(
     const mode = options.mode || "probability";
     const invertYAxis = options.invertYAxis ?? false;
     const centerYAxisAtZero = options.centerYAxisAtZero ?? false;
+    const logScale = options.logScale ?? false;
     const xAxisLabel = options.xAxisLabel || "Layer";
     const yAxisLabel = options.yAxisLabel || "Probability";
     let xRangeStart = options.xRangeStart ?? 0;
@@ -161,8 +173,17 @@ export function drawChart(
         return margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
     };
 
+    const logMin = logScale ? Math.log(Math.max(1, config.minValue)) : 0;
+    const logMax = logScale ? Math.log(Math.max(1, config.maxValue)) : 0;
+
     const yScale = (value: number) => {
-        const normalized = (value - config.minValue) / (config.maxValue - config.minValue);
+        let normalized: number;
+        if (logScale) {
+            const logVal = Math.log(Math.max(1, value));
+            normalized = (logMax - logMin) > 0 ? (logVal - logMin) / (logMax - logMin) : 0.5;
+        } else {
+            normalized = (value - config.minValue) / (config.maxValue - config.minValue);
+        }
         return invertYAxis
             ? margin.top + normalized * chartHeight
             : margin.top + chartHeight - normalized * chartHeight;
@@ -177,7 +198,26 @@ export function drawChart(
     const range = config.maxValue - config.minValue;
     const numTicks = 5;
 
-    if (mode === "rank") {
+    if (logScale) {
+        // Logarithmically spaced ticks, deduplicated.
+        // For small ranges this may produce fewer than numTicks entries (e.g. ranks 1-3).
+        // When all values are identical, yScale uses normalized=0.5 to center the line;
+        // tick generation may emit a single point — this is expected.
+        const seen = new Set<number>();
+        for (let i = 0; i < numTicks; i++) {
+            const logVal = logMin + (i / (numTicks - 1)) * (logMax - logMin);
+            const tick = Math.round(Math.exp(logVal));
+            if (!seen.has(tick)) {
+                seen.add(tick);
+                yTicks.push(tick);
+            }
+        }
+        // Ensure min and max endpoints are always present for visual context
+        const minTick = Math.round(Math.exp(logMin));
+        const maxTick = Math.round(Math.exp(logMax));
+        if (!seen.has(minTick)) yTicks.unshift(minTick);
+        if (!seen.has(maxTick)) yTicks.push(maxTick);
+    } else if (mode === "rank") {
         for (let i = 0; i < numTicks; i++) {
             yTicks.push(Math.round(config.minValue + (i / (numTicks - 1)) * range));
         }

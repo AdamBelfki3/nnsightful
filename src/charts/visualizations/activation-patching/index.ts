@@ -166,12 +166,17 @@ export class ActivationPatchingCore {
         const modeLines = this.getModeLines();
         const labels = this.allData.tokenLabels ?? [];
         const sortedIndices = Array.from(this.selectedTokens).sort((a, b) => a - b);
+        const isRank = this.mode === "rank";
 
         const richLines = sortedIndices
             .filter(i => i < modeLines.length)
             .map(i => ({
-                values: modeLines[i],
+                // Ranks are 0-indexed from backend; shift to 1-indexed for display
+                // so the y-axis starts at 1 (best prediction) and log(1)=0 works cleanly.
+                values: isRank ? modeLines[i].map(v => v + 1) : modeLines[i],
                 label: labels[i] ?? `Token ${i}`,
+                // Color pinned to original token index (not display position) so each
+                // token keeps a stable color regardless of which others are selected.
                 color: LINE_COLORS[i % LINE_COLORS.length],
             }));
 
@@ -193,11 +198,13 @@ export class ActivationPatchingCore {
             xAxisLabel: "Layer",
             invertYAxis: false,
             centerYAxisAtZero: false,
+            logScale: false,
         };
 
         if (this.mode === "rank") {
             plotOptions.invertYAxis = true;
-            plotOptions.yAxisLabel = "Rank";
+            plotOptions.logScale = true;
+            plotOptions.yAxisLabel = "Rank (log)";
         } else if (this.mode === "prob_diff") {
             plotOptions.centerYAxisAtZero = true;
             plotOptions.yAxisLabel = "Prob \u0394 (Patched - Clean)";
@@ -244,7 +251,7 @@ export class ActivationPatchingCore {
 
     /** Programmatic selection update (does not fire onTokenSelectionChange). */
     setSelectedTokens(indices: number[]): void {
-        const n = this.allData.lines?.length ?? 0;
+        const n = this.getModeLines().length;
         const newSet = new Set(indices.filter(i => i < n));
         if (setsEqual(newSet, this.selectedTokens)) return;
         this.selectedTokens = newSet;

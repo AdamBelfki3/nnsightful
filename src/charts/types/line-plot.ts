@@ -39,6 +39,7 @@ export interface LinePlotOptions {
     maxValue?: number;
     invertYAxis?: boolean;
     centerYAxisAtZero?: boolean;
+    logScale?: boolean;
     darkMode?: boolean;
     xRangeStart?: number;
     autoScale?: boolean;
