@@ -16,4 +16,8 @@ export interface ActivationPatchingOptions {
     darkMode?: boolean;
     title?: string;
     transparentBackground?: boolean;
+    selectedTokens?: number[];
+    defaultSelectedTokens?: number[];
+    onTokenSelectionChange?: (indices: number[]) => void;
+    onModeChange?: (mode: ActivationPatchingMode) => void;
 }

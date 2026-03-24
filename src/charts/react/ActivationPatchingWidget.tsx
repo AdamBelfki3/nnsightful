@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import type { ActivationPatchingData, ActivationPatchingMode } from "../types/activation-patching";
 import { ActivationPatchingCore } from "../visualizations/activation-patching";
 
@@ -8,6 +8,10 @@ interface ActivationPatchingWidgetProps {
     darkMode?: boolean;
     title?: string;
     transparentBackground?: boolean;
+    selectedTokens?: number[];
+    defaultSelectedTokens?: number[];
+    onTokenSelectionChange?: (indices: number[]) => void;
+    onModeChange?: (mode: ActivationPatchingMode) => void;
 }
 
 export function ActivationPatchingWidget({
@@ -16,14 +20,31 @@ export function ActivationPatchingWidget({
     darkMode = false,
     title,
     transparentBackground = false,
+    selectedTokens,
+    defaultSelectedTokens,
+    onTokenSelectionChange,
+    onModeChange,
 }: ActivationPatchingWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const coreRef = useRef<ActivationPatchingCore | null>(null);
+    const onChangeRef = useRef(onTokenSelectionChange);
+    onChangeRef.current = onTokenSelectionChange;
+    const onModeChangeRef = useRef(onModeChange);
+    onModeChangeRef.current = onModeChange;
 
     useEffect(() => {
         if (!containerRef.current) return;
         containerRef.current.innerHTML = "";
-        coreRef.current = new ActivationPatchingCore(containerRef.current, data, { mode, darkMode, title, transparentBackground });
+        coreRef.current = new ActivationPatchingCore(containerRef.current, data, {
+            mode,
+            darkMode,
+            title,
+            transparentBackground,
+            selectedTokens,
+            defaultSelectedTokens,
+            onTokenSelectionChange: (indices) => onChangeRef.current?.(indices),
+            onModeChange: (m) => onModeChangeRef.current?.(m),
+        });
         return () => {
             coreRef.current?.destroy();
             coreRef.current = null;
@@ -31,7 +52,7 @@ export function ActivationPatchingWidget({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [data]);
 
-    // Sync mode from external prop (e.g. if parent still controls mode)
+    // Sync mode from external prop
     useEffect(() => {
         coreRef.current?.setMode(mode);
     }, [mode]);
@@ -45,6 +66,13 @@ export function ActivationPatchingWidget({
             coreRef.current?.setTitle(title);
         }
     }, [title]);
+
+    // Sync external selectedTokens changes
+    useEffect(() => {
+        if (selectedTokens !== undefined) {
+            coreRef.current?.setSelectedTokens(selectedTokens);
+        }
+    }, [selectedTokens]);
 
     if (!data.lines || data.lines.length === 0) {
         return (
