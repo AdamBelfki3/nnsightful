@@ -78,7 +78,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         this.render();
     }
 
-    setDarkMode(dark: boolean): void {
+    setThemeMode(dark: boolean): void {
         this.options.darkMode = dark;
         this.render();
     }

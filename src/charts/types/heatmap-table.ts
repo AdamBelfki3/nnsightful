@@ -1,3 +1,5 @@
+import type { BaseWidgetInterface } from "./base";
+
 /**
  * Data types for the HeatmapTable atomic chart component
  */
@@ -41,13 +43,10 @@ export interface HeatmapTableOptions {
     onCellLeave?: () => void;
 }
 
-export interface HeatmapTableWidgetInterface {
-    setData: (data: HeatmapTableData) => void;
+export interface HeatmapTableWidgetInterface extends BaseWidgetInterface<HeatmapTableData> {
     setOptions: (opts: Partial<HeatmapTableOptions>) => void;
-    setDarkMode: (dark: boolean) => void;
     setCellWidth: (width: number) => void;
     setRowHeaderWidth: (width: number) => void;
     getTableElement: () => HTMLTableElement;
     getTableWidth: () => number;
-    destroy: () => void;
 }

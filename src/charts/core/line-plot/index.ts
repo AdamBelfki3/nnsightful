@@ -191,7 +191,7 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.updateLegendUI();
     }
 
-    setDarkMode(dark: boolean): void {
+    setThemeMode(dark: boolean): void {
         this.options.darkMode = dark;
         this.draw();
         this.updateLegendUI();

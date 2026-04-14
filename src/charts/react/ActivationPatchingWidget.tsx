@@ -58,7 +58,7 @@ export function ActivationPatchingWidget({
     }, [mode]);
 
     useEffect(() => {
-        coreRef.current?.setDarkMode(darkMode);
+        coreRef.current?.setThemeMode(darkMode);
     }, [darkMode]);
 
     useEffect(() => {

@@ -6,6 +6,7 @@
 
 // Types
 export type {
+    BaseWidgetInterface,
     LogitLensData,
     LogitLensUIState,
     LogitLensWidgetInterface,
@@ -22,6 +23,8 @@ export type {
     HeatmapTableWidgetInterface,
     ActivationPatchingData,
     ActivationPatchingMode,
+    ActivationPatchingOptions,
+    ActivationPatchingWidgetInterface,
 } from "./types";
 
 // Core classes (framework-agnostic)

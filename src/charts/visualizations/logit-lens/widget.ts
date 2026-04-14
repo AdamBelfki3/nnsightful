@@ -24,6 +24,7 @@ import { PALETTE, LINE_STYLES, probToColor } from "./colors";
 import { injectStyles, applyDarkMode } from "./styles";
 import { createInitialState, emitEvent, addEventListener, removeEventListener, type WidgetState } from "./state";
 import { LinePlotCore } from "../../core/line-plot";
+import { detectThemeMode, onThemeModeChange } from "../../detect-theme-mode";
 
 interface CreateWidgetResult {
     widget: LogitLensWidgetInterface;
@@ -194,7 +195,7 @@ export function createWidget(
 
     function isDarkMode(): boolean {
         if (state.darkModeOverride !== null) return state.darkModeOverride;
-        return getComputedStyle(container!).colorScheme === "dark";
+        return detectThemeMode(container);
     }
 
     function getNextColor(): string {
@@ -1179,9 +1180,8 @@ export function createWidget(
         const newHeight = Math.max(minChartHeight, Math.min(maxChartHeight, state.xAxisDrag.startHeight + delta));
         if (Math.abs(newHeight - getActualChartHeight()) > 2) {
             state.chartHeight = newHeight;
-            const chartContainer = dom.chartContainer();
-            chartContainer.style.flex = "none";
-            chartContainer.style.height = newHeight + "px";
+            state.chartAspectRatio = null;  // explicit drag overrides aspect ratio
+            applyChartSizing();
             updateChart(null, null, null, state.currentHoverPos);
         }
     };
@@ -1344,6 +1344,7 @@ export function createWidget(
     function getState(): LogitLensUIState {
         return {
             chartHeight: state.chartHeight,
+            chartAspectRatio: state.chartAspectRatio,
             inputTokenWidth: state.inputTokenWidth,
             cellWidth: state.currentCellWidth,
             maxRows: state.currentMaxRows,
@@ -1393,12 +1394,31 @@ export function createWidget(
     const result = computeVisibleLayers(state.currentCellWidth, containerWidth);
     buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
 
-    // If user previously set a specific chart height, apply it; otherwise let flex fill
-    if (state.chartHeight !== null) {
+    // Apply chart sizing:
+    //   - chartAspectRatio set: flex fills available space, but aspect-ratio
+    //     acts as a minimum height so the chart never gets squished
+    //   - chartHeight set (explicit px from drag): fixed height, no flex
+    //   - neither: flex fill with min-height: 120px (original behavior)
+    function applyChartSizing() {
         const chartContainer = dom.chartContainer();
-        chartContainer.style.flex = "none";
-        chartContainer.style.height = state.chartHeight + "px";
+        if (state.chartAspectRatio) {
+            chartContainer.style.flex = "1 0 auto";
+            chartContainer.style.height = "auto";
+            chartContainer.style.minHeight = "0";
+            chartContainer.style.aspectRatio = state.chartAspectRatio;
+        } else if (state.chartHeight !== null) {
+            chartContainer.style.flex = "none";
+            chartContainer.style.height = state.chartHeight + "px";
+            chartContainer.style.minHeight = "";
+            chartContainer.style.aspectRatio = "";
+        } else {
+            chartContainer.style.flex = "1";
+            chartContainer.style.height = "";
+            chartContainer.style.minHeight = "";
+            chartContainer.style.aspectRatio = "";
+        }
     }
+    applyChartSizing();
 
     // Observe container resizes (window resize, panel resize, etc.)
     let lastContainerWidth = containerWidth;
@@ -1416,24 +1436,15 @@ export function createWidget(
 
     applyDarkMode(dom.widget(), isDarkMode());
 
-    // Style observer
-    let lastDetectedDarkMode = isDarkMode();
-    const styleObserver = new MutationObserver(() => {
+    // React to runtime theme changes (shared listener handles MutationObserver + matchMedia)
+    const cleanupDarkModeListener = onThemeModeChange(container, (currentDarkMode) => {
         const widgetEl = dom.widget();
-        if (!widgetEl) { styleObserver.disconnect(); return; }
-        let needsRebuild = false;
+        if (!widgetEl) return;
         if (state.darkModeOverride === null) {
-            const currentDarkMode = isDarkMode();
-            if (currentDarkMode !== lastDetectedDarkMode) {
-                lastDetectedDarkMode = currentDarkMode;
-                applyDarkMode(widgetEl, currentDarkMode);
-                needsRebuild = true;
-            }
+            applyDarkMode(widgetEl, currentDarkMode);
+            buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
         }
-        if (needsRebuild) buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
     });
-    styleObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
-    if (document.body) styleObserver.observe(document.body, { attributes: true, attributeFilter: ["style", "class"] });
 
     // ═══════════════════════════════════════════════════════════════
     // PUBLIC INTERFACE
@@ -1450,6 +1461,9 @@ export function createWidget(
             if (s.trajectoryMetric !== undefined) state.trajectoryMetric = s.trajectoryMetric;
             if (s.colorModes !== undefined) state.colorModes = s.colorModes.slice();
             if (s.pinnedGroups !== undefined) state.pinnedGroups = JSON.parse(JSON.stringify(s.pinnedGroups));
+            if (s.chartHeight !== undefined) { state.chartHeight = s.chartHeight ?? null; }
+            if (s.chartAspectRatio !== undefined) { state.chartAspectRatio = s.chartAspectRatio ?? null; }
+            if (s.chartHeight !== undefined || s.chartAspectRatio !== undefined) applyChartSizing();
             applyDarkMode(dom.widget(), isDarkMode());
             render();
         },
@@ -1464,12 +1478,12 @@ export function createWidget(
             updateTitle();
             emitEvent(state, "title", state.customTitle);
         },
-        setDarkMode: (enabled: boolean) => {
-            state.darkModeOverride = enabled === null ? null : !!enabled;
+        setThemeMode: (enabled: boolean) => {
+            state.darkModeOverride = !!enabled;
             applyDarkMode(dom.widget(), isDarkMode());
             buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
         },
-        getDarkMode: () => isDarkMode(),
+        getThemeMode: () => isDarkMode(),
         hasEntropyData,
         hasRankData,
         linkColumnsTo: (other: LogitLensWidgetInterface) => {
@@ -1483,7 +1497,7 @@ export function createWidget(
         on: (eventName: string, callback: (data: unknown) => void) => { addEventListener(state, eventName, callback); },
         off: (eventName: string, callback: (data: unknown) => void) => { removeEventListener(state, eventName, callback); },
         destroy: () => {
-            styleObserver.disconnect();
+            cleanupDarkModeListener();
             containerResizeObserver.disconnect();
             // Remove all document-level event listeners
             document.removeEventListener("mousemove", handleColResizeMove);

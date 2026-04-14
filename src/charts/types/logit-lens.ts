@@ -1,3 +1,5 @@
+import type { BaseWidgetInterface } from "./base";
+
 /**
  * LogitLensKit V2 Data Format
  */
@@ -19,6 +21,7 @@ export interface LogitLensData {
  */
 export interface LogitLensUIState {
     chartHeight?: number | null;
+    chartAspectRatio?: string | null;
     inputTokenWidth?: number;
     cellWidth?: number;
     maxRows?: number | null;
@@ -45,18 +48,15 @@ export interface LogitLensUIState {
 /**
  * Public API of a LogitLens widget instance
  */
-export interface LogitLensWidgetInterface {
+export interface LogitLensWidgetInterface extends BaseWidgetInterface<LogitLensData> {
     getState: () => LogitLensUIState;
     setState: (state: Partial<LogitLensUIState>) => void;
-    setData: (data: LogitLensData) => void;
     setTitle: (title: string) => void;
-    setDarkMode: (dark: boolean) => void;
-    getDarkMode: () => boolean;
+    getThemeMode: () => boolean;
     hasEntropyData: () => boolean;
     hasRankData: () => boolean;
     linkColumnsTo: (other: LogitLensWidgetInterface) => void;
     unlinkColumns: (other: LogitLensWidgetInterface) => void;
     on: (event: string, callback: (data: unknown) => void) => void;
     off: (event: string, callback: (data: unknown) => void) => void;
-    destroy: () => void;
 }

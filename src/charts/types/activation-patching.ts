@@ -1,3 +1,5 @@
+import type { BaseWidgetInterface } from "./base";
+
 /**
  * Data types for the Activation Patching visualization
  */
@@ -10,6 +12,12 @@ export interface ActivationPatchingData {
 }
 
 export type ActivationPatchingMode = "probability" | "rank" | "prob_diff";
+
+export interface ActivationPatchingWidgetInterface extends BaseWidgetInterface<ActivationPatchingData> {
+    setMode(mode: ActivationPatchingMode): void;
+    setTitle(title: string): void;
+    setSelectedTokens(indices: number[]): void;
+}
 
 export interface ActivationPatchingOptions {
     mode?: ActivationPatchingMode;

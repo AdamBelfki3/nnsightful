@@ -19,6 +19,7 @@ dev = [
     "pytest>=7.0",
     "ruff",
     "ty",
+    "ipykernel",
 ]
 
 [tool.setuptools.packages.find]

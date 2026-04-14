@@ -27,6 +27,7 @@ export interface DragState {
 
 export interface WidgetState {
     chartHeight: number | null;
+    chartAspectRatio: string | null;
     inputTokenWidth: number;
     currentCellWidth: number;
     currentMaxRows: number | null;
@@ -90,6 +91,9 @@ export function createInitialState(
 ): WidgetState {
     const state: WidgetState = {
         chartHeight: uiState?.chartHeight ?? null,
+        chartAspectRatio: uiState?.chartAspectRatio !== undefined
+            ? (uiState.chartAspectRatio ?? null)
+            : (uiState?.chartHeight != null ? null : "21 / 9"),
         inputTokenWidth: uiState?.inputTokenWidth ?? 100,
         currentCellWidth: uiState?.cellWidth ?? 44,
         currentMaxRows: uiState?.maxRows !== undefined ? (uiState.maxRows ?? null) : null,

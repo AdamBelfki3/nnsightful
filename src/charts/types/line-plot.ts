@@ -1,3 +1,5 @@
+import type { BaseWidgetInterface } from "./base";
+
 /**
  * Rich line descriptor for fine-grained control over individual lines.
  * When provided via richLines, these override the basic lines/labels arrays.
@@ -51,13 +53,10 @@ export interface LinePlotOptions {
 /**
  * Public API of a LinePlot widget instance
  */
-export interface LinePlotWidgetInterface {
-    setData: (data: LinePlotData) => void;
+export interface LinePlotWidgetInterface extends BaseWidgetInterface<LinePlotData> {
     setOptions: (options: Partial<LinePlotOptions>) => void;
-    setDarkMode: (dark: boolean) => void;
     toggleLine: (lineIdx: number) => void;
     addLine: (line: LinePlotLine) => number;
     removeLine: (lineIdx: number) => void;
     setOverlay: (line: LinePlotLine | null) => void;
-    destroy: () => void;
 }

@@ -1,3 +1,5 @@
+export type { BaseWidgetInterface } from "./base";
+
 export type {
     LogitLensData,
     LogitLensUIState,
@@ -25,4 +27,5 @@ export type {
     ActivationPatchingData,
     ActivationPatchingMode,
     ActivationPatchingOptions,
+    ActivationPatchingWidgetInterface,
 } from "./activation-patching";

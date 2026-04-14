@@ -8,50 +8,52 @@
 import type { LogitLensData, LogitLensUIState } from "./types/logit-lens";
 import type { LinePlotData, LinePlotOptions } from "./types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions } from "./types/heatmap-table";
-import type { ActivationPatchingData } from "./types/activation-patching";
+import type { ActivationPatchingData, ActivationPatchingOptions } from "./types/activation-patching";
+import type { BaseWidgetInterface } from "./types/base";
 import { LogitLensCore } from "./visualizations/logit-lens";
 import { LinePlotCore } from "./core/line-plot";
 import { HeatmapTableCore } from "./core/heatmap-table";
-import type { ActivationPatchingOptions } from "./types/activation-patching";
 import { ActivationPatchingCore } from "./visualizations/activation-patching";
+import { detectThemeMode, onThemeModeChange } from "./detect-theme-mode";
 
-/**
- * Auto-detect dark mode from the notebook/browser environment.
- * Checks (in order): JupyterLab theme attribute, Colab body class,
- * computed background luminance of the container, system preference.
- */
-function detectDarkMode(container?: HTMLElement | null): boolean {
-    // JupyterLab: data-jp-theme-light on <body>
-    if (typeof document !== "undefined" && document.body?.dataset?.jpThemeLight !== undefined) {
-        return document.body.dataset.jpThemeLight === "false";
-    }
-    // Google Colab: .dark class on <body>
-    if (typeof document !== "undefined" && document.body?.classList?.contains("dark")) {
-        return true;
-    }
-    // Computed background luminance of the output cell
-    if (container) {
-        const bg = getComputedStyle(container).backgroundColor;
-        const match = bg.match(/\d+/g);
-        if (match && match.length >= 3) {
-            const [r, g, b] = match.map(Number);
-            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-            return luminance < 0.5;
-        }
-    }
-    // System preference
-    if (typeof window !== "undefined" && window.matchMedia) {
-        return window.matchMedia("(prefers-color-scheme: dark)").matches;
-    }
-    return false;
+// ── Shared helpers ──────────────────────────────────────────────────
+
+function resolveContainer(container: HTMLElement | string): HTMLElement | null {
+    const el = typeof container === "string"
+        ? document.querySelector<HTMLElement>(container)
+        : container;
+    if (!el) console.error("Container not found:", container);
+    return el;
 }
 
-// Backward-compatible factory functions
+/**
+ * Resolve container, create widget, detect theme, wire runtime reactivity.
+ * Wraps destroy() to clean up the theme-change listener automatically.
+ */
+function createThemedWidget<W extends BaseWidgetInterface>(
+    container: HTMLElement | string,
+    create: (el: HTMLElement) => W,
+    explicitDarkMode?: boolean,
+): W | null {
+    const el = resolveContainer(container);
+    if (!el) return null;
+    const widget = create(el);
+    if (explicitDarkMode === undefined) {
+        const cleanup = onThemeModeChange(el, (isDark) => widget.setThemeMode(isDark));
+        const originalDestroy = widget.destroy.bind(widget);
+        widget.destroy = () => { cleanup(); originalDestroy(); };
+    }
+    return widget;
+}
+
+// ── Factory functions ───────────────────────────────────────────────
+
 function createLogitLensWidget(
     container: HTMLElement | string,
     data: LogitLensData,
     uiState?: Partial<LogitLensUIState>,
 ) {
+    // LogitLensCore handles its own container resolution and theme reactivity
     return new LogitLensCore(container, data, uiState);
 }
 
@@ -60,21 +62,11 @@ function createLinePlotWidget(
     data: LinePlotData,
     options?: Partial<LinePlotOptions>,
 ) {
-    let el: HTMLElement | null;
-    if (typeof container === "string") {
-        el = document.querySelector(container);
-    } else {
-        el = container;
-    }
-    if (!el) {
-        console.error("Container not found:", container);
-        return null;
-    }
-    const resolvedOptions: Partial<LinePlotOptions> = {
-        darkMode: detectDarkMode(el),
-        ...options,
-    };
-    return new LinePlotCore(el, data, resolvedOptions);
+    return createThemedWidget(
+        container,
+        (el) => new LinePlotCore(el, data, { darkMode: detectThemeMode(el), ...options }),
+        options?.darkMode,
+    );
 }
 
 function createHeatmapTableWidget(
@@ -82,17 +74,11 @@ function createHeatmapTableWidget(
     data: HeatmapTableData,
     options?: Partial<HeatmapTableOptions>,
 ) {
-    let el: HTMLElement | null;
-    if (typeof container === "string") {
-        el = document.querySelector(container);
-    } else {
-        el = container;
-    }
-    if (!el) {
-        console.error("Container not found:", container);
-        return null;
-    }
-    return new HeatmapTableCore(el, data, options);
+    return createThemedWidget(
+        container,
+        (el) => new HeatmapTableCore(el, data, { darkMode: detectThemeMode(el), ...options }),
+        options?.darkMode,
+    );
 }
 
 function createActivationPatchingWidget(
@@ -100,22 +86,11 @@ function createActivationPatchingWidget(
     data: ActivationPatchingData,
     options?: ActivationPatchingOptions,
 ) {
-    let el: HTMLElement | null;
-    if (typeof container === "string") {
-        el = document.querySelector(container);
-    } else {
-        el = container;
-    }
-    if (!el) {
-        console.error("Container not found:", container);
-        return null;
-    }
-    // Auto-detect dark mode if not explicitly set
-    const resolvedOptions: ActivationPatchingOptions = {
-        darkMode: detectDarkMode(el),
-        ...options,
-    };
-    return new ActivationPatchingCore(el, data, resolvedOptions);
+    return createThemedWidget(
+        container,
+        (el) => new ActivationPatchingCore(el, data, { darkMode: detectThemeMode(el), ...options }),
+        options?.darkMode,
+    );
 }
 
 // Expose on window for backward compatibility

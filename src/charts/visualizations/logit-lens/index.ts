@@ -7,7 +7,7 @@ import { createWidget } from "./widget";
  * This is a framework-agnostic class that renders into a container element.
  * It wraps the full-featured LogitLens widget engine (table + heatmap + SVG chart).
  */
-export class LogitLensCore {
+export class LogitLensCore implements LogitLensWidgetInterface {
     private widget: LogitLensWidgetInterface | null = null;
     private styleEl: HTMLStyleElement | null = null;
 
@@ -39,12 +39,12 @@ export class LogitLensCore {
         this.widget?.setTitle(title);
     }
 
-    setDarkMode(dark: boolean): void {
-        this.widget?.setDarkMode(dark);
+    setThemeMode(dark: boolean): void {
+        this.widget?.setThemeMode(dark);
     }
 
-    getDarkMode(): boolean {
-        return this.widget?.getDarkMode() ?? false;
+    getThemeMode(): boolean {
+        return this.widget?.getThemeMode() ?? false;
     }
 
     hasEntropyData(): boolean {
@@ -55,15 +55,15 @@ export class LogitLensCore {
         return this.widget?.hasRankData() ?? false;
     }
 
-    linkColumnsTo(other: LogitLensCore): void {
-        if (this.widget && other.widget) {
-            this.widget.linkColumnsTo(other.widget);
+    linkColumnsTo(other: LogitLensWidgetInterface): void {
+        if (this.widget) {
+            this.widget.linkColumnsTo(other);
         }
     }
 
-    unlinkColumns(other: LogitLensCore): void {
-        if (this.widget && other.widget) {
-            this.widget.unlinkColumns(other.widget);
+    unlinkColumns(other: LogitLensWidgetInterface): void {
+        if (this.widget) {
+            this.widget.unlinkColumns(other);
         }
     }
 

@@ -1,4 +1,4 @@
-import type { ActivationPatchingData, ActivationPatchingMode, ActivationPatchingOptions } from "../../types/activation-patching";
+import type { ActivationPatchingData, ActivationPatchingMode, ActivationPatchingOptions, ActivationPatchingWidgetInterface } from "../../types/activation-patching";
 import type { LinePlotData, LinePlotOptions } from "../../types/line-plot";
 import { LinePlotCore } from "../../core/line-plot";
 import { LINE_COLORS } from "../../core/line-plot/colors";
@@ -16,7 +16,7 @@ const MODES: ActivationPatchingMode[] = ["probability", "prob_diff", "rank"];
  * ActivationPatchingCore wraps LinePlotCore with activation-patching-specific defaults.
  * It manages mode switching, token selection, and renders built-in controls.
  */
-export class ActivationPatchingCore {
+export class ActivationPatchingCore implements ActivationPatchingWidgetInterface {
     private linePlot: LinePlotCore;
     private allData: ActivationPatchingData;
     private mode: ActivationPatchingMode;
@@ -237,9 +237,9 @@ export class ActivationPatchingCore {
         this.linePlot.setData(this.buildPlotData());
     }
 
-    setDarkMode(dark: boolean): void {
+    setThemeMode(dark: boolean): void {
         this.darkMode = dark;
-        this.linePlot.setDarkMode(dark);
+        this.linePlot.setThemeMode(dark);
         this.updateModeBarUI();
         updateTokenSelector(this.tokenSelectorEl, this.buildTokenSelectorConfig());
     }

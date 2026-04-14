@@ -47,7 +47,7 @@ export function LogitLensWidget({
     // Sync dark mode
     useEffect(() => {
         if (coreRef.current && darkMode !== undefined) {
-            coreRef.current.setDarkMode(darkMode);
+            coreRef.current.setThemeMode(darkMode);
         }
     }, [darkMode]);
 
