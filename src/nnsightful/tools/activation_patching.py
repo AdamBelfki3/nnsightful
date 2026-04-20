@@ -27,7 +27,7 @@ class ActivationPatchingTool(Tool):
         remote: bool = False,
         backend=None,
         **_kwargs,
-    ) -> dict[str, Any]:
+    ) -> Any:
         n_layers = model.num_layers
         src_acts: list[list[torch.Tensor]] = []
         clean_hs: list[torch.Tensor] = []
@@ -36,7 +36,7 @@ class ActivationPatchingTool(Tool):
         clean_logits = None
         patched_logits = None
 
-        with model.session(remote=remote, backend=backend) as session:
+        with model.session(remote=remote, backend=backend):
             with model.trace(src_prompt):
                 for l_idx in range(n_layers):
                     src_acts.append([])
@@ -80,18 +80,16 @@ class ActivationPatchingTool(Tool):
                         F.softmax(model.logits[0, -1], dim=-1).save()
                     )
 
-        raw: dict[str, Any] = {
+        if backend is not None:
+            return backend
+
+        return {
             "tokenizer": model.tokenizer,
             "src_pred": src_pred,
             "clean_pred": clean_pred,
             "patched_logits": patched_logits,
             "clean_logits": clean_logits,
         }
-
-        if remote and backend is not None:
-            raw["job_id"] = session.backend.job_id
-
-        return raw
 
     def _format(
         self,

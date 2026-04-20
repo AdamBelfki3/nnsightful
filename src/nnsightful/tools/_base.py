@@ -12,18 +12,25 @@ if TYPE_CHECKING:
 class Tool(ABC):
     """Abstract base for nnsightful tools.
 
-    Subclasses implement ``_run`` (trace/session setup) and ``_format``
-    (result processing).  End users call the tool directly::
+    End users call the tool directly to get formatted output::
 
-        data = tool(model, prompt, ...)
+        data = tool(model, prompt, ..., remote=False)
 
-    For async two-phase patterns (e.g. workbench), call ``_run`` and
-    ``_format`` separately::
+    For streaming / two-phase execution (e.g. workbench SSE endpoints),
+    call ``_run`` with a backend.  When a backend is provided, ``_run`` runs
+    the trace/session (which primes the backend via its ``__call__`` hook)
+    and returns the backend itself rather than a raw dict.  The caller
+    drives the backend to completion — typically by async-iterating it for
+    status updates and then passing the downloaded result dict to
+    ``_format`` to produce the final :class:`ToolData`::
 
-        raw = tool._run(model, prompt, remote=True, backend=backend)
-        job_id = raw["job_id"]
-        # ... later, after fetching results from backend ...
-        data = tool._format(raw_results, ...)
+        backend = StreamingRemoteBackend(...)
+        tool._run(model, prompt, remote=True, backend=backend)
+        async for response in backend:
+            if response.status == JobStatus.COMPLETED:
+                raw = response.data           # dict of save-keyed tensors
+                raw["tokenizer"] = ...        # local context injected here
+                data = tool._format(raw, ...)
     """
 
     @abstractmethod
@@ -34,11 +41,14 @@ class Tool(ABC):
         remote: bool = False,
         backend=None,
         **kwargs,
-    ) -> dict[str, Any]:
-        """Run the trace/session and collect raw results.
+    ) -> Any:
+        """Run the trace/session.
 
-        Returns a dict of raw results.  When *remote* and *backend* are
-        set, the dict includes a ``"job_id"`` key.
+        When ``backend`` is ``None``, returns a dict of raw results.
+        When ``backend`` is provided, returns the backend — no raw dict is
+        built; the caller is expected to drive the backend and inject any
+        local (non-tensor) context into the downloaded result dict before
+        calling :meth:`_format`.
         """
         ...
 
@@ -52,9 +62,8 @@ class Tool(ABC):
         model: "StandardizedTransformer",
         *args,
         remote: bool = False,
-        backend=None,
         **kwargs,
     ) -> ToolData:
-        """Run the tool end-to-end: trace + format."""
-        raw = self._run(model, *args, remote=remote, backend=backend, **kwargs)
+        """Run the tool end-to-end (local or remote-blocking)."""
+        raw = self._run(model, *args, remote=remote, backend=None, **kwargs)
         return self._format(raw, **kwargs)
