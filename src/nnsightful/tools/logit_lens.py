@@ -71,33 +71,31 @@ class LogitLensTool(Tool):
         remote: bool = False,
         backend=None,
         **_kwargs,
-    ) -> dict[str, Any]:
+    ) -> Any:
         layer_indices = resolve_indices(layers, model.num_layers)
-        input_tokens: list[str] = [
-            str(model.tokenizer.decode(token))
-            for token in model.tokenizer.encode(prompt)
-        ]
 
-        all_logits = None
-        with model.trace(prompt, remote=remote, backend=backend) as tracer:
+        with model.trace(prompt, remote=remote, backend=backend):
             all_logits = list().save()
             for i in layer_indices:
                 hs = model.layers_output[i]
                 logits = model.project_on_vocab(hs)
                 all_logits.append(logits)
 
-        raw: dict[str, Any] = {
+        if backend is not None:
+            return backend
+
+        input_tokens: list[str] = [
+            str(model.tokenizer.decode(token))
+            for token in model.tokenizer.encode(prompt)
+        ]
+
+        return {
             "input_tokens": input_tokens,
             "all_logits": all_logits,
             "tokenizer": model.tokenizer,
             "layer_indices": layer_indices,
             "model_name": model._model.config._name_or_path,
         }
-
-        if remote and backend is not None:
-            raw["job_id"] = tracer.backend.job_id
-
-        return raw
 
     def _format(
         self,
