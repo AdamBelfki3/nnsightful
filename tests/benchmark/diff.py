@@ -65,15 +65,35 @@ def _sort_key(row: dict[str, Any]) -> tuple:
 
 
 def _format_delta(row: dict[str, Any]) -> str:
+    """Human-readable delta string.
+
+    Uses percentage for small changes and ratio (``Nx faster`` / ``Nx
+    slower``) once the speedup / slowdown factor reaches 2×. Percentage
+    alone reads poorly for large speedups — e.g. a 4952ms → 626ms change
+    is "87.4% faster" but intuitively "7.9x faster".
+    """
     if row["status"] == "new":
         return "(new)"
     if row["status"] == "removed":
         return "(removed)"
+
     d_ms = row["delta_ms"]
-    d_pct = row["delta_pct"]
+    old_mean = row["old_mean"]
+    new_mean = row["new_mean"]
     sign = "+" if d_ms >= 0 else ""
-    direction = "slower" if d_ms > 0 else "faster"
-    return f"{sign}{d_ms:.1f}ms ({abs(d_pct):.1f}% {direction})"
+
+    if d_ms > 0:
+        direction = "slower"
+        ratio = new_mean / old_mean if old_mean > 0 else None
+    else:
+        direction = "faster"
+        ratio = old_mean / new_mean if new_mean > 0 else None
+
+    if ratio is not None and ratio >= 2.0:
+        return f"{sign}{d_ms:.1f}ms ({ratio:.1f}x {direction})"
+
+    pct = abs(row["delta_pct"])
+    return f"{sign}{d_ms:.1f}ms ({pct:.1f}% {direction})"
 
 
 # ---------------------------------------------------------------------------

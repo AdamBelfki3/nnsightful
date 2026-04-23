@@ -6,4 +6,5 @@ __pycache__/
 *.egg-info/
 build/
 .eggs/
-tests/benchmark/latest.json
+tests/benchmark/*.json
+!tests/benchmark/results.json
