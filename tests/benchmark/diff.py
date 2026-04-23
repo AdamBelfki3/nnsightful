@@ -478,12 +478,27 @@ def markdown_diff(
 
         out.append(f"## {_md_section_label(section)}")
         out.append("")
-        out.append("|  | Tool | Model | Params | Baseline | Current | Delta |")
-        out.append("|:-:|------|-------|--------|---------:|--------:|:------|")
+
+        last_tool = None
+        last_model = None
         for row in section_rows:
+            if row["tool"] != last_tool:
+                if last_tool is not None:
+                    out.append("")  # blank after previous table
+                out.append(f"### {row['tool']}")
+                out.append("")
+                last_tool = row["tool"]
+                last_model = None  # force model header to re-emit under this tool
+            if row["model"] != last_model:
+                if last_model is not None:
+                    out.append("")  # blank after previous table
+                out.append(f"#### {row['model']}")
+                out.append("")
+                out.append("|  | Params | Baseline | Current | Delta |")
+                out.append("|:-:|--------|---------:|--------:|:------|")
+                last_model = row["model"]
             out.append(
-                f"| {_md_status_emoji(row)} | {row['tool']} | {row['model']} | "
-                f"{_md_params(row)} | "
+                f"| {_md_status_emoji(row)} | {_md_params(row)} | "
                 f"{_ms(row.get('old_mean'))} | {_ms(row.get('new_mean'))} | "
                 f"{_format_delta(row)} |"
             )
@@ -536,58 +551,73 @@ def markdown_results(
 
         out.append(f"## {_md_section_label(section)}")
         out.append("")
-        if section == "remote":
-            if detail:
-                out.append(
-                    "| Tool | Model | Params | Mean | Std | Min | Max | Running | Download | Total |"
-                )
-                out.append(
-                    "|------|-------|--------|-----:|----:|----:|----:|--------:|---------:|------:|"
-                )
-            else:
-                out.append("| Tool | Model | Params | Mean | Std |")
-                out.append("|------|-------|--------|-----:|----:|")
-            for row in section_rows:
-                lat = row["latency"]
-                cells = [
-                    row["tool"],
-                    row["model"],
-                    _md_params(row),
-                    f"{lat['mean'] * 1000:.1f}ms",
-                    f"{lat['std'] * 1000:.1f}ms",
-                ]
-                if detail:
-                    bd = row.get("latency_breakdown", {})
-                    cells += [
-                        f"{lat['min'] * 1000:.1f}ms",
-                        f"{lat['max'] * 1000:.1f}ms",
-                        _ms(bd.get("running", {}).get("mean")),
-                        _ms(bd.get("download", {}).get("mean")),
-                        _ms(bd.get("total", {}).get("mean")),
-                    ]
-                out.append("| " + " | ".join(cells) + " |")
-        else:
-            if detail:
-                out.append("| Tool | Model | Params | Mean | Std | Min | Max |")
-                out.append("|------|-------|--------|-----:|----:|----:|----:|")
-            else:
-                out.append("| Tool | Model | Params | Mean | Std |")
-                out.append("|------|-------|--------|-----:|----:|")
-            for row in section_rows:
-                lat = row["latency"]
-                cells = [
-                    row["tool"],
-                    row["model"],
-                    _md_params(row),
-                    f"{lat['mean'] * 1000:.1f}ms",
-                    f"{lat['std'] * 1000:.1f}ms",
-                ]
-                if detail:
-                    cells += [
-                        f"{lat['min'] * 1000:.1f}ms",
-                        f"{lat['max'] * 1000:.1f}ms",
-                    ]
-                out.append("| " + " | ".join(cells) + " |")
+
+        header, sep = _md_results_header(section, detail)
+
+        last_tool = None
+        last_model = None
+        for row in section_rows:
+            if row["tool"] != last_tool:
+                if last_tool is not None:
+                    out.append("")
+                out.append(f"### {row['tool']}")
+                out.append("")
+                last_tool = row["tool"]
+                last_model = None
+            if row["model"] != last_model:
+                if last_model is not None:
+                    out.append("")
+                out.append(f"#### {row['model']}")
+                out.append("")
+                out.append(header)
+                out.append(sep)
+                last_model = row["model"]
+            out.append(_md_results_row(row, section, detail))
         out.append("")
 
     return "\n".join(out)
+
+
+def _md_results_header(section: str, detail: bool) -> tuple[str, str]:
+    """Build the Markdown header + separator rows for a results table.
+
+    The Tool/Model columns are dropped — they appear as ``###`` / ``####``
+    headings instead — so only Params + latency columns remain.
+    """
+    if section == "remote" and detail:
+        return (
+            "| Params | Mean | Std | Min | Max | Running | Download | Total |",
+            "|--------|-----:|----:|----:|----:|--------:|---------:|------:|",
+        )
+    if section == "local" and detail:
+        return (
+            "| Params | Mean | Std | Min | Max |",
+            "|--------|-----:|----:|----:|----:|",
+        )
+    return (
+        "| Params | Mean | Std |",
+        "|--------|-----:|----:|",
+    )
+
+
+def _md_results_row(row: dict[str, Any], section: str, detail: bool) -> str:
+    """Build a Markdown results row (no Tool/Model cells — those are headings)."""
+    lat = row["latency"]
+    cells = [
+        _md_params(row),
+        f"{lat['mean'] * 1000:.1f}ms",
+        f"{lat['std'] * 1000:.1f}ms",
+    ]
+    if detail:
+        cells += [
+            f"{lat['min'] * 1000:.1f}ms",
+            f"{lat['max'] * 1000:.1f}ms",
+        ]
+        if section == "remote":
+            bd = row.get("latency_breakdown", {})
+            cells += [
+                _ms(bd.get("running", {}).get("mean")),
+                _ms(bd.get("download", {}).get("mean")),
+                _ms(bd.get("total", {}).get("mean")),
+            ]
+    return "| " + " | ".join(cells) + " |"
