@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Callable, Optional, Any
 
 import torch
-import torch.nn.functional as F
 
 from ..types import LogitLensData, LogitLensMeta
 from ._base import Tool
@@ -61,149 +59,99 @@ def _select_tokens(
 class LogitLensTool(Tool):
     """Logit lens: decode intermediate layer predictions."""
 
-    @torch.no_grad()
     def _run(
         self,
-        model: "StandardizedTransformer",
+        model: StandardizedTransformer,
         prompt: str,
-        *,
-        layers: IndexSpec = None,
-        remote: bool = False,
-        backend=None,
-        **_kwargs,
-    ) -> dict[str, Any]:
-        layer_indices = resolve_indices(layers, model.num_layers)
-        input_tokens: list[str] = [
-            str(model.tokenizer.decode(token))
-            for token in model.tokenizer.encode(prompt)
-        ]
+        *args,
+        remote: bool=False,
+        backend: Optional=None,
+        non_blocking=False,
+        raw=False,
+        post_transform: Optional[Callable]=None,
+        **kwargs
+    ) -> torch.Tensor|dict[Any, Any]|Any:
 
-        all_logits = None
-        with model.trace(prompt, remote=remote, backend=backend) as tracer:
-            all_logits = list().save()
-            for i in layer_indices:
-                hs = model.layers_output[i]
-                logits = model.project_on_vocab(hs)
-                all_logits.append(logits)
+        def format(
+            logits: torch.Tensor,
+            model: StandardizedTransformer,
+            prompt,
+            top_k: int = 5,
+            include_entropy: bool=True
+        ) -> dict[Any, Any]:
 
-        raw: dict[str, Any] = {
-            "input_tokens": input_tokens,
-            "all_logits": all_logits,
-            "tokenizer": model.tokenizer,
-            "layer_indices": layer_indices,
-            "model_name": model._model.config._name_or_path,
-        }
+            # AXIS LABELS + TICKS
+            input_tokens = [
+                str(model.tokenizer.decode(token)) # TOKENIZE THE INPUT PROMPT
+                for token in model.tokenizer.encode(prompt)
+            ]
+            layers = list(range(model.num_layers))
+            positions = list(range(len(input_tokens)))
 
-        if remote and backend is not None:
-            raw["job_id"] = tracer.backend.job_id
-
-        return raw
-
-    def _format(
-        self,
-        raw: dict[str, Any],
-        *,
-        positions: IndexSpec = None,
-        top_k: int | None = 5,
-        top_p: float | None = None,
-        logit_indices: IndexSpec = None,
-        include_entropy: bool = True,
-        **_kwargs,
-    ) -> LogitLensData:
-        assert (
-            top_k is not None or top_p is not None
-        ), "At least one of top_k or top_p must be specified"
-
-        input_tokens = raw["input_tokens"]
-        all_logits = raw["all_logits"]
-        tokenizer = raw["tokenizer"]
-        layer_indices = raw.get("layer_indices", list(range(len(all_logits))))
-        model_name = raw.get("model_name", "")
-
-        n_positions = len(input_tokens)
-        position_indices = resolve_indices(positions, n_positions)
-        positions_is_sparse = len(position_indices) != n_positions
-        n_selected_positions = len(position_indices)
-        n_selected_layers = len(all_logits)
-
-        vocab_size = all_logits[0].shape[-1]
-        extra_logit_indices = (
-            resolve_indices(logit_indices, vocab_size)
-            if logit_indices is not None
-            else None
-        )
-
-        # tracked[pi] = {token_str: [prob_layer0, prob_layer1, ...]}
-        tracked: list[dict[str, list[float]]] = [{} for _ in range(n_selected_positions)]
-
-        # topk_list[li][pi] = [token_str, ...]
-        topk_list: list[list[list[str]]] = [[] for _ in range(n_selected_layers)]
-
-        # entropy_list[li][pi] = entropy_value
-        entropy_list: list[list[float]] = [[] for _ in range(n_selected_layers)]
-
-        # First pass: collect selected tokens at each layer/position
-        # and build the set of token indices to track per position
-        tokens_to_track: list[set[int]] = [set() for _ in range(n_selected_positions)]
-
-        for li, logits in enumerate(all_logits):
-            layer_topk: list[list[str]] = []
-            layer_entropy: list[float] = []
-
-            for pi, pos in enumerate(position_indices):
-                pos_logits = logits[0, pos]  # [vocab]
-                probs = F.softmax(pos_logits, dim=-1)
-
-                # Select tokens via top-k / top-p / explicit indices
-                selected_indices = _select_tokens(probs, top_k, top_p, extra_logit_indices)
-
-                # Sort by probability (descending) for display order
-                idx_prob_pairs = [(idx, probs[idx].item()) for idx in selected_indices]
-                idx_prob_pairs.sort(key=lambda x: x[1], reverse=True)
-                selected_tokens = [tokenizer.decode(idx) for idx, _ in idx_prob_pairs]
-
-                layer_topk.append(selected_tokens)
-                tokens_to_track[pi].update(selected_indices)
-
-                if include_entropy:
-                    log_p = F.log_softmax(pos_logits, dim=-1)
-                    p = log_p.exp()
-                    H = -(p * log_p).sum().item()
-                    layer_entropy.append(round(H, 5))
-
-            topk_list[li] = layer_topk
+            # ENTROPY: entropy[l_idx][pos]
             if include_entropy:
-                entropy_list[li] = layer_entropy
+                log_p = torch.nn.functional.log_softmax(logits, dim=-1)
+                p = log_p.exp()
+                entropy = torch.round(-(p * log_p).sum(dim=-1), decimals=3).tolist()
+            else:
+                entropy = None
 
-        # Second pass: compute trajectories for all tracked tokens
-        for pi, pos in enumerate(position_indices):
-            for token_idx in tokens_to_track[pi]:
-                token_str = tokenizer.decode(token_idx)
-                trajectory = []
+            probs = torch.nn.functional.softmax(logits, dim=-1)
 
-                for logits in all_logits:
-                    pos_logits = logits[0, pos, :]  # [vocab]
-                    probs = F.softmax(pos_logits, dim=-1)
-                    prob = probs[token_idx].item()
-                    trajectory.append(round(prob, 5))
+            logits.to('cpu') # free memory
 
-                tracked[pi][token_str] = trajectory
+            _, top_indices = torch.topk(probs, k=top_k, dim=-1)
 
-        meta = LogitLensMeta(
-            version=2,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            model=model_name,
-        )
+            # TOP-K
+            topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
 
-        return LogitLensData(
-            meta=meta,
-            layers=layer_indices,
-            input=input_tokens,
-            positions=position_indices if positions_is_sparse else None,
-            tracked=tracked,
-            topk=topk_list,
-            entropy=entropy_list if include_entropy else None,
-        )
+            # TRAJECTORIES: trajectories[pos]{token_str: [prob_l0, prob_l1, ...etc]}
+            unique_indices = [
+                torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
+                for pi in range(top_indices.shape[1])
+            ]
+            probs = probs.permute(1, 2, 0)
+            trajectories = [{model.tokenizer.decode(token): torch.round(probs[pos_idx][token], decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+
+            return (
+                {
+                    "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
+                    "layers": layers,
+                    "input": input_tokens,
+                    "tracked": trajectories,
+                    "topk": topks,
+                    "entropy": entropy,
+                    "positions": positions
+                }
+            )
+
+        with torch.no_grad():
+            with model.trace(prompt, remote=remote, backend=backend) as tracer:
+                all_logits = list()
+
+                for l_idx in range(model.num_layers):
+                    all_logits.append(model.project_on_vocab(model.layers_output[l_idx]))
+
+                all_logits = torch.cat(all_logits, dim=0)
+
+                if raw:
+                    results = all_logits.to('cpu').save()
+                else:
+                    results = format(all_logits, model, prompt, **kwargs)
+
+                results.save()
+
+        if remote and non_blocking:
+            return backend.job_id
+
+        return results
+
+    @staticmethod
+    def to_data_obj(**kwargs):
+        meta_dict = kwargs['meta']
+        kwargs['meta'] = LogitLensMeta(**meta_dict)
+
+        return LogitLensData(**kwargs)
 
 
 logit_lens = LogitLensTool()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from ..types import ToolData
@@ -9,7 +8,7 @@ if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
 
 
-class Tool(ABC):
+class Tool():
     """Abstract base for nnsightful tools.
 
     Subclasses implement ``_run`` (trace/session setup) and ``_format``
@@ -26,7 +25,6 @@ class Tool(ABC):
         data = tool._format(raw_results, ...)
     """
 
-    @abstractmethod
     def _run(
         self,
         model: "StandardizedTransformer",
@@ -42,7 +40,6 @@ class Tool(ABC):
         """
         ...
 
-    @abstractmethod
     def _format(self, raw: dict[str, Any], **kwargs) -> ToolData:
         """Format raw results into structured output data."""
         ...
@@ -51,10 +48,17 @@ class Tool(ABC):
         self,
         model: "StandardizedTransformer",
         *args,
-        remote: bool = False,
+        remote: bool=False,
         backend=None,
+        non_blocking=False,
+        raw=False,
         **kwargs,
     ) -> ToolData:
         """Run the tool end-to-end: trace + format."""
-        raw = self._run(model, *args, remote=remote, backend=backend, **kwargs)
-        return self._format(raw, **kwargs)
+
+        output = self._run(model, *args, remote=remote, backend=backend, non_blocking=non_blocking, raw=raw, **kwargs)
+
+        if not (non_blocking or raw):
+            output = self.__class__.to_data_obj(**output)
+
+        return output
