@@ -64,6 +64,26 @@ def _sort_key(row: dict[str, Any]) -> tuple:
     return (row["tool"], row["model"], sorted(row["params"].items()))
 
 
+def _md_status_emoji(row: dict[str, Any]) -> str:
+    """Visual indicator for Markdown diff rows (inline-safe).
+
+    Faster = speedup = 🟢. Slower = regression = 🔴. Status-level
+    new/removed rows get their own markers so they're visually
+    distinct from performance deltas.
+    """
+    status = row["status"]
+    if status == "new":
+        return "🆕"
+    if status == "removed":
+        return "❌"
+    d_ms = row["delta_ms"]
+    if d_ms < 0:
+        return "🟢"
+    if d_ms > 0:
+        return "🔴"
+    return "⚪"  # exactly zero delta — measurement noise or identical
+
+
 def _format_delta(row: dict[str, Any]) -> str:
     """Human-readable delta string.
 
@@ -458,15 +478,24 @@ def markdown_diff(
 
         out.append(f"## {_md_section_label(section)}")
         out.append("")
-        out.append("| Tool | Model | Params | Baseline | Current | Delta |")
-        out.append("|------|-------|--------|---------:|--------:|:------|")
+        out.append("|  | Tool | Model | Params | Baseline | Current | Delta |")
+        out.append("|:-:|------|-------|--------|---------:|--------:|:------|")
         for row in section_rows:
             out.append(
-                f"| {row['tool']} | {row['model']} | {_md_params(row)} | "
+                f"| {_md_status_emoji(row)} | {row['tool']} | {row['model']} | "
+                f"{_md_params(row)} | "
                 f"{_ms(row.get('old_mean'))} | {_ms(row.get('new_mean'))} | "
                 f"{_format_delta(row)} |"
             )
         out.append("")
+
+    # Legend for the status column
+    out.append("---")
+    out.append(
+        "🟢 faster &nbsp;·&nbsp; 🔴 slower &nbsp;·&nbsp; "
+        "⚪ unchanged &nbsp;·&nbsp; 🆕 new &nbsp;·&nbsp; ❌ removed"
+    )
+    out.append("")
 
     return "\n".join(out)
 
