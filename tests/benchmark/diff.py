@@ -440,8 +440,14 @@ def markdown_diff(
     tools: list[str] | None = None,
     models: list[str] | None = None,
     remote: bool | None = None,
+    plots: bool = False,
 ) -> str:
-    """Build a Markdown document of the diff. One table per non-empty section."""
+    """Build a Markdown document of the diff. One table per non-empty section.
+
+    When ``plots=True`` and matplotlib is installed, each ``### tool``
+    section gets a comparison plot: baseline (dashed) vs current (solid),
+    one color per model.
+    """
     latest_path = latest_path or LATEST_FILE
     baseline_path = baseline_path or BASELINE_FILE
 
@@ -470,6 +476,19 @@ def markdown_diff(
         out.append(f"- **Baseline:** _none at `{baseline_path.name}`_")
     out.append("")
 
+    plot_renderer = None
+    if plots:
+        from .plots import matplotlib_available, plot_tool_section_diff
+
+        if matplotlib_available():
+            plot_renderer = plot_tool_section_diff
+        else:
+            out.append(
+                "_Plots requested but matplotlib is not installed. "
+                "Install it with `pip install matplotlib`._"
+            )
+            out.append("")
+
     for section in _sections_to_show(remote):
         section_rows = [r for r in rows if r["section"] == section]
         if not section_rows:
@@ -487,6 +506,17 @@ def markdown_diff(
                     out.append("")  # blank after previous table
                 out.append(f"### {row['tool']}")
                 out.append("")
+                if plot_renderer is not None:
+                    tool_rows = [
+                        r for r in section_rows if r["tool"] == row["tool"]
+                    ]
+                    data_url = plot_renderer(row["tool"], section, tool_rows)
+                    if data_url is not None:
+                        out.append(
+                            f"![{row['tool']} — {_md_section_label(section)} diff]"
+                            f"({data_url})"
+                        )
+                        out.append("")
                 last_tool = row["tool"]
                 last_model = None  # force model header to re-emit under this tool
             if row["model"] != last_model:
@@ -521,8 +551,14 @@ def markdown_results(
     models: list[str] | None = None,
     remote: bool | None = None,
     detail: bool = False,
+    plots: bool = False,
 ) -> str:
-    """Build a Markdown document of the latest run's results."""
+    """Build a Markdown document of the latest run's results.
+
+    When ``plots=True`` and matplotlib is installed, each ``### tool``
+    section gets a line plot of mean latency vs. the swept parameter
+    (one line per model), embedded as a base64 PNG data URL.
+    """
     path = path or LATEST_FILE
     current = load_run(path)
     if current is None:
@@ -543,6 +579,19 @@ def markdown_results(
     out.append(f"- **Repeat:** {current.get('n_repeat', '?')}")
     out.append("")
 
+    plot_renderer = None
+    if plots:
+        from .plots import matplotlib_available, plot_tool_section
+
+        if matplotlib_available():
+            plot_renderer = plot_tool_section
+        else:
+            out.append(
+                "_Plots requested but matplotlib is not installed. "
+                "Install it with `pip install matplotlib`._"
+            )
+            out.append("")
+
     for section in sections:
         section_rows = [r for s, r in selected if s == section]
         if not section_rows:
@@ -562,6 +611,16 @@ def markdown_results(
                     out.append("")
                 out.append(f"### {row['tool']}")
                 out.append("")
+                # Render a single plot for this (tool, section) group.
+                if plot_renderer is not None:
+                    tool_rows = [r for r in section_rows if r["tool"] == row["tool"]]
+                    data_url = plot_renderer(row["tool"], section, tool_rows)
+                    if data_url is not None:
+                        out.append(
+                            f"![{row['tool']} — {_md_section_label(section)}]"
+                            f"({data_url})"
+                        )
+                        out.append("")
                 last_tool = row["tool"]
                 last_model = None
             if row["model"] != last_model:

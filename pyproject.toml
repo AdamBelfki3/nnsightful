@@ -22,6 +22,10 @@ dev = [
     "ipykernel",
 ]
 
+[project.optional-dependencies]
+# Installed on demand for `--plots` in the benchmark Markdown export.
+plots = ["matplotlib>=3.7"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["nnsightful*"]

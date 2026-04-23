@@ -41,9 +41,17 @@ Usage:
     python -m tests.benchmark --show --remote
     python -m tests.benchmark --show --local
 
-    # Export the show / diff output as a Markdown file too
+    # Export to a chosen Markdown path
     python -m tests.benchmark --show --md report.md
     python -m tests.benchmark --show-diff --md diff.md
+
+    # Use the default path alongside results.json
+    # (--show  → results.md ; --show-diff / --diff → benchmark_diff.md)
+    python -m tests.benchmark --show --md
+    python -m tests.benchmark --show-diff --md
+
+    # Include embedded line plots in the Markdown report
+    python -m tests.benchmark --show --md --plots
 
     # Write the run to a named file (tests/benchmark/NAME.json)
     python -m tests.benchmark -n llama_sweep --models meta-llama/Llama-3.1-8B
@@ -64,6 +72,28 @@ from pathlib import Path
 # ignored otherwise. (Note: --models is *not* in this set — it doubles as a
 # display-time substring filter.)
 _BENCHMARK_ONLY_FLAGS = {"--repeat", "--warmup"}
+
+# Sentinel for `--md` with no argument — resolved to a mode-specific default
+# filename at call time. Using a unique object makes the check unambiguous
+# vs. an actual user-supplied string.
+_MD_DEFAULT = object()
+
+
+def _resolve_md_path(raw, mode: str, baseline_path: Path) -> Path | None:
+    """Turn the raw ``args.md`` value into a concrete Path (or None).
+
+    - ``None`` → `--md` not passed; no markdown file.
+    - ``_MD_DEFAULT`` (from ``--md`` with no argument) → default filename
+      in the baseline directory: ``results.md`` for show, ``benchmark_diff.md``
+      for diff variants.
+    - Anything else (a string from the CLI) → user-supplied path.
+    """
+    if raw is None:
+        return None
+    if raw is _MD_DEFAULT:
+        filename = "results.md" if mode == "show" else "benchmark_diff.md"
+        return baseline_path.parent / filename
+    return Path(raw)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -133,11 +163,25 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--md",
-        type=Path,
+        nargs="?",
         default=None,
+        const=_MD_DEFAULT,
         help=(
-            "Also write the --show / --diff / --show-diff output to this file "
-            "as Markdown tables. Stdout output is unchanged."
+            "Also write the --show / --diff / --show-diff output to a Markdown "
+            "file. Pass a path to choose the destination, or pass --md with no "
+            "argument to use the default filename in the baseline's directory "
+            "(results.md for --show, benchmark_diff.md for --diff / "
+            "--show-diff). Stdout output is unchanged."
+        ),
+    )
+    p.add_argument(
+        "--plots",
+        action="store_true",
+        help=(
+            "Embed one line plot per (tool, section) in the --show Markdown "
+            "export, showing mean latency vs. the swept parameter with one "
+            "line per model. Requires matplotlib (install via the `plots` "
+            "extra: `pip install -e '.[plots]'`)."
         ),
     )
     p.add_argument(
@@ -226,6 +270,13 @@ def main() -> None:
     else:
         filter_remote = None
 
+    # The baseline path drives the default --md directory. `--baseline`
+    # may be None, in which case `load_run`/etc. fall back to BASELINE_FILE,
+    # so we mirror that here when resolving the default md filename.
+    from .runner import BASELINE_FILE
+
+    baseline_path = args.baseline or BASELINE_FILE
+
     if args.show:
         from .diff import markdown_results, print_results
 
@@ -236,15 +287,17 @@ def main() -> None:
             remote=filter_remote,
             detail=args.detail,
         )
-        if args.md:
-            args.md.write_text(markdown_results(
+        md_path = _resolve_md_path(args.md, "show", baseline_path)
+        if md_path is not None:
+            md_path.write_text(markdown_results(
                 args.latest,
                 tools=args.tools,
                 models=args.models,
                 remote=filter_remote,
                 detail=args.detail,
+                plots=args.plots,
             ))
-            print(f"\n  markdown written to {args.md}")
+            print(f"\n  markdown written to {md_path}")
         return
 
     if args.show_diff:
@@ -257,15 +310,17 @@ def main() -> None:
             models=args.models,
             remote=filter_remote,
         )
-        if args.md:
-            args.md.write_text(markdown_diff(
+        md_path = _resolve_md_path(args.md, "diff", baseline_path)
+        if md_path is not None:
+            md_path.write_text(markdown_diff(
                 args.latest,
                 args.baseline,
                 tools=args.tools,
                 models=args.models,
                 remote=filter_remote,
+                plots=args.plots,
             ))
-            print(f"\n  markdown written to {args.md}")
+            print(f"\n  markdown written to {md_path}")
         return
 
     from nnterp import StandardizedTransformer
@@ -322,17 +377,19 @@ def main() -> None:
             models=args.models,
             remote=filter_remote,
         )
-        if args.md:
+        md_path = _resolve_md_path(args.md, "diff", baseline_path)
+        if md_path is not None:
             from .diff import markdown_diff
 
-            args.md.write_text(markdown_diff(
+            md_path.write_text(markdown_diff(
                 args.latest,
                 args.baseline,
                 tools=args.tools,
                 models=args.models,
                 remote=filter_remote,
+                plots=args.plots,
             ))
-            print(f"\n  markdown written to {args.md}")
+            print(f"\n  markdown written to {md_path}")
 
 
 if __name__ == "__main__":

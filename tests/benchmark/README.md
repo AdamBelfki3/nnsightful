@@ -67,6 +67,17 @@ python -m tests.benchmark --show-diff --local
 python -m tests.benchmark --show --md report.md
 python -m tests.benchmark --show-diff --md diff.md
 
+# Or use --md with no argument to get the default filename next to
+# results.json (results.md for --show, benchmark_diff.md for diff modes)
+python -m tests.benchmark --show --md
+python -m tests.benchmark --show-diff --md
+
+# Add --plots to embed a line plot per (tool, section) in the Markdown
+# report (mean latency vs. the swept parameter, one line per model).
+# Requires matplotlib: pip install -e '.[plots]'
+python -m tests.benchmark --show --md --plots
+python -m tests.benchmark --show-diff --md --plots
+
 # Promote latest.json into results.json (update the baseline), then commit
 python -m tests.benchmark --promote
 ```
@@ -293,13 +304,26 @@ rows for a given tool stay grouped even after merges across runs.
 
 ## Markdown export
 
-`--md PATH` writes the same tables as stdout but as Markdown, in
-addition to printing. Works with `--show`, `--diff`, `--show-diff`.
+`--md` writes the same tables as stdout but as Markdown, in addition
+to printing. Works with `--show`, `--diff`, `--show-diff`.
+
+- `--md PATH` — user-chosen destination.
+- `--md` (no argument) — default filename alongside `results.json`:
+  `results.md` for `--show`, `benchmark_diff.md` for `--diff` / `--show-diff`.
 
 ```bash
 python -m tests.benchmark --show --detail --md report.md
-python -m tests.benchmark --show-diff --md diff.md
+python -m tests.benchmark --show-diff --md           # → benchmark_diff.md
 ```
+
+Add `--plots` (requires matplotlib via `pip install -e '.[plots]'`)
+to embed one line plot per `(tool, section)` under its heading. The
+plot shows mean latency (with ±1 std band) vs. the swept parameter,
+one line per model. For `--show-diff`, each plot overlays the current
+run (solid) on the baseline (dashed) in matching colors per model.
+The Y-axis auto-switches to log scale when values span ≥10× and
+displays human-readable units (`50ms`, `1.0s`, `2min`) at both major
+and minor ticks.
 
 Output contains a metadata header, then one `## LOCAL` / `## REMOTE
 (unqueued)` section per non-empty table, with right-aligned numeric
