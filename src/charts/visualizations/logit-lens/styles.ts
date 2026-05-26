@@ -78,25 +78,57 @@ export function generateStyles(uid: string): string {
         /* Popup is portaled to document.body (so position: fixed works even
            when an ancestor of the widget is CSS-transformed). Selectors use
            the popup's ID, not #${uid} descendant, so they keep matching
-           after the popup is moved out of the widget subtree. */
+           after the popup is moved out of the widget subtree.
+
+           The popup is intentionally compact — small padding and tight row
+           spacing so it remains usable next to a short heatmap. max-height
+           is set imperatively by positionPopupNearCell() based on the
+           widget's height; overflow-y: auto then makes the topk list
+           scroll if it doesn't fit. */
         #${uid}_popup {
             display: none; position: fixed; background: white; border: 1px solid #ddd;
-            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 12px;
-            z-index: 100; min-width: 180px; max-width: 280px;
+            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            padding: 8px 10px;
+            z-index: 100;
+            /* max-width here is the upper bound; positionPopupNearCell()
+               also writes inline maxWidth based on widget width and uses
+               the SAME 260px ceiling (constant CAP_W). Keep them in sync. */
+            min-width: 140px; max-width: 260px;
+            overflow-y: auto;
+            /* Reserve scrollbar gutter on classic-scrollbar systems
+               (Windows) so the scrollbar doesn't sit on top of .topk-item
+               hover targets. No-op on overlay-scrollbar systems (Mac). */
+            scrollbar-gutter: stable;
+            box-sizing: border-box;
         }
         #${uid}_popup.visible { display: block; }
-        #${uid}_popup .popup-header { font-weight: 600; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
-        #${uid}_popup .popup-header code { font-weight: 400; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); background: #f5f5f5; padding: 2px 6px; border-radius: 3px; margin-left: 4px; }
-        #${uid}_popup .popup-close { position: absolute; top: 8px; right: 10px; cursor: pointer; color: #999; font-size: var(--ll-title-size, 20px); }
+        #${uid}_popup .popup-header {
+            font-weight: 600;
+            font-size: calc(var(--ll-content-size, 14px) * 1.05);
+            margin-bottom: 5px; padding-bottom: 4px; padding-right: 18px;
+            border-bottom: 1px solid #eee;
+            line-height: 1.25;
+        }
+        #${uid}_popup .popup-header code {
+            font-weight: 400;
+            font-size: calc(var(--ll-content-size, 14px) * 1.0);
+            background: #f5f5f5; padding: 1px 4px; border-radius: 3px; margin-left: 4px;
+        }
+        #${uid}_popup .popup-close {
+            position: absolute; top: 4px; right: 6px;
+            cursor: pointer; color: #999;
+            font-size: calc(var(--ll-content-size, 14px) * 1.2); line-height: 1;
+        }
         #${uid}_popup .popup-close:hover { color: #333; }
         #${uid}_popup .topk-item {
-            padding: 4px 6px; margin: 2px 0; border-radius: 3px; cursor: pointer;
+            padding: 2px 5px; margin: 1px 0;
+            border-radius: 3px; cursor: pointer;
             display: flex; justify-content: space-between;
-            font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2));
+            font-size: var(--ll-content-size, 14px); line-height: 1.3;
         }
         #${uid}_popup .topk-item:hover { background: #f0f0f0; }
         #${uid}_popup .topk-item.active { background: #f0f0f0; }
-        #${uid}_popup .topk-token { font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #${uid}_popup .topk-token { font-family: monospace; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #${uid}_popup .topk-prob { color: #666; margin-left: 8px; }
         #${uid}_popup .topk-item.pinned { border-left: 3px solid currentColor; }
         #${uid} .resize-handle {
@@ -157,10 +189,17 @@ export function generateStyles(uid: string): string {
         #${uid}.show-all-handles .resize-handle,
         #${uid}.show-all-handles .resize-handle-input,
         #${uid}.show-all-handles .resize-handle-right { background: rgba(33, 150, 243, 0.3); }
-        /* Color menu also portaled to body — same rationale as #${uid}_popup. */
+        /* Color menu also portaled to body — same rationale as #${uid}_popup.
+           max-width/max-height also set inline by positionMenuNearButton().
+           overflow + scrollbar-gutter handle long item lists when the
+           menu is capped by a small widget. */
         #${uid}_color_menu {
             display: none; position: fixed; background: white; border: 1px solid #ddd;
-            border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 200; min-width: 150px;
+            border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            z-index: 200; min-width: 150px; max-width: 280px;
+            overflow-y: auto;
+            scrollbar-gutter: stable;
+            box-sizing: border-box;
         }
         #${uid}_color_menu.visible { display: block; }
         #${uid}_color_menu .color-menu-item { padding: 0; cursor: pointer; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); display: flex; align-items: stretch; }

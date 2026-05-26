@@ -859,7 +859,11 @@ export function createWidget(
         if (menu.classList.contains("visible")) { menu.classList.remove("visible"); return; }
         const btn = e.target as HTMLElement;
         // Color menu uses position: fixed (escapes widget overflow:hidden),
-        // so coords are viewport-relative.
+        // so coords are viewport-relative. Initial placeholder position;
+        // positionMenuBelowButton() repositions after the menu is laid out.
+        // visibility: hidden between .visible toggle and reposition avoids
+        // the brief flash at the placeholder position.
+        menu.style.visibility = "hidden";
         const rect = btn.getBoundingClientRect();
         menu.style.left = rect.left + "px";
         menu.style.top = (rect.bottom + 5) + "px";
@@ -898,6 +902,8 @@ export function createWidget(
 
         menu.innerHTML = html;
         menu.classList.add("visible");
+        positionMenuNearButton(menu, rect);
+        menu.style.visibility = "";
         showOverlay(closeColorModeMenu);
 
         menu.querySelectorAll<HTMLElement>(".color-menu-item").forEach((item) => {
@@ -1052,6 +1058,10 @@ export function createWidget(
         const popup = dom.popup();
         // Popup uses position: fixed (to escape widget overflow:hidden),
         // so coords are viewport-relative — no widget offset subtraction.
+        // Pre-set visibility: hidden so the popup is laid out but invisible
+        // between the .visible toggle and positionPopupNearCell — eliminates
+        // the brief flash at the placeholder position for slow renders.
+        popup.style.visibility = "hidden";
         const rect = cell.getBoundingClientRect();
         const gap = 5;
         popup.style.left = (rect.left + rect.width + gap) + "px";
@@ -1104,12 +1114,153 @@ export function createWidget(
         });
 
         popup.classList.add("visible");
-        const popupRect = popup.getBoundingClientRect();
-        if (popupRect.right > window.innerWidth && rect.left - gap - popupRect.width >= 0) {
-            popup.style.left = (rect.left - popupRect.width - gap) + "px";
-        }
+        positionPopupNearCell(popup, rect, gap);
+        popup.style.visibility = "";
         showOverlay(closePopup);
         updateChart(cellData.trajectory, "#999", cellData.token, pos);
+    }
+
+    // Place the popup near a heatmap cell, trying four anchors in order
+    // (right / left / below / above) and falling back to a clamped
+    // placement when none fit cleanly. The popup is constrained to stay
+    // inside the widget's bounding box; if the widget is too small on a
+    // given axis, we relax to the viewport so the popup remains visible.
+    //
+    // We also shrink the popup itself when the widget is small: maxWidth
+    // and maxHeight are pinned to the widget's dimensions before
+    // measuring, so the popup can't demand more space than the heatmap
+    // has. overflow-y: auto on the popup then makes the topk list scroll
+    // internally if it overflows.
+    // Place the color-mode menu near its trigger button. Simpler than the
+    // popup positioning because the menu is anchored to a single button
+    // (vs. a heatmap cell) and only needs two candidate anchors (below
+    // the button, then above it). Same widget-then-viewport bounds
+    // strategy as positionPopupNearCell.
+    function positionMenuNearButton(
+        menu: HTMLElement,
+        btnRect: DOMRect,
+    ): void {
+        const widgetRect = dom.widget().getBoundingClientRect();
+        const margin = 4;
+        const gap = 5;
+
+        // Cap menu dimensions to the widget, with usable floors.
+        const FLOOR_W = 150;
+        const FLOOR_H = 100;
+        const CAP_W = 280;
+        const CAP_H = 360;
+        menu.style.maxWidth = Math.max(FLOOR_W, Math.min(CAP_W, widgetRect.width - 2 * margin)) + "px";
+        menu.style.maxHeight = Math.max(FLOOR_H, Math.min(CAP_H, widgetRect.height - 2 * margin)) + "px";
+
+        void menu.offsetWidth;
+        const rect = menu.getBoundingClientRect();
+        const menuW = rect.width;
+        const menuH = rect.height;
+
+        const widgetFitsH = widgetRect.width >= menuW + 2 * margin;
+        const widgetFitsV = widgetRect.height >= menuH + 2 * margin;
+        const minLeft = widgetFitsH ? widgetRect.left + margin : margin;
+        const maxLeft = (widgetFitsH ? widgetRect.right : window.innerWidth) - menuW - margin;
+        const minTop = widgetFitsV ? widgetRect.top + margin : margin;
+        const maxTop = (widgetFitsV ? widgetRect.bottom : window.innerHeight) - menuH - margin;
+
+        const anchors: { left: number; top: number }[] = [
+            { left: btnRect.left, top: btnRect.bottom + gap },           // below
+            { left: btnRect.left, top: btnRect.top - gap - menuH },      // above
+        ];
+
+        let chosen = anchors[0];
+        for (const a of anchors) {
+            if (
+                a.left >= minLeft && a.left <= maxLeft &&
+                a.top >= minTop && a.top <= maxTop
+            ) {
+                chosen = a;
+                break;
+            }
+        }
+
+        menu.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
+        menu.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
+    }
+
+    function positionPopupNearCell(
+        popup: HTMLElement,
+        cellRect: DOMRect,
+        gap: number,
+    ): void {
+        const widgetRect = dom.widget().getBoundingClientRect();
+        const margin = 4;
+
+        // Cap popup dimensions to the widget. We keep a usable floor
+        // (FLOOR_W × FLOOR_H) so the popup is never tinier than usable;
+        // if the widget is smaller than that, the popup will overflow the
+        // widget on that axis and the positioning fallback below relaxes
+        // to viewport bounds so the popup remains visible.
+        //
+        // CAP_W mirrors the CSS `max-width: 260px` on #${uid}_popup — keep
+        // these in sync (CSS still wins if they drift, but the JS upper
+        // bound here makes the cap visible at the point of computation).
+        // CAP_H is the same idea for height: stops the inline maxHeight
+        // from being misleadingly large on a very tall widget.
+        const FLOOR_W = 140;
+        const FLOOR_H = 120;
+        const CAP_W = 260;
+        const CAP_H = 420;
+        const cappedW = Math.max(FLOOR_W, Math.min(CAP_W, widgetRect.width - 2 * margin));
+        const cappedH = Math.max(FLOOR_H, Math.min(CAP_H, widgetRect.height - 2 * margin));
+        popup.style.maxWidth = cappedW + "px";
+        popup.style.maxHeight = cappedH + "px";
+
+        // Defensive reflow before measuring: `.visible` was toggled in the
+        // synchronous caller, so layout is normally already fresh, but
+        // touching offsetWidth forces a sync layout pass in case a future
+        // refactor introduces an async hop between the style write and the
+        // getBoundingClientRect read.
+        void popup.offsetWidth;
+        const popupRect = popup.getBoundingClientRect();
+        const popupW = popupRect.width;
+        const popupH = popupRect.height;
+
+        // "Fits in widget" check: can a popup of size popupW × popupH be
+        // fully placed inside widgetRect after subtracting margins?
+        // - true  → constrain bounds to the widget (the soft preference).
+        // - false → relax to the viewport on that axis so the popup is
+        //           still fully visible somewhere on screen, even if it
+        //           visibly overflows the widget.
+        const widgetFitsH = widgetRect.width >= popupW + 2 * margin;
+        const widgetFitsV = widgetRect.height >= popupH + 2 * margin;
+        const minLeft = widgetFitsH ? widgetRect.left + margin : margin;
+        const maxLeft = (widgetFitsH ? widgetRect.right : window.innerWidth) - popupW - margin;
+        const minTop = widgetFitsV ? widgetRect.top + margin : margin;
+        const maxTop = (widgetFitsV ? widgetRect.bottom : window.innerHeight) - popupH - margin;
+
+        // Below/above anchors use the cell's horizontal MIDPOINT (not its
+        // left edge) so a thin cell with a wide popup doesn't push the
+        // popup off to the right and immediately fail the bounds check.
+        const cellMidX = cellRect.left + cellRect.width / 2;
+        const anchors: { left: number; top: number }[] = [
+            { left: cellRect.right + gap,            top: cellRect.top },                  // right
+            { left: cellRect.left - gap - popupW,    top: cellRect.top },                  // left
+            { left: cellMidX - popupW / 2,           top: cellRect.bottom + gap },         // below (centered)
+            { left: cellMidX - popupW / 2,           top: cellRect.top - gap - popupH },   // above (centered)
+        ];
+
+        let chosen = anchors[0];
+        for (const a of anchors) {
+            if (
+                a.left >= minLeft && a.left <= maxLeft &&
+                a.top >= minTop && a.top <= maxTop
+            ) {
+                chosen = a;
+                break;
+            }
+        }
+
+        // Final clamp — guarantees the popup stays inside the chosen
+        // bounds even when no anchor fully fit (e.g. cell near a corner).
+        popup.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
+        popup.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
     }
 
     function togglePinnedTrajectory(token: string, addToGroup: boolean): boolean {
