@@ -24,6 +24,7 @@ def _to_dict(obj: dict | BaseModel) -> dict:
     return obj
 
 _STANDALONE_JS: str | None = None
+_STANDALONE_JS_MTIME: float | None = None
 
 
 # ── Global defaults ──────────────────────────────────────────────────
@@ -33,7 +34,12 @@ _default_aspect_ratio: str | None = None  # None = use per-widget default
 _default_dark_mode: bool | None = None
 
 _WIDGET_ASPECT_RATIOS = {
-    "logit_lens": 5/3,  # content-driven height (table + chart with its own aspect ratio)
+    # logit_lens applies its aspect-ratio to the widget root (via the
+    # --ll-aspect-ratio CSS variable). That caps the widget's height
+    # proportional to its width; the heatmap viewport scrolls when content
+    # exceeds the cap. Not the outer-wrapper aspect-ratio used by the other
+    # widgets — see _widget_html for the dispatch.
+    "logit_lens": "5 / 3",
     "activation_patching": "21 / 9",
     "line_plot": "21 / 9",
 }
@@ -94,16 +100,19 @@ def get_dark_mode() -> bool | None:
 # ── Internal helpers ─────────────────────────────────────────────────
 
 def _get_standalone_js() -> str:
-    """Load and cache the standalone JS bundle."""
-    global _STANDALONE_JS
-    if _STANDALONE_JS is None:
-        js_path = Path(__file__).resolve().parent / "charts.js"
-        if not js_path.exists():
-            raise FileNotFoundError(
-                f"charts.js not found at {js_path}. "
-                "Run 'npm run build' in the nnsightful/ directory first."
-            )
+    """Load and cache the standalone JS bundle. Reloads when charts.js changes
+    on disk so local rebuilds are picked up without a kernel restart."""
+    global _STANDALONE_JS, _STANDALONE_JS_MTIME
+    js_path = Path(__file__).resolve().parent / "charts.js"
+    if not js_path.exists():
+        raise FileNotFoundError(
+            f"charts.js not found at {js_path}. "
+            "Run 'npm run build' in the nnsightful/ directory first."
+        )
+    mtime = js_path.stat().st_mtime
+    if _STANDALONE_JS is None or _STANDALONE_JS_MTIME != mtime:
         _STANDALONE_JS = js_path.read_text(encoding="utf-8")
+        _STANDALONE_JS_MTIME = mtime
     return _STANDALONE_JS
 
 
@@ -125,6 +134,12 @@ def _resolve_sizing(
     return w, ar
 
 
+# CSS keywords that mean "no aspect-ratio". Forwarded to the widget as a
+# distinct sentinel ("unbounded") so the JS layer can distinguish a Python
+# opt-out from the workbench's fill-mode signal (variable unset).
+_ASPECT_RATIO_OPT_OUT_KEYWORDS = {"none", "auto", "initial", "inherit", "unset"}
+
+
 def _widget_html(
     widget_name: str,
     prefix: str,
@@ -133,14 +148,50 @@ def _widget_html(
     width: str,
     aspect_ratio: str | None,
     extra_js: str = "",
+    use_css_vars: bool = False,
 ) -> str:
-    """Generate the HTML/JS snippet that creates a standalone widget."""
+    """Generate the HTML/JS snippet that creates a standalone widget.
+
+    Args:
+        use_css_vars: If True, forward `width` and `aspect_ratio` as CSS
+            custom properties on the inner container (used by logit_lens).
+            The outer box stays at the notebook's natural width. If False,
+            apply `width` and `aspect_ratio` directly to the outer box
+            (used by line_plot / activation_patching).
+    """
     js = _get_standalone_js()
     cid = f"{prefix}_{uuid.uuid4().hex[:12]}"
-    ar_style = f"aspect-ratio:{aspect_ratio};" if aspect_ratio else ""
-    inner_height = "height:100%;" if aspect_ratio else ""
+    if use_css_vars:
+        outer_style = "max-width:100%;box-sizing:border-box;"
+        css_vars = [f"--ll-heatmap-width:{width}"]
+        if isinstance(aspect_ratio, str) and aspect_ratio.strip():
+            keyword = aspect_ratio.strip().lower()
+            if keyword in _ASPECT_RATIO_OPT_OUT_KEYWORDS:
+                # Explicit opt-out from the Python caller. JS reads
+                # "unbounded" as "no cap, content-driven flow".
+                css_vars.append("--ll-aspect-ratio:unbounded")
+            else:
+                # Pass the (presumed valid) ratio through verbatim.
+                css_vars.append(f"--ll-aspect-ratio:{aspect_ratio}")
+        # Note: if aspect_ratio is None/empty, the CSS variable is NOT
+        # forwarded — that's the workbench fill-mode signal, but the
+        # Python entry point ensures a default ratio is resolved before
+        # we get here, so this branch is unreachable in practice from
+        # display_logit_lens.
+        inner_style = (
+            ";".join(css_vars) + ";max-width:100%;box-sizing:border-box;"
+        )
+    elif aspect_ratio:
+        # line_plot / activation_patching: fixed outer box with an aspect-
+        # ratio so the widget fills it. This is the original behavior.
+        outer_style = f"width:{width};aspect-ratio:{aspect_ratio};"
+        inner_style = "width:100%;height:100%;"
+    else:
+        # Fallback for any widget without an aspect-ratio.
+        outer_style = f"width:{width};"
+        inner_style = "width:100%;"
     return f"""
-    <div style="width:{width};{ar_style}"><div id="{cid}" style="width:100%;{inner_height}"></div></div>
+    <div style="{outer_style}"><div id="{cid}" style="{inner_style}"></div></div>
     <script>
     (function() {{
         {js}
@@ -259,10 +310,18 @@ def display_logit_lens(
     Args:
         data: LogitLensData dict (V2 format with meta, layers, input, tracked, topk).
         ui_state: Optional LogitLensUIState dict for initial widget configuration.
-        width: CSS width of the container. Defaults to global setting.
-        aspect_ratio: CSS aspect-ratio for the outer wrapper. Defaults to None
-            (content-driven height). The chart uses its own aspect ratio
-            set via ui_state["chartAspectRatio"] (default "21 / 9").
+        width: CSS width applied to the heatmap viewport (the scrollable
+            area that holds the table), e.g. "90%" or "600px". The line
+            plot below matches this width too. Defaults to global setting.
+        aspect_ratio: CSS aspect-ratio applied to the widget root
+            (width:height, e.g. "5 / 3"). The widget's height is derived
+            from its width via this ratio; when content exceeds the cap,
+            the heatmap viewport scrolls. The line plot keeps its own
+            constant aspect-ratio via ui_state["chartAspectRatio"].
+
+            Pass "none" / "auto" to opt out of the cap entirely: the
+            widget then grows with its content. Passing None (the default)
+            uses the package default ("5 / 3"), not opt-out.
         dark_mode: Force dark (True) or light (False) mode. When None,
             uses the global setting, or auto-detects from the notebook theme.
         return_html: If True, return the HTML object instead of displaying it.
@@ -305,7 +364,7 @@ def display_logit_lens(
                 .observe(container, { childList: true, subtree: true });"""
 
     html = _widget_html("LogitLensWidget", "ll", data_json, ui_state_json, w, ar,
-                         extra_js=disable_js)
+                         extra_js=disable_js, use_css_vars=True)
     return _display_or_return(html, return_html)
 
 

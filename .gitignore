@@ -8,3 +8,4 @@ build/
 .eggs/
 tests/benchmark/*.json
 !tests/benchmark/results.json
+.docs/

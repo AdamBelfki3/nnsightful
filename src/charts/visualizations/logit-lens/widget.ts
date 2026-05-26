@@ -65,7 +65,9 @@ export function createWidget(
         <div id="${uid}">
             <div class="ll-title" id="${uid}_title">Logit Lens: Top Predictions by Layer</div>
             <div class="table-wrapper">
-                <table class="ll-table" id="${uid}_table"></table>
+                <div class="table-scroll">
+                    <table class="ll-table" id="${uid}_table"></table>
+                </div>
                 <div class="resize-handle-bottom" id="${uid}_resize_bottom"></div>
                 <div class="resize-handle-right" id="${uid}_resize_right"></div>
             </div>
@@ -84,6 +86,19 @@ export function createWidget(
             <div class="color-menu" id="${uid}_color_menu"></div>
         </div>
     `;
+
+    // Portal the popup and color menu to document.body so position: fixed
+    // works correctly even when an ancestor of the widget has a CSS
+    // transform / filter / will-change (which creates a new containing
+    // block for fixed descendants and would otherwise shift them to the
+    // wrong screen position). At <body> level there's no transformed
+    // ancestor, so viewport-relative coords land where we expect.
+    {
+        const popupEl = document.getElementById(uid + "_popup");
+        if (popupEl) document.body.appendChild(popupEl);
+        const menuEl = document.getElementById(uid + "_color_menu");
+        if (menuEl) document.body.appendChild(menuEl);
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // CONSTANTS
@@ -410,14 +425,6 @@ export function createWidget(
         return { stride, indices };
     }
 
-    function updateChartDimensions(): void {
-        const table = dom.table();
-        const tableWidth = table.offsetWidth;
-        const chartContainer = dom.chartContainer();
-        // Match chart container width to table width
-        chartContainer.style.width = tableWidth + "px";
-    }
-
     // Stable reference for current positions used by onLineRemoved
     let currentPositionsToShow: number[] = [];
 
@@ -452,8 +459,6 @@ export function createWidget(
         hoverLabel: string | null,
         pos: number,
     ): void {
-        updateChartDimensions();
-
         const isRankMode = state.trajectoryMetric === "rank";
         currentPositionsToShow = state.pinnedRows.length > 0
             ? state.pinnedRows.map((pr) => pr.pos)
@@ -480,6 +485,24 @@ export function createWidget(
                 });
             });
         });
+
+        // Hide the chart entirely when no persistent trajectories are plotted.
+        // The hover overlay is suppressed too — otherwise moving between cells
+        // would flicker the chart in and out. Hover preview only activates once
+        // the user pins at least one trajectory.
+        const chartContainer = dom.chartContainer();
+        const wasHidden = chartContainer.style.display === "none";
+        if (richLines.length === 0) {
+            chartContainer.style.display = "none";
+            return;
+        }
+        if (wasHidden) {
+            chartContainer.style.display = "";
+            applyChartSizing();
+            // Force synchronous layout so LinePlotCore measures real dimensions
+            // instead of the 0×0 it would see right after display:none → "".
+            void chartContainer.offsetHeight;
+        }
 
         // Build xLabels from layer indices
         const xLabels = widgetData.layers.map((l: number) => l);
@@ -523,6 +546,30 @@ export function createWidget(
         } else {
             linePlot.setOverlay(null);
         }
+    }
+
+    // Cross-browser fallback for "rows fill spare vertical space" — Chrome
+    // distributes a table's min-height: 100% across <tr> rows, Firefox and
+    // Safari historically don't. We explicitly set tr.style.height so the
+    // behavior is uniform. When the table's natural height already exceeds
+    // the scroll container, we leave the rows at their natural size and
+    // let .table-scroll's overflow: auto handle scrolling.
+    function stretchRowsToFit(): void {
+        const scrollEl = document.querySelector(
+            "#" + uid + " .table-scroll",
+        ) as HTMLElement | null;
+        const tableEl = dom.table();
+        if (!scrollEl || !tableEl) return;
+        const trs = tableEl.querySelectorAll("tr");
+        if (trs.length === 0) return;
+        // Reset prior heights before measuring so a previous stretched
+        // state doesn't bias the calculation.
+        trs.forEach((tr) => { (tr as HTMLElement).style.height = ""; });
+        const scrollH = scrollEl.clientHeight;
+        const tableH = tableEl.getBoundingClientRect().height;
+        if (tableH >= scrollH - 1) return; // no spare space (≥ within 1px)
+        const target = Math.max(22, Math.floor(scrollH / trs.length));
+        trs.forEach((tr) => { (tr as HTMLElement).style.height = target + "px"; });
     }
 
     function buildTable(cellWidth: number, visibleLayerIndices: number[], maxRows: number | null, stride?: number) {
@@ -680,6 +727,9 @@ export function createWidget(
         table.innerHTML = html;
         attachCellListeners();
         attachResizeListeners();
+        // Fallback for browsers (Firefox / Safari) that don't distribute
+        // a table's min-height across <tr> rows. We do it explicitly in JS.
+        stretchRowsToFit();
 
         updateChart(null, null, null, state.currentHoverPos);
         updateTitle();
@@ -808,10 +858,11 @@ export function createWidget(
         const menu = dom.colorMenu();
         if (menu.classList.contains("visible")) { menu.classList.remove("visible"); return; }
         const btn = e.target as HTMLElement;
+        // Color menu uses position: fixed (escapes widget overflow:hidden),
+        // so coords are viewport-relative.
         const rect = btn.getBoundingClientRect();
-        const containerRect = dom.widget().getBoundingClientRect();
-        menu.style.left = (rect.left - containerRect.left) + "px";
-        menu.style.top = (rect.bottom - containerRect.top + 5) + "px";
+        menu.style.left = rect.left + "px";
+        menu.style.top = (rect.bottom + 5) + "px";
 
         const lastPos = widgetData.tokens.length - 1;
         const lastLayerIdx = state.currentVisibleIndices[state.currentVisibleIndices.length - 1];
@@ -999,11 +1050,12 @@ export function createWidget(
         state.colorPickerTarget = null;
         state.openPopupCell = cell;
         const popup = dom.popup();
+        // Popup uses position: fixed (to escape widget overflow:hidden),
+        // so coords are viewport-relative — no widget offset subtraction.
         const rect = cell.getBoundingClientRect();
-        const containerRect = dom.widget().getBoundingClientRect();
         const gap = 5;
-        popup.style.left = (rect.left - containerRect.left + rect.width + gap) + "px";
-        popup.style.top = (rect.top - containerRect.top) + "px";
+        popup.style.left = (rect.left + rect.width + gap) + "px";
+        popup.style.top = rect.top + "px";
 
         dom.popupLayer().textContent = String(widgetData.layers[li]);
         dom.popupPos().innerHTML = pos + "<br>Input <code>" + escapeHtml(visualizeSpaces(widgetData.tokens[pos])) + "</code>";
@@ -1054,7 +1106,7 @@ export function createWidget(
         popup.classList.add("visible");
         const popupRect = popup.getBoundingClientRect();
         if (popupRect.right > window.innerWidth && rect.left - gap - popupRect.width >= 0) {
-            popup.style.left = (rect.left - containerRect.left - popupRect.width - gap) + "px";
+            popup.style.left = (rect.left - popupRect.width - gap) + "px";
         }
         showOverlay(closePopup);
         updateChart(cellData.trajectory, "#999", cellData.token, pos);
@@ -1104,14 +1156,85 @@ export function createWidget(
     // RESIZE HANDLING
     // ═══════════════════════════════════════════════════════════════
 
+    function measureHostWidth(): number {
+        // Stride/fit calculations must match the heatmap viewport, not the
+        // broader notebook output. The viewport is sized by CSS to
+        // var(--ll-heatmap-width, 90%), which is typically narrower than
+        // the host container. Using the container's width here would
+        // produce a table that overflows the viewport on first render.
+        const wrapper = dom.tableWrapper();
+        const wrapperWidth = wrapper?.clientWidth ?? 0;
+        if (wrapperWidth > 0) return wrapperWidth;
+        // Fallbacks for edge cases where the wrapper isn't measurable yet
+        // (detached node, display:none ancestor, etc.).
+        const host = container as HTMLElement | null;
+        const hostWidth = host?.clientWidth ?? 0;
+        if (hostWidth > 0) return hostWidth;
+        const widgetWidth = dom.widget()?.offsetWidth ?? 0;
+        return widgetWidth || 900;
+    }
+
     function getContainerWidth(): number {
-        const el = dom.widget();
-        const actualWidth = el.offsetWidth || 900;
+        const actualWidth = measureHostWidth();
         return state.maxTableWidth !== null ? Math.min(state.maxTableWidth, actualWidth) : actualWidth;
     }
 
     function getActualContainerWidth(): number {
-        return dom.widget().offsetWidth || 900;
+        return measureHostWidth();
+    }
+
+    // The widget has three modes, distinguished by --ll-aspect-ratio:
+    //
+    //   1. Cap mode (Jupyter default): --ll-aspect-ratio is a ratio like
+    //      "5 / 3". JS sets max-height = host.clientWidth × (h/w). Short
+    //      content shrinks the widget; long content caps it and the
+    //      heatmap scrolls inside.
+    //
+    //   2. Opt-out mode (Jupyter explicit): --ll-aspect-ratio is set to
+    //      "unbounded" (Python forwards this when the user passes "none"
+    //      or "auto"). The widget is content-driven with NO cap; popups
+    //      and parent flow handle the rest. Distinct from fill mode
+    //      because the Python caller wants content-driven sizing, not
+    //      to fill an external bounded box.
+    //
+    //   3. Fill mode (workbench React, anywhere else): --ll-aspect-ratio
+    //      is NOT set. The widget fills its parent's full height. Caller
+    //      is responsible for giving us a bounded box (e.g. h-full
+    //      chained from an h-screen ancestor).
+    //
+    // We can't use CSS aspect-ratio for mode 1: it sets a *definite* height
+    // which, combined with flex-grow on .table-wrapper, reserves empty
+    // space below short content. max-height treats the ratio as a cap and
+    // lets the widget shrink to content when smaller.
+    function applyOuterCap(): void {
+        const widget = dom.widget();
+        if (!widget || !container) return;
+        const cs = getComputedStyle(widget);
+        const raw = cs.getPropertyValue("--ll-aspect-ratio").trim();
+        if (!raw) {
+            // Mode 3 — Fill mode (variable unset, e.g. workbench React).
+            widget.style.maxHeight = "";
+            widget.style.height = "100%";
+            return;
+        }
+        if (raw === "unbounded" || raw === "none" || raw === "auto") {
+            // Mode 2 — Opt-out: clear both, let content drive height.
+            widget.style.maxHeight = "";
+            widget.style.height = "";
+            return;
+        }
+        const hostWidth = (container as HTMLElement).clientWidth;
+        if (hostWidth <= 0) return;
+        const parts = raw.split("/").map((s) => parseFloat(s.trim()));
+        if (parts.length !== 2 || !parts[0] || !parts[1]) {
+            // Malformed ratio — fail safe to content-driven (mode 2).
+            widget.style.maxHeight = "";
+            widget.style.height = "";
+            return;
+        }
+        // Mode 1 — Cap mode.
+        widget.style.height = "";
+        widget.style.maxHeight = ((hostWidth * parts[1]) / parts[0]) + "px";
     }
 
     function attachResizeListeners() {
@@ -1389,30 +1512,91 @@ export function createWidget(
     });
     colorPicker.addEventListener("change", () => { state.colorPickerTarget = null; });
 
-    // Initial build
+    // Initial build. applyOuterCap before computing visible layers so the
+    // widget's max-height / fill-parent height is in place before stride
+    // calc — both modes share the same stride/fit logic (skipping layers
+    // is purely a function of available width vs cellWidth, not of which
+    // host we're in).
+    applyOuterCap();
     const containerWidth = getContainerWidth();
     const result = computeVisibleLayers(state.currentCellWidth, containerWidth);
     buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
 
-    // Apply chart sizing:
-    //   - chartAspectRatio set: flex fills available space, but aspect-ratio
-    //     acts as a minimum height so the chart never gets squished
-    //   - chartHeight set (explicit px from drag): fixed height, no flex
-    //   - neither: flex fill with min-height: 120px (original behavior)
+    // Default the heatmap to its last row (the input's final token, whose
+    // last-layer cell is the canonical next-token prediction). If the
+    // table doesn't overflow vertically this is a no-op (scrollTop is
+    // clamped). Done once, after layout settles — subsequent rebuilds
+    // preserve whatever scroll position the user has navigated to.
+    requestAnimationFrame(() => {
+        const scrollEl = document.querySelector(
+            "#" + uid + " .table-scroll",
+        ) as HTMLElement | null;
+        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    });
+
+    // Opt-in width instrumentation: set window.LL_DEBUG = true before render
+    // to log box metrics + computed style for the full layout chain
+    // including Jupyter/Cursor wrappers walked from the host container up.
+    if (typeof window !== "undefined" && (window as any).LL_DEBUG) {
+        requestAnimationFrame(() => {
+            const describe = (label: string, el: Element | null) => {
+                if (!el) { console.log(`[LL ${uid}] ${label}: <null>`); return; }
+                const h = el as HTMLElement;
+                const cs = getComputedStyle(h);
+                console.log(`[LL ${uid}] ${label}`, {
+                    tag: h.tagName.toLowerCase(),
+                    cls: h.className || "(none)",
+                    offset: [h.offsetWidth, h.offsetHeight],
+                    client: [h.clientWidth, h.clientHeight],
+                    scroll: [h.scrollWidth, h.scrollHeight],
+                    display: cs.display,
+                    width: cs.width,
+                    maxWidth: cs.maxWidth,
+                    minWidth: cs.minWidth,
+                    overflowX: cs.overflowX,
+                    overflowY: cs.overflowY,
+                    position: cs.position,
+                    flex: cs.flex,
+                    alignItems: cs.alignItems,
+                });
+            };
+            let cursor: Element | null = container;
+            const ancestors: Element[] = [];
+            while (cursor && ancestors.length < 6 && cursor !== document.body) {
+                ancestors.push(cursor);
+                cursor = cursor.parentElement;
+            }
+            ancestors.reverse().forEach((a, i) => describe(`ancestor[${i}]`, a));
+            describe("widget root", dom.widget());
+            describe(".table-wrapper", dom.tableWrapper());
+            describe(".table-scroll", document.querySelector("#" + uid + " .table-scroll"));
+            describe(".ll-table", dom.table());
+            describe(".chart-container", dom.chartContainer());
+            describe("chart_div", dom.chartDiv());
+        });
+    }
+
+    // Apply chart sizing. The chart-container never grows or shrinks via flex
+    // — it's the heatmap (.table-wrapper) that absorbs flex space changes.
+    // The line plot stays at its natural aspect-ratio-derived height so that
+    // it remains fully visible even when the heatmap is scrolling internally.
+    //   - chartAspectRatio set: aspect-ratio-derived height, flex: none
+    //   - chartHeight set (explicit px from drag): fixed height, flex: none
+    //   - neither: small min-height fallback, flex: none
     function applyChartSizing() {
         const chartContainer = dom.chartContainer();
         if (state.chartAspectRatio) {
-            chartContainer.style.flex = "1 0 auto";
+            chartContainer.style.flex = "0 0 auto";
             chartContainer.style.height = "auto";
-            chartContainer.style.minHeight = "0";
+            chartContainer.style.minHeight = "";
             chartContainer.style.aspectRatio = state.chartAspectRatio;
         } else if (state.chartHeight !== null) {
-            chartContainer.style.flex = "none";
+            chartContainer.style.flex = "0 0 auto";
             chartContainer.style.height = state.chartHeight + "px";
             chartContainer.style.minHeight = "";
             chartContainer.style.aspectRatio = "";
         } else {
-            chartContainer.style.flex = "1";
+            chartContainer.style.flex = "0 0 auto";
             chartContainer.style.height = "";
             chartContainer.style.minHeight = "";
             chartContainer.style.aspectRatio = "";
@@ -1420,28 +1604,37 @@ export function createWidget(
     }
     applyChartSizing();
 
-    // Observe container resizes (window resize, panel resize, etc.)
-    let lastContainerWidth = containerWidth;
+    // Observe container resizes (window resize, panel resize, etc.).
+    // Init from container.clientWidth so the dedup check below compares
+    // against the same value ResizeObserver reports (entry.contentRect.width).
+    let lastContainerWidth = (container as HTMLElement).clientWidth;
     const containerResizeObserver = new ResizeObserver((entries) => {
         const entry = entries[0];
         if (!entry) return;
         const newWidth = Math.round(entry.contentRect.width);
         if (newWidth === lastContainerWidth || newWidth === 0) return;
         lastContainerWidth = newWidth;
+        applyOuterCap();
         const r = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
         buildTable(state.currentCellWidth, r.indices, state.currentMaxRows, r.stride);
         notifyLinkedWidgets();
     });
     containerResizeObserver.observe(container);
 
-    applyDarkMode(dom.widget(), isDarkMode());
+    // Apply dark-mode to the widget root and to the portaled popup/menu so
+    // their styles match wherever they're rendered.
+    function syncDarkMode(enabled: boolean): void {
+        applyDarkMode(dom.widget(), enabled, dom.popup(), dom.colorMenu());
+    }
+
+    syncDarkMode(isDarkMode());
 
     // React to runtime theme changes (shared listener handles MutationObserver + matchMedia)
     const cleanupDarkModeListener = onThemeModeChange(container, (currentDarkMode) => {
         const widgetEl = dom.widget();
         if (!widgetEl) return;
         if (state.darkModeOverride === null) {
-            applyDarkMode(widgetEl, currentDarkMode);
+            syncDarkMode(currentDarkMode);
             buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
         }
     });
@@ -1464,7 +1657,7 @@ export function createWidget(
             if (s.chartHeight !== undefined) { state.chartHeight = s.chartHeight ?? null; }
             if (s.chartAspectRatio !== undefined) { state.chartAspectRatio = s.chartAspectRatio ?? null; }
             if (s.chartHeight !== undefined || s.chartAspectRatio !== undefined) applyChartSizing();
-            applyDarkMode(dom.widget(), isDarkMode());
+            syncDarkMode(isDarkMode());
             render();
         },
         setData: (data: LogitLensData) => {
@@ -1480,7 +1673,7 @@ export function createWidget(
         },
         setThemeMode: (enabled: boolean) => {
             state.darkModeOverride = !!enabled;
-            applyDarkMode(dom.widget(), isDarkMode());
+            syncDarkMode(isDarkMode());
             buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
         },
         getThemeMode: () => isDarkMode(),
@@ -1509,6 +1702,11 @@ export function createWidget(
             document.removeEventListener("mouseup", handleBottomResizeUp);
             document.removeEventListener("mousemove", handleRightEdgeResizeMove);
             if (linePlot) { linePlot.destroy(); linePlot = null; }
+            // Popup and color menu were portaled to document.body — they
+            // won't be cleaned up by clearing container.innerHTML.
+            document.getElementById(uid + "_popup")?.remove();
+            document.getElementById(uid + "_color_menu")?.remove();
+            removeOverlay();
             if (container) container.innerHTML = "";
         },
     };
