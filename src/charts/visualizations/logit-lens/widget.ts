@@ -576,6 +576,25 @@ export function createWidget(
         state.currentVisibleIndices = visibleLayerIndices;
         state.currentMaxRows = maxRows;
         if (stride !== undefined) state.currentStride = stride;
+
+        // In fill mode (workbench — no outer aspect-ratio cap, host
+        // supplies a bounded box), expand the rendered cellWidth so the
+        // visible layers fill the available horizontal space. Stride
+        // logic is unchanged: which layers are visible is still computed
+        // upstream from state.currentCellWidth. We only stretch the
+        // already-chosen cells to consume horizontal slack — most
+        // visible with few-layer models or when integer rounding in
+        // stride leaves significant slack on the right.
+        if (isFillMode() && visibleLayerIndices.length > 0) {
+            const available = Math.max(
+                0,
+                measureHostWidth() - state.inputTokenWidth - 1,
+            );
+            const fitWidth = available / visibleLayerIndices.length;
+            // Only expand, never shrink below what stride computed against.
+            if (fitWidth > cellWidth) cellWidth = fitWidth;
+        }
+
         const table = dom.table();
         let html = "";
         const totalTokens = widgetData.tokens.length;
@@ -1306,6 +1325,21 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     // RESIZE HANDLING
     // ═══════════════════════════════════════════════════════════════
+
+    // Fill mode = the workbench-style render path where the host gives us
+    // a bounded box and expects the widget to fill it. Detected by the
+    // *absence* of --ll-aspect-ratio on the widget root — that's the
+    // workbench React component's signal (it doesn't set the variable).
+    // Other "no cap" values like "unbounded"/"none"/"auto" are explicit
+    // Python opt-outs (content-driven height, no horizontal fill).
+    function isFillMode(): boolean {
+        const widget = dom.widget();
+        if (!widget) return false;
+        const raw = getComputedStyle(widget)
+            .getPropertyValue("--ll-aspect-ratio")
+            .trim();
+        return !raw;
+    }
 
     function measureHostWidth(): number {
         // Stride/fit calculations must match the heatmap viewport, not the
