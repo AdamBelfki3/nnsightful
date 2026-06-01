@@ -163,6 +163,10 @@ def _widget_html(
     cid = f"{prefix}_{uuid.uuid4().hex[:12]}"
     if use_css_vars:
         outer_style = "max-width:100%;box-sizing:border-box;"
+        # NOTE: --ll-heatmap-width is forwarded for backward/forward compat
+        # but the redesigned logit-lens widget does not currently read it
+        # (the card fills its container width and the heatmap fits columns
+        # to that width). --ll-aspect-ratio drives the height cap.
         css_vars = [f"--ll-heatmap-width:{width}"]
         if isinstance(aspect_ratio, str) and aspect_ratio.strip():
             keyword = aspect_ratio.strip().lower()

@@ -31,7 +31,6 @@ interface CreateWidgetResult {
 const ROW_LABEL_W = 60;
 const ROW_H = 30;
 const HDR_H = 22;
-const SCROLL_MAX_H = 360;
 // Column sizing: the number of visible (strided) columns adapts to the
 // available width so each column keeps at least MIN_CELL px and the grid
 // never needs horizontal scroll; cells then fill the width up to MAX_CELL.
@@ -310,9 +309,25 @@ export function createWidget(
     // --ll-aspect-ratio, which the Jupyter Python wrapper sets but the
     // workbench React mount does not. In fill mode the card becomes a flex
     // column and the heatmap scroll region grows to use the leftover height;
-    // otherwise the card is content-sized with a fixed-height scroll region.
-    const fillMode = !getComputedStyle(widgetEl).getPropertyValue("--ll-aspect-ratio").trim();
+    // otherwise (content/Jupyter) the card height is derived from the
+    // aspect-ratio and the heatmap scrolls to stay inside that box.
+    const aspectRaw = getComputedStyle(widgetEl).getPropertyValue("--ll-aspect-ratio").trim();
+    const fillMode = !aspectRaw;
     if (fillMode) widgetEl.classList.add("ll-fill");
+
+    // Parse --ll-aspect-ratio (e.g. "5 / 3") into h/w, computed once at
+    // construction (aspectRaw is const). "unbounded"/"none"/"auto" or a
+    // malformed/zero value disables the cap (fully content-driven height).
+    // Faithful to the previous widget's applyOuterCap(), which derived the
+    // widget's height from its width via this ratio.
+    const aspectHW: number | null = (() => {
+        if (!aspectRaw || /^(unbounded|none|auto)$/i.test(aspectRaw)) return null;
+        const parts = aspectRaw.split("/").map((s) => parseFloat(s.trim()));
+        if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1]) || parts[0] === 0 || parts[1] === 0) {
+            return null;
+        }
+        return parts[1] / parts[0]; // h / w
+    })();
 
     // Effective cell dimensions, recomputed each render.
     //  - WIDTH (both modes): the visible columns fill the available width
@@ -357,17 +372,41 @@ export function createWidget(
         // scroll inner width (the card can't be stretched by the wide grid).
         //  - fill (workbench): pin to the measured host px — the host is
         //    bounded by the display panel (overflow:hidden), a hard cap
-        //    against any ancestor flex quirk.
-        //  - content (Jupyter): width:100% of the (bounded) output container.
+        //    against any ancestor flex quirk. Height comes from CSS (100%).
+        //  - content (Jupyter): width:100% of the (bounded) output
+        //    container, and the card's HEIGHT is capped from the aspect
+        //    ratio (width × h/w). The card is a flex column with overflow
+        //    hidden, so the heatmap (.ll-scroll, flex:1) absorbs that cap
+        //    and scrolls to keep content inside the ratio box — restoring
+        //    the previous widget's applyOuterCap behavior.
         if (fillMode) {
             const hostW = (container as HTMLElement).clientWidth;
             widgetEl.style.width = hostW > 0 ? hostW + "px" : "100%";
             widgetEl.style.maxWidth = "100%";
+            widgetEl.style.maxHeight = "";
             scrollEl.style.maxHeight = "";
         } else {
             widgetEl.style.width = "";
             widgetEl.style.maxWidth = "";
-            scrollEl.style.maxHeight = SCROLL_MAX_H + "px";
+            scrollEl.style.maxHeight = "";
+            const hostW = (container as HTMLElement).clientWidth || widgetEl.clientWidth;
+            if (aspectHW && hostW > 0) {
+                // Target card height = width × (h/w). Floor it at
+                // chrome + a minimum heatmap so a tall ratio in a narrow
+                // cell can't shrink the (overflow:hidden) card below the
+                // fixed chrome — which would clip the navigator / line plot.
+                // chromeHeight = everything except .ll-scroll (nav, line
+                // plot, header row, axis caption, card padding), measured
+                // live so it tracks whether the line plot is open.
+                const MIN_SCROLL = 90;
+                const chromeH = widgetEl.offsetHeight - scrollEl.offsetHeight;
+                const floor = (chromeH > 0 ? chromeH : 140) + MIN_SCROLL;
+                widgetEl.style.maxHeight = Math.max(floor, Math.round(hostW * aspectHW)) + "px";
+            } else {
+                // unbounded / malformed → content-driven (no cap), matching
+                // the old opt-out path.
+                widgetEl.style.maxHeight = "";
+            }
         }
 
         computeFillSizes();

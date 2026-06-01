@@ -48,13 +48,21 @@ export function generateStyles(uid: string): string {
             padding: 20px;
             /* width:100% + max-width:100% + min-width:0 keep the card bounded
                to its container (never grown by the wide heatmap inside,
-               which is clipped/scrolled by .ll-scroll). Content mode adds an
-               inline max-width to hug the content; fill mode clears it. */
+               which is clipped/scrolled by .ll-scroll). */
             width: 100%;
             max-width: 100%;
             min-width: 0;
             overflow: hidden;
             -webkit-user-select: none; user-select: none;
+            /* Flex column in BOTH modes: the heatmap (.ll-scroll) flex-grows
+               to absorb available height and scrolls; the navigator and line
+               plot keep their natural size below it.
+                - Content (Jupyter): renderHeatmap sets an inline max-height
+                  on the root from --ll-aspect-ratio, so the card caps at the
+                  width×ratio box and the heatmap scrolls inside it (faithful
+                  to the old applyOuterCap).
+                - Fill (workbench): .ll-fill makes the card fill the panel. */
+            display: flex; flex-direction: column;
         }
         ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
 
@@ -74,18 +82,11 @@ export function generateStyles(uid: string): string {
             color-scheme: dark;
         }
 
-        /* Fill mode: the host (workbench panel) gives a bounded box; the card
-           fills it as a flex column and the heatmap scroll region grows to
-           consume the leftover height (navigator + line plot keep their
-           natural size). Content mode (Jupyter) keeps the card content-sized
-           with a fixed-height scroll region set inline by renderHeatmap. */
-        ${root}.ll-fill {
-            display: flex; flex-direction: column;
-            width: 100%; height: 100%;
-        }
-        ${root}.ll-fill .ll-scroll { flex: 1 1 auto; min-height: 0; }
-        ${root}.ll-fill .ll-nav,
-        ${root}.ll-fill .ll-lineplot-wrap { flex: 0 0 auto; }
+        /* Flex roles for the card's three stacked regions (see #${uid} above). */
+        ${root} .ll-scroll { flex: 1 1 auto; min-height: 0; }
+        ${root} .ll-nav,
+        ${root} .ll-lineplot-wrap { flex: 0 0 auto; }
+        ${root}.ll-fill { width: 100%; height: 100%; }
 
         /* Leading-space marker, used in cell + row-label token rendering. */
         ${root} .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
