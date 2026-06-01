@@ -1,255 +1,315 @@
 /**
- * Generate scoped CSS for a LogitLens widget instance.
- * All rules are scoped to #${uid} to avoid conflicts.
+ * Scoped CSS for the redesigned LogitLens widget.
+ *
+ * The design follows the Workbench design system (tokens.css). Those CSS
+ * variables only exist in the workbench app, so we re-declare the subset
+ * we need *locally* on the widget root — that way the widget looks right
+ * in a Jupyter notebook (no globals.css) AND in the workbench (where our
+ * local values simply match the inherited ones). Dark mode swaps the same
+ * locals via the `.ll-dark` class, which the host toggles.
+ *
+ * Heatmap CELLS always render on a light field (white → ramp blend) in
+ * both themes — they are the data ink. Only the surrounding chrome
+ * (card, labels, strips, navigator) adapts to dark mode.
  */
 export function generateStyles(uid: string): string {
+    const root = `#${uid}`;
     return `
-        #${uid} {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0; padding: 0; position: relative;
-            -webkit-user-select: none; user-select: none;
+        ${root} {
+            /* ── Local design tokens (light) ── */
+            --ll-surface: hsl(0 0% 100%);
+            --ll-surface-2: hsl(0 0% 98%);
+            --ll-surface-3: hsl(0 0% 97%);
+            --ll-card-border: hsl(0 0% 82%);
+            --ll-line: hsl(0 0% 90%);
+            --ll-line-2: hsl(0 0% 88%);
+            --ll-line-faint: hsl(0 0% 93%);
+            --ll-text: hsl(0 0% 9%);
+            --ll-text-2: hsl(0 0% 20%);
+            --ll-text-muted: hsl(0 0% 40%);
+            --ll-text-faint: hsl(0 0% 58%);
+            --ll-primary: hsl(217.2193 91.2195% 59.8039%);
+            --ll-primary-061: hsl(217.2193 91.2195% 59.8039% / 0.06);
+            --ll-primary-018: hsl(217.2193 91.2195% 59.8039% / 0.18);
+            --ll-primary-007: hsl(217.2193 91.2195% 59.8039% / 0.07);
+            --ll-shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+            --ll-font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+            --ll-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
             box-sizing: border-box;
-            /* Block-level flex column: full available width. The outer cap
-               (derived from --ll-aspect-ratio) is applied as max-height via
-               JS in applyOuterCap() — using CSS aspect-ratio would force a
-               definite height and reserve empty space below short content.
-               max-height treats the ratio as an upper bound, so the widget
-               shrinks to its content when small and caps + scrolls (via
-               .table-scroll) when content exceeds the cap. */
-            display: flex; flex-direction: column; align-items: flex-start;
-            max-width: 100%; min-width: 0;
+            position: relative;
+            font-family: var(--ll-font-sans);
+            color: var(--ll-text);
+            -webkit-font-smoothing: antialiased;
+            background: var(--ll-surface);
+            border: 1px solid var(--ll-card-border);
+            border-radius: 0.75rem;
+            box-shadow: var(--ll-shadow-xs);
+            padding: 20px;
+            /* width:100% + max-width:100% + min-width:0 keep the card bounded
+               to its container (never grown by the wide heatmap inside,
+               which is clipped/scrolled by .ll-scroll). Content mode adds an
+               inline max-width to hug the content; fill mode clears it. */
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            overflow: hidden;
+            -webkit-user-select: none; user-select: none;
+        }
+        ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
+
+        /* ── Dark theme overrides (chrome only; cells stay light) ── */
+        ${root}.ll-dark {
+            --ll-surface: hsl(0 0% 16%);
+            --ll-surface-2: hsl(0 0% 13%);
+            --ll-surface-3: hsl(0 0% 20%);
+            --ll-card-border: hsl(0 0% 26%);
+            --ll-line: hsl(0 0% 26%);
+            --ll-line-2: hsl(0 0% 30%);
+            --ll-line-faint: hsl(0 0% 24%);
+            --ll-text: hsl(0 0% 90%);
+            --ll-text-2: hsl(0 0% 80%);
+            --ll-text-muted: hsl(0 0% 64%);
+            --ll-text-faint: hsl(0 0% 55%);
+            color-scheme: dark;
+        }
+
+        /* Fill mode: the host (workbench panel) gives a bounded box; the card
+           fills it as a flex column and the heatmap scroll region grows to
+           consume the leftover height (navigator + line plot keep their
+           natural size). Content mode (Jupyter) keeps the card content-sized
+           with a fixed-height scroll region set inline by renderHeatmap. */
+        ${root}.ll-fill {
+            display: flex; flex-direction: column;
+            width: 100%; height: 100%;
+        }
+        ${root}.ll-fill .ll-scroll { flex: 1 1 auto; min-height: 0; }
+        ${root}.ll-fill .ll-nav,
+        ${root}.ll-fill .ll-lineplot-wrap { flex: 0 0 auto; }
+
+        /* Leading-space marker, used in cell + row-label token rendering. */
+        ${root} .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
+
+        /* ── Heatmap scroll region ── */
+        ${root} .ll-scroll {
+            overflow: auto;
+            min-width: 0; max-width: 100%;
+            border-top: 1px solid var(--ll-line-faint);
+            border-bottom: 1px solid var(--ll-line-faint);
+        }
+        ${root} .ll-grid-inner { /* width set inline */ }
+        ${root} .ll-hdr-row {
+            align-items: end; padding-bottom: 4px;
+            position: sticky; top: 0; z-index: 5; background: var(--ll-surface);
+        }
+        ${root} .ll-corner {
+            font-size: 10px; color: var(--ll-text-muted);
+            text-align: right; padding-right: 8px;
+            letter-spacing: 0.04em; text-transform: uppercase;
+            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+            position: sticky; left: 0; z-index: 4; background: var(--ll-surface);
+            display: flex; align-items: flex-end; justify-content: flex-end;
+        }
+        ${root} .ll-hdr-cell {
+            text-align: center; font-family: var(--ll-font-mono); font-size: 11px;
+            color: var(--ll-text-muted); font-variant-numeric: tabular-nums;
+            overflow: hidden; white-space: nowrap;
+        }
+        ${root} .ll-row { position: relative; }
+        ${root} .ll-row-rail {
+            position: absolute; left: -1px; top: 0; bottom: 0;
+            width: 3px; background: var(--ll-primary); border-radius: 2px; z-index: 2;
+        }
+        ${root} .ll-row-grid {
+            cursor: pointer; position: relative; z-index: 1;
+        }
+        ${root} .ll-row-grid.ll-row-sel {
+            background: var(--ll-surface-2);
+            box-shadow: 0 0 0 1px var(--ll-primary-018);
+            border-radius: 4px;
+        }
+        ${root} .ll-row-label {
+            display: flex; align-items: center; justify-content: flex-end;
+            gap: 6px; padding: 0 8px; font-size: 12px; color: var(--ll-text-2);
+            position: sticky; left: 0; z-index: 3; background: var(--ll-surface);
+            box-shadow: 1px 0 0 var(--ll-line-faint);
             overflow: hidden;
         }
-        #${uid} .ll-title { font-size: var(--ll-title-size, 20px); font-weight: 600; margin-bottom: 8px; padding: 2px 0; flex-shrink: 0; }
-        #${uid} .color-mode-btn {
-            display: inline-block; padding: 0; background: white;
-            border-radius: 4px; font-size: var(--ll-title-size, 20px); cursor: pointer; color: #333; border: none;
+        ${root} .ll-row-grid.ll-row-sel .ll-row-label { background: var(--ll-surface-2); }
+        ${root} .ll-cell {
+            display: flex; align-items: center; justify-content: center;
+            min-width: 0; font-size: 11px; font-family: var(--ll-font-mono);
+            position: relative; color: hsl(0 0% 18%);
         }
-        #${uid} .color-mode-btn:hover { background: #f5f5f5; }
-        #${uid} .ll-table {
-            border-collapse: collapse;
-            font-size: var(--ll-content-size, 14px);
-            table-layout: fixed;
-            /* min-height: 100% lets the table stretch to fill .table-scroll
-               when content is short (rows distribute the extra space). For
-               long content, the table's natural height (sum of row heights)
-               exceeds 100% and .table-scroll's overflow: auto kicks in. */
-            min-height: 100%;
+        ${root} .ll-cell-text {
+            display: block; min-width: 0; max-width: 100%;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        #${uid} .ll-table td, #${uid} .ll-table th { border: 1px solid #ddd; box-sizing: border-box; }
-        #${uid} .pred-cell {
-            /* min-height (not height) lets the row stretch when the table
-               is filling extra space vertically; falls back to 22px as the
-               natural row height when content drives the layout. */
-            min-height: 22px;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            padding: 2px 4px; font-family: monospace; font-size: calc(var(--ll-content-size, 14px) * 0.9);
-            cursor: pointer; position: relative;
+        ${root} .ll-cell.ll-cell-hover { outline: 2px solid var(--ll-text); outline-offset: -2px; z-index: 3; }
+        ${root} .ll-bos-pill {
+            display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
+            border: 1px solid var(--ll-line-2); border-radius: 3px;
+            font-family: var(--ll-font-mono); font-size: 10px; font-weight: 500;
+            color: var(--ll-text-muted); background: var(--ll-surface-3); letter-spacing: 0.02em;
         }
-        #${uid} .pred-cell:hover { outline: 2px solid #e91e63; outline-offset: -1px; }
-        #${uid} .pred-cell.selected { background: #fff59d !important; color: #333 !important; }
-        #${uid} .input-token {
-            padding: 2px 8px; text-align: right; font-weight: 500; color: #333;
-            background: #f5f5f5; white-space: nowrap; overflow: hidden;
-            text-overflow: ellipsis; font-family: monospace; font-size: var(--ll-content-size, 14px);
-            cursor: pointer; position: relative;
+        ${root} .ll-axis-caption {
+            text-align: center; font-size: 10.5px; color: var(--ll-text-muted);
+            letter-spacing: 0.18em; text-transform: uppercase;
         }
-        #${uid} .input-token:hover { background: #e8e8e8; }
-        #${uid} tr:has(.input-token:hover) { outline: 2px solid rgba(255, 193, 7, 0.8); outline-offset: -1px; }
-        #${uid} tr:has(.input-token:hover) .input-token { background: #fff59d !important; }
-        #${uid} .layer-hdr {
-            padding: 4px 2px; text-align: center; font-weight: 500; color: #666;
-            background: #f5f5f5; font-size: calc(var(--ll-content-size, 14px) * 0.9); position: relative;
-        }
-        #${uid} .corner-hdr { padding: 4px 8px; text-align: right; font-weight: 500; color: #666; background: white; position: relative; }
-        #${uid} .chart-container {
-            margin-top: 8px; background: transparent; border-radius: 4px; padding: 8px 0;
-            flex: 0 0 auto; min-height: 120px;
-            /* Width matches the heatmap viewport (same CSS var), so the line
-               plot's horizontal extent always aligns with the heatmap.
-               Height is set imperatively by applyChartSizing via aspect-ratio
-               (default chartAspectRatio = "32 / 9"), giving constant
-               proportions regardless of widget size. */
-            width: var(--ll-heatmap-width, 100%);
-            max-width: 100%;
-            box-sizing: border-box;
-        }
-        #${uid} .chart-container svg { display: block; margin: 0; padding: 0; }
-        /* Popup is portaled to document.body (so position: fixed works even
-           when an ancestor of the widget is CSS-transformed). Selectors use
-           the popup's ID, not #${uid} descendant, so they keep matching
-           after the popup is moved out of the widget subtree.
 
-           The popup is intentionally compact — small padding and tight row
-           spacing so it remains usable next to a short heatmap. max-height
-           is set imperatively by positionPopupNearCell() based on the
-           widget's height; overflow-y: auto then makes the topk list
-           scroll if it doesn't fit. */
+        /* ── Layer navigator ── */
+        ${root} .ll-nav { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
+        ${root} .ll-nav-range {
+            font-family: var(--ll-font-mono); font-size: 11.5px; color: var(--ll-text-2);
+            white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 110px;
+        }
+        ${root} .ll-nav-range .ll-nav-range-key {
+            color: var(--ll-text-muted); margin-right: 6px;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            font-family: var(--ll-font-sans); font-size: 10px;
+        }
+        ${root} .ll-nav-range .ll-dim { color: var(--ll-text-faint); }
+        ${root} .ll-nav-mid { flex: 1; position: relative; min-width: 0; }
+        ${root} .ll-skyline {
+            position: relative; height: 28px; background: var(--ll-surface-3);
+            border: 1px solid var(--ll-line-2); border-radius: 4px;
+            cursor: grab; user-select: none; touch-action: none; overflow: hidden;
+        }
+        ${root} .ll-skyline.ll-grabbing { cursor: grabbing; }
+        ${root} .ll-skyline-bars {
+            position: absolute; inset: 0; display: flex; align-items: flex-end;
+            pointer-events: none;
+        }
+        ${root} .ll-skyline-bar { flex: 1; min-width: 1px; }
+        ${root} .ll-skyline-win {
+            position: absolute; top: -1px; bottom: -1px;
+            background: var(--ll-primary-007); border: 1.5px solid var(--ll-primary);
+            border-radius: 4px; box-shadow: 0 0 0 3px var(--ll-primary-007);
+            pointer-events: none;
+        }
+        ${root} .ll-skyline-handle {
+            position: absolute; top: 4px; bottom: 4px; width: 2px;
+            background: var(--ll-primary); border-radius: 2px;
+        }
+        ${root} .ll-nav-ticks {
+            position: relative; height: 12px; margin-top: 2px;
+            font-family: var(--ll-font-mono); font-size: 9.5px;
+            color: var(--ll-text-faint); font-variant-numeric: tabular-nums;
+        }
+        ${root} .ll-nav-tick { position: absolute; white-space: nowrap; }
+        ${root} .ll-nav-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        ${root} .ll-nav-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 26px; height: 26px; padding: 0;
+            border: 1px solid var(--ll-line-2); background: var(--ll-surface);
+            color: var(--ll-text-2); border-radius: 4px; cursor: pointer;
+        }
+        ${root} .ll-nav-btn:hover:not(:disabled) { background: var(--ll-surface-3); color: var(--ll-text); }
+        ${root} .ll-nav-btn:disabled { opacity: 0.35; cursor: default; }
+        ${root} .ll-nav-sep { width: 1px; height: 16px; background: var(--ll-line-2); margin: 0 4px; }
+
+        /* ── Line plot (kept on cell click) ── */
+        ${root} .ll-lineplot-wrap {
+            margin-top: 14px; padding-top: 14px;
+            border-top: 1px solid var(--ll-line-faint);
+        }
+        ${root} .ll-lineplot-wrap.ll-hidden { display: none; }
+        ${root} .ll-lineplot-head {
+            display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+        }
+        ${root} .ll-lineplot-title {
+            font-size: 11px; color: var(--ll-text-muted);
+            letter-spacing: 0.06em; text-transform: uppercase;
+        }
+        ${root} .ll-lineplot-token { font-family: var(--ll-font-mono); font-size: 12px; color: var(--ll-text); }
+        /* Definite-height box so LinePlotCore's height:100% resolves and the
+           plot can't grow unbounded (it sets height:100% on its mount). */
+        ${root} .ll-lineplot-box { height: 200px; overflow: hidden; }
+        ${root} .ll-lineplot { width: 100%; height: 100%; }
+
+        /* ── Tooltip ── */
+        ${root} .ll-tooltip {
+            position: absolute; width: 220px; padding: 12px 14px;
+            background: var(--ll-surface); border: 1px solid var(--ll-line-2);
+            border-radius: 6px;
+            box-shadow: 0 6px 20px -4px rgba(0,0,0,0.12), 0 2px 6px -2px rgba(0,0,0,0.08);
+            pointer-events: none; z-index: 50; font-family: var(--ll-font-sans);
+            display: none;
+        }
+        ${root} .ll-tooltip.ll-visible { display: block; }
+        ${root} .ll-tt-head { display: flex; align-items: center; gap: 8px; }
+        ${root} .ll-tt-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--ll-line-2); flex-shrink: 0; }
+        ${root} .ll-tt-token {
+            font-family: var(--ll-font-mono); font-size: 13px; font-weight: 500;
+            color: var(--ll-text); max-width: 160px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        ${root} .ll-tt-grid {
+            margin-top: 8px; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+            font-size: 11.5px; color: var(--ll-text-muted);
+        }
+        ${root} .ll-tt-grid .ll-tt-val {
+            font-family: var(--ll-font-mono); color: var(--ll-text); text-align: right;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+
+        /* ── Top-k popup (portaled to <body>, so it carries its own token
+              block + ID-scoped selectors; .ll-dark mirrored from the root). ── */
         #${uid}_popup {
-            display: none; position: fixed; background: white; border: 1px solid #ddd;
-            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            padding: 8px 10px;
-            z-index: 100;
-            /* max-width here is the upper bound; positionPopupNearCell()
-               also writes inline maxWidth based on widget width and uses
-               the SAME 260px ceiling (constant CAP_W). Keep them in sync. */
-            min-width: 140px; max-width: 260px;
-            overflow-y: auto;
-            /* Reserve scrollbar gutter on classic-scrollbar systems
-               (Windows) so the scrollbar doesn't sit on top of .topk-item
-               hover targets. No-op on overlay-scrollbar systems (Mac). */
-            scrollbar-gutter: stable;
+            --p-surface: hsl(0 0% 100%);
+            --p-border: hsl(0 0% 86%);
+            --p-line: hsl(0 0% 92%);
+            --p-text: hsl(0 0% 12%);
+            --p-text-2: hsl(0 0% 38%);
+            --p-muted: hsl(0 0% 50%);
+            --p-hover: hsl(0 0% 96%);
+            --p-code: hsl(0 0% 95%);
+            --p-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+            --p-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
             box-sizing: border-box;
+            display: none; position: fixed; z-index: 100;
+            min-width: 180px; max-width: 280px;
+            background: var(--p-surface); border: 1px solid var(--p-border);
+            border-radius: 6px;
+            box-shadow: 0 6px 20px -4px rgba(0,0,0,0.18), 0 2px 6px -2px rgba(0,0,0,0.10);
+            padding: 12px; font-family: var(--p-sans); color: var(--p-text);
+            -webkit-user-select: none; user-select: none;
         }
-        #${uid}_popup.visible { display: block; }
-        #${uid}_popup .popup-header {
-            font-weight: 600;
-            font-size: calc(var(--ll-content-size, 14px) * 1.05);
-            margin-bottom: 5px; padding-bottom: 4px; padding-right: 18px;
-            border-bottom: 1px solid #eee;
-            line-height: 1.25;
+        #${uid}_popup.ll-visible { display: block; }
+        #${uid}_popup.ll-dark {
+            --p-surface: hsl(0 0% 18%); --p-border: hsl(0 0% 30%); --p-line: hsl(0 0% 28%);
+            --p-text: hsl(0 0% 90%); --p-text-2: hsl(0 0% 70%); --p-muted: hsl(0 0% 60%);
+            --p-hover: hsl(0 0% 24%); --p-code: hsl(0 0% 26%); color-scheme: dark;
         }
-        #${uid}_popup .popup-header code {
-            font-weight: 400;
-            font-size: calc(var(--ll-content-size, 14px) * 1.0);
-            background: #f5f5f5; padding: 1px 4px; border-radius: 3px; margin-left: 4px;
+        #${uid}_popup .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
+        #${uid}_popup .ll-popup-close {
+            position: absolute; top: 6px; right: 9px; cursor: pointer;
+            color: var(--p-muted); font-size: 17px; line-height: 1;
         }
-        #${uid}_popup .popup-close {
-            position: absolute; top: 4px; right: 6px;
-            cursor: pointer; color: #999;
-            font-size: calc(var(--ll-content-size, 14px) * 1.2); line-height: 1;
+        #${uid}_popup .ll-popup-close:hover { color: var(--p-text); }
+        #${uid}_popup .ll-popup-header {
+            font-weight: 600; font-size: 13px; padding-right: 16px;
+            margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--p-line);
         }
-        #${uid}_popup .popup-close:hover { color: #333; }
-        #${uid}_popup .topk-item {
-            padding: 2px 5px; margin: 1px 0;
-            border-radius: 3px; cursor: pointer;
-            display: flex; justify-content: space-between;
-            font-size: var(--ll-content-size, 14px); line-height: 1.3;
+        #${uid}_popup .ll-popup-sub {
+            font-weight: 400; font-size: 11.5px; color: var(--p-text-2); margin-top: 3px;
         }
-        #${uid}_popup .topk-item:hover { background: #f0f0f0; }
-        #${uid}_popup .topk-item.active { background: #f0f0f0; }
-        #${uid}_popup .topk-token { font-family: monospace; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        #${uid}_popup .topk-prob { color: #666; margin-left: 8px; }
-        #${uid}_popup .topk-item.pinned { border-left: 3px solid currentColor; }
-        #${uid} .resize-handle {
-            position: absolute; width: 6px; height: 100%; background: transparent;
-            cursor: col-resize; right: -3px; top: 0; z-index: 10;
+        #${uid}_popup .ll-popup-sub code {
+            font-family: var(--p-mono); background: var(--p-code);
+            padding: 1px 5px; border-radius: 3px;
         }
-        #${uid} .resize-handle:hover, #${uid} .resize-handle.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-handle-input {
-            position: absolute; width: 6px; height: 100%; background: transparent;
-            cursor: col-resize; right: -3px; top: 0; z-index: 10;
+        #${uid}_popup .ll-popup-body { display: flex; flex-direction: column; gap: 1px; }
+        #${uid}_popup .ll-topk {
+            display: flex; justify-content: space-between; align-items: center; gap: 10px;
+            padding: 3px 6px; border-radius: 3px; cursor: pointer;
+            border-left: 3px solid transparent;
+            font-family: var(--p-mono); font-size: 12px;
         }
-        #${uid} .resize-handle-input:hover, #${uid} .resize-handle-input.dragging { background: rgba(76, 175, 80, 0.4); }
-        #${uid} .table-wrapper {
-            /* Itself a flex column inside the widget. The wrapper takes
-               configured width and absorbs the vertical space the outer
-               cap leaves; .table-scroll inside fills the wrapper via flex
-               (not percentage-height — that fails to resolve through
-               flex-shrunk parents and would let the table paint outside
-               the wrapper into the chart's area). */
-            position: relative;
-            display: flex; flex-direction: column;
-            width: var(--ll-heatmap-width, 100%);
-            max-width: 100%; min-width: 0;
-            box-sizing: border-box;
-            flex: 1 1 auto;
-            min-height: 0;
+        #${uid}_popup .ll-topk:hover { background: var(--p-hover); }
+        #${uid}_popup .ll-topk-tok {
+            color: var(--p-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        #${uid} .table-scroll {
-            /* Flex-grown to fill .table-wrapper, with min-height: 0 so it
-               actually shrinks under the outer cap. overflow: auto then
-               kicks in in either direction. Resize handles are siblings
-               with position: absolute so they're excluded from this flex
-               flow. */
-            flex: 1 1 auto;
-            min-height: 0;
-            width: 100%;
-            overflow: auto;
-            max-width: 100%;
-            box-sizing: border-box;
-        }
-        #${uid} .resize-handle-bottom {
-            /* Sits at the wrapper's bottom edge (not -3px past it) so the
-               widget root's overflow: hidden never clips it. */
-            position: absolute; bottom: 0; left: 0; right: 0; height: 6px;
-            cursor: row-resize; background: transparent;
-        }
-        #${uid} .resize-handle-bottom:hover, #${uid} .resize-handle-bottom.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-handle-right {
-            /* Sits at the wrapper's right edge (not -3px past it) so the
-               widget root's overflow: hidden never clips it — especially
-               in workbench mode where heatmap-width is 100% of the widget. */
-            position: absolute; top: 0; bottom: 0; right: 0; width: 6px;
-            cursor: ew-resize; background: transparent;
-        }
-        #${uid} .resize-handle-right:hover, #${uid} .resize-handle-right.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-hint { font-size: calc(var(--ll-content-size, 14px) * 0.9); color: #999; margin-top: 4px; cursor: default; flex-shrink: 0; }
-        #${uid} .resize-hint-extra { display: none; }
-        #${uid}.show-all-handles .resize-handle,
-        #${uid}.show-all-handles .resize-handle-input,
-        #${uid}.show-all-handles .resize-handle-right { background: rgba(33, 150, 243, 0.3); }
-        /* Color menu also portaled to body — same rationale as #${uid}_popup.
-           max-width/max-height also set inline by positionMenuNearButton().
-           overflow + scrollbar-gutter handle long item lists when the
-           menu is capped by a small widget. */
-        #${uid}_color_menu {
-            display: none; position: fixed; background: white; border: 1px solid #ddd;
-            border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            z-index: 200; min-width: 150px; max-width: 280px;
-            overflow-y: auto;
-            scrollbar-gutter: stable;
-            box-sizing: border-box;
-        }
-        #${uid}_color_menu.visible { display: block; }
-        #${uid}_color_menu .color-menu-item { padding: 0; cursor: pointer; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); display: flex; align-items: stretch; }
-        #${uid}_color_menu .color-menu-item:hover, #${uid}_color_menu .color-menu-item.picking { background: #f0f0f0; }
-        #${uid}_color_menu .color-menu-item .color-menu-label { padding: 8px 12px 8px 0; flex: 1; }
-        #${uid}_color_menu .color-menu-item .color-swatch { width: 32px; height: auto; min-height: 24px; border: 0; border-left: 1px solid #ccc; background: transparent; cursor: pointer; opacity: 0; transition: opacity 0.15s; padding: 0; -webkit-appearance: none; -moz-appearance: none; appearance: none; }
-        #${uid}_color_menu .color-menu-item:hover .color-swatch, #${uid}_color_menu .color-menu-item.picking .color-swatch { opacity: 1; }
-        #${uid}_color_menu .color-menu-item .color-swatch:hover { border-left-color: #666; }
-        #${uid} .legend-close { cursor: pointer; }
-        #${uid} .legend-close:hover { fill: #e91e63 !important; }
-        @keyframes menuBlink-${uid} {
-            0% { background: #f0f0f0; }
-            50% { background: #d0d0d0; }
-            100% { background: #f0f0f0; }
-        }
-        /* Dark mode */
-        #${uid}.dark-mode { background: #1e1e1e; color: #e0e0e0; }
-        #${uid}.dark-mode .ll-title { color: #e0e0e0; }
-        #${uid}.dark-mode .color-mode-btn { background: #2d2d2d; color: #e0e0e0; }
-        #${uid}.dark-mode .color-mode-btn:hover { background: #3d3d3d; }
-        #${uid}.dark-mode .ll-table td, #${uid}.dark-mode .ll-table th { border-color: #444; }
-        #${uid}.dark-mode .pred-cell { color: #e0e0e0; }
-        #${uid}.dark-mode .pred-cell.selected { background: #4a4a00 !important; color: #fff !important; }
-        #${uid}.dark-mode .input-token { background: #2d2d2d; color: #e0e0e0; }
-        #${uid}.dark-mode .input-token:hover { background: #3d3d3d; }
-        #${uid}.dark-mode tr:has(.input-token:hover) .input-token { background: #4a4a00 !important; color: #fff !important; }
-        #${uid}.dark-mode .layer-hdr { background: #2d2d2d; color: #aaa; }
-        #${uid}.dark-mode .corner-hdr { background: #1e1e1e; color: #aaa; }
-        #${uid}.dark-mode .chart-container { background: transparent; }
-        /* Dark mode for the portaled popup + menu. The .dark-mode class is
-           applied to the popup/menu elements directly (mirrored from the
-           widget root by applyDarkMode), so the styles match regardless of
-           where the elements live in the DOM. */
-        #${uid}_popup.dark-mode { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
-        #${uid}_popup.dark-mode .popup-header { border-bottom-color: #444; }
-        #${uid}_popup.dark-mode .popup-header code { background: #3d3d3d; color: #e0e0e0; }
-        #${uid}_popup.dark-mode .popup-close { color: #888; }
-        #${uid}_popup.dark-mode .popup-close:hover { color: #e0e0e0; }
-        #${uid}_popup.dark-mode .topk-item:hover { background: #3d3d3d; }
-        #${uid}_popup.dark-mode .topk-item.active { background: #3d3d3d; }
-        #${uid}_popup.dark-mode .topk-prob { color: #aaa; }
-        #${uid}_color_menu.dark-mode { background: #2d2d2d; border-color: #444; }
-        #${uid}_color_menu.dark-mode .color-menu-item:hover, #${uid}_color_menu.dark-mode .color-menu-item.picking { background: #3d3d3d; }
-        #${uid}_color_menu.dark-mode .color-menu-item .color-swatch { border-left-color: #555; }
-        #${uid}.dark-mode .resize-hint { color: #888; }
-        @keyframes menuBlink-${uid}-dark {
-            0% { background: #3d3d3d; }
-            50% { background: #4d4d4d; }
-            100% { background: #3d3d3d; }
-        }
+        #${uid}_popup .ll-topk-prob { color: var(--p-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
     `;
 }
 
@@ -265,20 +325,12 @@ export function applyDarkMode(
     enabled: boolean,
     ...extras: (HTMLElement | null | undefined)[]
 ): void {
-    if (enabled) {
-        widgetEl.classList.add("dark-mode");
-        widgetEl.style.colorScheme = "dark";
-    } else {
-        widgetEl.classList.remove("dark-mode");
-        widgetEl.style.colorScheme = "";
-    }
-    // Mirror the dark-mode class to portaled elements (popup, color menu)
-    // so their styles match even after they're moved out of the widget
-    // subtree. colorScheme is widget-only; the popups inherit text color
-    // via their explicit dark-mode rules.
-    for (const el of extras) {
-        if (!el) continue;
-        if (enabled) el.classList.add("dark-mode");
-        else el.classList.remove("dark-mode");
-    }
+    const toggle = (el: HTMLElement) => {
+        if (enabled) el.classList.add("ll-dark");
+        else el.classList.remove("ll-dark");
+    };
+    toggle(widgetEl);
+    if (enabled) widgetEl.style.colorScheme = "dark";
+    else widgetEl.style.colorScheme = "";
+    for (const el of extras) if (el) toggle(el);
 }

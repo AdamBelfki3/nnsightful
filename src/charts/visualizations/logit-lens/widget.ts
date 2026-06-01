@@ -1,34 +1,125 @@
 /**
- * LogitLens Widget Engine
+ * LogitLens widget — redesigned.
  *
- * This module contains the full widget creation logic, adapted from the original
- * logit-lens-widget.js IIFE into an ES module export. The rendering and interaction
- * logic is preserved as-is to maintain behavioral fidelity.
+ * Composition (top → bottom): header · prompt strip · heatmap · layer
+ * navigator · (line plot on cell click). The heatmap is a generic
+ * white→ramp magnitude grid; the prompt strip drives row navigation and
+ * the layer navigator drives column (layer) navigation via a draggable
+ * skyline window with stride sampling so even 80+ layer models show at
+ * most ~18 readable columns.
  *
- * The original closure-based architecture is maintained internally because:
- * - The table rendering, chart SVG, popup, menu, and resize handlers are deeply
- *   intertwined through shared mutable state
- * - Extracting into separate modules would risk breaking the complex interactions
- * - The extracted utility modules (normalize, styles, colors, utils, state) handle
- *   the clearly separable concerns
- *
- * This file is intentionally large (~2600 lines) as a faithful port. Further
- * modularization can happen incrementally after verification.
+ * Vanilla TS so the same bundle works in Jupyter (standalone) and the
+ * workbench (React mount). Reuses the V2→V1 data normalizer, the shared
+ * theme detector, and LinePlotCore for the kept trajectory panel.
  */
 
 import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
-import { normalizeData } from "./normalize";
-import { generateUid, escapeHtml, visualizeSpaces, hasSimilarTokensInList } from "./utils";
-import { PALETTE, LINE_STYLES, probToColor } from "./colors";
+import { normalizeData, type NormalizedData } from "./normalize";
+import { generateUid, escapeHtml } from "./utils";
 import { injectStyles, applyDarkMode } from "./styles";
-import { createInitialState, emitEvent, addEventListener, removeEventListener, type WidgetState } from "./state";
+import { PALETTE } from "./colors";
 import { LinePlotCore } from "../../core/line-plot";
 import { detectThemeMode, onThemeModeChange } from "../../detect-theme-mode";
 
 interface CreateWidgetResult {
     widget: LogitLensWidgetInterface;
     styleEl: HTMLStyleElement;
+}
+
+// ── Layout constants ──
+const ROW_LABEL_W = 60;
+const ROW_H = 30;
+const HDR_H = 22;
+const SCROLL_MAX_H = 360;
+// Column sizing: the number of visible (strided) columns adapts to the
+// available width so each column keeps at least MIN_CELL px and the grid
+// never needs horizontal scroll; cells then fill the width up to MAX_CELL.
+const MIN_CELL = 48;   // smallest readable column → caps the column count
+const MAX_CELL = 150;  // largest column → avoids absurd width for few columns
+const COL_CAP = 18;    // hard ceiling on visible columns regardless of width
+
+const RAMPS: Record<string, string> = {
+    purple: "#9333ea",
+    blue: "#2563eb",
+    teal: "#0d9488",
+};
+
+// Cells whose top-1 prediction equals the model's final next-token
+// prediction are tinted with this orange ramp instead of the base ramp,
+// so you can see where in the network the final answer emerges.
+const FINAL_PRED_HEX = "#cc6622";
+
+function hexToRgb(hex: string): [number, number, number] {
+    const h = hex.replace("#", "");
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+// Blend the card surface → base-color by magnitude, with perceptual
+// easing that pushes most of the colour change into the high end (faint
+// cells melt into the card; strong cells saturate). Light mode blends from
+// white (255); dark mode blends from the dark card surface (~hsl 0 0% 16%)
+// so the heatmap sits naturally in a dark UI instead of being a bright
+// block.
+const DARK_CELL_BASE = 41; // ≈ hsl(0 0% 16%), the dark card surface
+function cellBg(value: number, baseHex: string, dark: boolean): string {
+    const [r, g, b] = hexToRgb(baseHex);
+    const t = Math.pow(Math.max(0, Math.min(1, value)), 1.1);
+    if (dark) {
+        const mix = (ch: number) => Math.round(DARK_CELL_BASE + (ch - DARK_CELL_BASE) * t);
+        return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+    }
+    const mix = (ch: number) => Math.round(255 - (255 - ch) * t);
+    return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}
+
+function cellFg(value: number, dark: boolean): string {
+    if (dark) {
+        // Light text on the dark→ramp cells; white once saturated.
+        if (value >= 0.62) return "#fff";
+        if (value >= 0.32) return "rgba(255,255,255,0.92)";
+        return "hsl(0 0% 80%)";
+    }
+    if (value >= 0.62) return "#fff";
+    if (value >= 0.42) return "rgba(255,255,255,0.92)";
+    return "hsl(0 0% 18%)";
+}
+
+// Inner HTML for a BPE token: leading space → faint "·", body escaped.
+function tokenInnerHTML(raw: string): string {
+    if (raw === undefined || raw === null) return "";
+    if (raw.startsWith(" ")) {
+        return '<span class="ll-lead-dot">·</span>' + escapeHtml(raw.slice(1));
+    }
+    return escapeHtml(raw);
+}
+
+// Plain-text form for tooltips (· prefix, no markup).
+function tokenPlain(raw: string): string {
+    if (raw === undefined || raw === null) return "";
+    return raw.startsWith(" ") ? "·" + raw.slice(1) : raw;
+}
+
+function isBosToken(tok: string): boolean {
+    const t = tok.trim();
+    return t === "<bos>" || t === "<s>" || t === "<|endoftext|>" || t === "<|begin_of_text|>";
+}
+
+interface State {
+    ramp: "purple" | "blue" | "teal";
+    showGrid: boolean;
+    dimLow: boolean;
+    selectedRow: number | null;
+    selectedLayerIdx: number | null; // absolute layer index for the line plot
+    viewStart: number;
+    viewSize: number;
+    darkModeOverride: boolean | null;
+    // Pinned trajectory tokens: each gets a palette color, draws a colored
+    // contour on every cell where it's the top-1 prediction, and a line in
+    // the trajectory plot.
+    pinned: { token: string; color: string }[];
+    colorIndex: number;
+    openPopup: { row: number; layer: number } | null;
 }
 
 export function createWidget(
@@ -38,1863 +129,920 @@ export function createWidget(
 ): CreateWidgetResult | null {
     const uid = generateUid();
     let container: HTMLElement | null;
-
-    if (typeof containerArg === "string") {
-        container = document.querySelector(containerArg);
-    } else if (containerArg instanceof Element) {
-        container = containerArg as HTMLElement;
-    } else {
-        container = null;
-    }
-
+    if (typeof containerArg === "string") container = document.querySelector(containerArg);
+    else if (containerArg instanceof Element) container = containerArg as HTMLElement;
+    else container = null;
     if (!container) {
         console.error("Container not found:", containerArg);
         return null;
     }
 
-    // Normalize data
-    const dataResult = normalizeData(inputData);
-    let widgetData = dataResult.normalized;
+    // ── Data ──
+    let dataResult = normalizeData(inputData);
+    let widgetData: NormalizedData = dataResult.normalized;
     let v2Data = dataResult.v2Data;
 
-    // Inject styles
     const styleEl = injectStyles(uid);
 
-    // Inject HTML structure
-    container.innerHTML = `
-        <div id="${uid}">
-            <div class="ll-title" id="${uid}_title">Logit Lens: Top Predictions by Layer</div>
-            <div class="table-wrapper">
-                <div class="table-scroll">
-                    <table class="ll-table" id="${uid}_table"></table>
-                </div>
-                <div class="resize-handle-bottom" id="${uid}_resize_bottom"></div>
-                <div class="resize-handle-right" id="${uid}_resize_right"></div>
-            </div>
-            <div class="resize-hint" id="${uid}_resize_hint">drag column borders to resize</div>
-            <div class="chart-container" id="${uid}_chart_container">
-                <div id="${uid}_chart_div" style="width:100%;height:100%;min-height:120px;"></div>
-            </div>
-            <div class="popup" id="${uid}_popup">
-                <span class="popup-close" id="${uid}_popup_close">&times;</span>
-                <div class="popup-header">
-                    Layer <span id="${uid}_popup_layer"></span>, Position <span id="${uid}_popup_pos"></span>
-                </div>
-                <div id="${uid}_popup_content"></div>
-            </div>
-            <input type="color" id="${uid}_color_picker" style="position: absolute; opacity: 0; pointer-events: none;">
-            <div class="color-menu" id="${uid}_color_menu"></div>
-        </div>
-    `;
-
-    // Portal the popup and color menu to document.body so position: fixed
-    // works correctly even when an ancestor of the widget has a CSS
-    // transform / filter / will-change (which creates a new containing
-    // block for fixed descendants and would otherwise shift them to the
-    // wrong screen position). At <body> level there's no transformed
-    // ancestor, so viewport-relative coords land where we expect.
-    {
-        const popupEl = document.getElementById(uid + "_popup");
-        if (popupEl) document.body.appendChild(popupEl);
-        const menuEl = document.getElementById(uid + "_color_menu");
-        if (menuEl) document.body.appendChild(menuEl);
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // CONSTANTS
-    // ═══════════════════════════════════════════════════════════════
-    const nLayers = widgetData.layers.length;
-    const nPositions = widgetData.tokens.length;
-    const defaultNextToken = widgetData.cells[nPositions - 1][nLayers - 1].token;
-    const colors = PALETTE;
-    const lineStyles = LINE_STYLES;
-
-    let maxEntropy = 0;
-    if (v2Data?.entropy) {
-        for (const layer of v2Data.entropy) {
-            for (const val of layer) {
-                if (val > maxEntropy) maxEntropy = val;
-            }
-        }
-    }
-    maxEntropy = Math.max(maxEntropy, 1.0);
-
-    const minChartHeight = 60;
-    const maxChartHeight = 400;
-    const minCellWidth = 10;
-    const maxCellWidth = 200;
-
-    // ═══════════════════════════════════════════════════════════════
-    // STATE
-    // ═══════════════════════════════════════════════════════════════
-    const state = createInitialState(uiState, nLayers, nPositions, defaultNextToken);
-
-    // LinePlotCore instance (created lazily after DOM is ready)
-    let linePlot: LinePlotCore | null = null;
-
-    // ═══════════════════════════════════════════════════════════════
-    // DOM HELPERS
-    // ═══════════════════════════════════════════════════════════════
-    const dom = {
-        widget: () => document.getElementById(uid)!,
-        table: () => document.getElementById(uid + "_table")!,
-        chartDiv: () => document.getElementById(uid + "_chart_div")!,
-        popup: () => document.getElementById(uid + "_popup")!,
-        popupClose: () => document.getElementById(uid + "_popup_close")!,
-        popupLayer: () => document.getElementById(uid + "_popup_layer")!,
-        popupPos: () => document.getElementById(uid + "_popup_pos")!,
-        popupContent: () => document.getElementById(uid + "_popup_content")!,
-        colorMenu: () => document.getElementById(uid + "_color_menu")!,
-        colorBtn: () => document.getElementById(uid + "_color_btn"),
-        colorPicker: () => document.getElementById(uid + "_color_picker") as HTMLInputElement,
-        title: () => document.getElementById(uid + "_title")!,
-        titleText: () => document.getElementById(uid + "_title_text"),
-        overlay: () => document.getElementById(uid + "_overlay"),
-        resizeHint: () => document.getElementById(uid + "_resize_hint")!,
-        resizeBottom: () => document.getElementById(uid + "_resize_bottom")!,
-        resizeRight: () => document.getElementById(uid + "_resize_right")!,
-        chartContainer: () => document.getElementById(uid + "_chart_container")!,
-        tableWrapper: () => document.querySelector("#" + uid + " .table-wrapper") as HTMLElement | null,
+    // ── State ──
+    const state: State = {
+        ramp: (uiState?.ramp as State["ramp"]) || "purple",
+        showGrid: uiState?.showGrid ?? true,
+        dimLow: uiState?.dimLowProb ?? true,
+        selectedRow: uiState?.selectedRow ?? null,
+        selectedLayerIdx: null,
+        viewStart: 0,
+        viewSize: widgetData.layers.length,
+        darkModeOverride: uiState?.darkMode ?? null,
+        pinned: [],
+        colorIndex: 0,
+        openPopup: null,
     };
 
-    // ═══════════════════════════════════════════════════════════════
-    // DATA CAPABILITY DETECTION
-    // ═══════════════════════════════════════════════════════════════
-    function hasEntropyData(): boolean {
-        return !!v2Data && Array.isArray(v2Data.entropy) && v2Data.entropy.length > 0;
-    }
+    // ── Event bus (minimal, for on/off) ──
+    const listeners: Record<string, ((data: unknown) => void)[]> = {};
+    function emit(ev: string, data: unknown) { (listeners[ev] || []).forEach((cb) => cb(data)); }
 
-    function hasRankData(): boolean {
-        if (!v2Data?.tracked) return false;
-        for (const trackedAtPos of v2Data.tracked) {
-            for (const token in trackedAtPos) {
-                const data = trackedAtPos[token];
-                if (data && typeof data === "object" && Array.isArray((data as any).rank)) {
-                    return true;
-                }
+    // ── Derived data ──
+    let nLayers = widgetData.layers.length;
+    let nRows = widgetData.tokens.length;
+    let layerSummary: number[] = []; // max prob across rows, per absolute layer
+    let finalPredToken = "";         // model's final next-token prediction
+
+    function recomputeDerived() {
+        nLayers = widgetData.layers.length;
+        nRows = widgetData.tokens.length;
+        layerSummary = [];
+        for (let l = 0; l < nLayers; l++) {
+            let mx = 0;
+            for (let r = 0; r < nRows; r++) {
+                const c = widgetData.cells[r]?.[l];
+                if (c && c.prob > mx) mx = c.prob;
             }
+            layerSummary.push(mx);
         }
-        return false;
+        finalPredToken = widgetData.cells[nRows - 1]?.[nLayers - 1]?.token ?? "";
+        // Clamp view to data
+        if (state.viewSize > nLayers || state.viewSize < 1) state.viewSize = nLayers;
+        const maxStart = Math.max(0, nLayers - state.viewSize);
+        if (state.viewStart > maxStart) state.viewStart = maxStart;
+        if (state.viewStart < 0) state.viewStart = 0;
     }
+    recomputeDerived();
 
-    // ═══════════════════════════════════════════════════════════════
-    // HELPER FUNCTIONS
-    // ═══════════════════════════════════════════════════════════════
-    function getContentFontSizePx(): number {
-        const widgetEl = dom.widget();
-        if (!widgetEl) return 14;
-        const style = getComputedStyle(widgetEl);
-        const sizeStr = style.getPropertyValue("--ll-content-size").trim() || "14px";
-        const match = sizeStr.match(/^([\d.]+)px$/);
-        return match ? parseFloat(match[1]) : 14;
+    // ── Pin helpers ──
+    function pinColorFor(token: string): string | null {
+        const p = state.pinned.find((x) => x.token === token);
+        return p ? p.color : null;
     }
-
-    function getDefaultChartHeight(): number {
-        const fontSize = getContentFontSizePx();
-        const topMargin = Math.max(10, fontSize * 1.2);
-        const bottomMargin = Math.max(25, fontSize * 1.5);
-        const table = dom.table();
-        let rowHeight = fontSize * 2;
-        if (table) {
-            const rows = table.querySelectorAll("tr");
-            if (rows.length >= 2) {
-                rowHeight = rows[1].getBoundingClientRect().height || rowHeight;
-            }
+    function togglePin(token: string) {
+        const idx = state.pinned.findIndex((x) => x.token === token);
+        if (idx >= 0) {
+            state.pinned.splice(idx, 1);
+        } else {
+            state.pinned.push({ token, color: PALETTE[state.colorIndex % PALETTE.length] });
+            state.colorIndex++;
         }
-        return topMargin + rowHeight * 6 + bottomMargin;
+    }
+    // A token's probability trajectory across layers at a given position.
+    function trajectoryForToken(pos: number, token: string): number[] | null {
+        const tracked = v2Data?.tracked?.[pos] as Record<string, number[]> | undefined;
+        if (tracked && Array.isArray(tracked[token])) return tracked[token];
+        for (let li = 0; li < nLayers; li++) {
+            const found = widgetData.cells[pos]?.[li]?.topk.find((t) => t.token === token);
+            if (found) return found.trajectory;
+        }
+        return null;
     }
 
-    function getActualChartHeight(): number {
-        return state.chartHeight !== null ? state.chartHeight : getDefaultChartHeight();
-    }
+    function baseHex(): string { return RAMPS[state.ramp] || RAMPS.purple; }
 
     function isDarkMode(): boolean {
         if (state.darkModeOverride !== null) return state.darkModeOverride;
         return detectThemeMode(container);
     }
 
-    function getNextColor(): string {
-        const c = colors[state.colorIndex % colors.length];
-        state.colorIndex++;
-        return c;
+    // Width available for the grid, in px. Measured from the scroll
+    // region's true inner width (excludes the card border/padding and any
+    // vertical scrollbar). The card is width-bounded before this is read
+    // (see renderHeatmap), so it's reliable. Falls back to a container
+    // estimate before first layout.
+    function heatmapAvailW(): number {
+        const sw = scrollEl.clientWidth;
+        if (sw > 0) return sw;
+        const cw = (container as HTMLElement)?.clientWidth ?? 0;
+        return cw > 0 ? cw - 42 : 900;
     }
 
-    function getColorForToken(token: string): string | null {
-        for (const group of state.pinnedGroups) {
-            if (group.tokens.indexOf(token) >= 0) return group.color;
-        }
-        return null;
+    // How many columns fit at the minimum readable cell width — this is what
+    // makes the heatmap fit any panel: narrow panels show fewer (more
+    // heavily strided) columns rather than scrolling.
+    function maxColsFit(): number {
+        const fitCols = Math.floor((heatmapAvailW() - ROW_LABEL_W) / MIN_CELL);
+        return Math.max(1, Math.min(COL_CAP, fitCols));
     }
 
-    function findGroupForToken(token: string): number {
-        for (let i = 0; i < state.pinnedGroups.length; i++) {
-            if (state.pinnedGroups[i].tokens.indexOf(token) >= 0) return i;
+    // ── Layer window → shown layers (stride sampling) ──
+    function computeShownLayers(): { shownLayers: number[]; stride: number; start: number } {
+        const maxStart = Math.max(0, nLayers - state.viewSize);
+        const start = Math.max(0, Math.min(maxStart, state.viewStart));
+        const size = state.viewSize;
+        const maxCols = maxColsFit();
+        if (size <= maxCols) {
+            const shownLayers: number[] = [];
+            for (let i = 0; i < size; i++) shownLayers.push(start + i);
+            return { shownLayers, stride: 1, start };
         }
-        return -1;
-    }
-
-    function getGroupLabel(group: { tokens: string[] }): string {
-        return group.tokens.map((t) => visualizeSpaces(t)).join("+");
-    }
-
-    function getTrajectoryForToken(token: string, pos: number): number[] | null {
-        for (let li = 0; li < widgetData.cells[pos].length; li++) {
-            const cellData = widgetData.cells[pos][li];
-            if (cellData.token === token) return cellData.trajectory;
-            for (const item of cellData.topk) {
-                if (item.token === token) return item.trajectory;
-            }
+        const stride = Math.ceil(size / maxCols);
+        const shownLayers: number[] = [];
+        for (let l = start; l < start + size; l += stride) shownLayers.push(l);
+        const last = start + size - 1;
+        if (shownLayers[shownLayers.length - 1] !== last) {
+            shownLayers.push(Math.min(nLayers - 1, last));
         }
-        return null;
-    }
-
-    function isTokenTracked(token: string, pos: number): boolean {
-        for (let li = 0; li < widgetData.cells[pos].length; li++) {
-            const cellData = widgetData.cells[pos][li];
-            if (cellData.token === token) return true;
-            for (const item of cellData.topk) {
-                if (item.token === token) return true;
-            }
-        }
-        return false;
-    }
-
-    function getRankTrajectoryForToken(token: string, pos: number): (number | null)[] | null {
-        if (v2Data?.tracked?.[pos]) {
-            const tokenData = v2Data.tracked[pos][token] as any;
-            if (tokenData && typeof tokenData === "object" && Array.isArray(tokenData.rank)) {
-                return tokenData.rank;
-            }
-        }
-        const ranks: (number | null)[] = [];
-        for (let li = 0; li < widgetData.cells[pos].length; li++) {
-            const cellData = widgetData.cells[pos][li];
-            let rank: number | null = null;
-            if (cellData.token === token) {
-                rank = 1;
-            } else {
-                for (let ki = 0; ki < cellData.topk.length; ki++) {
-                    if (cellData.topk[ki].token === token) {
-                        rank = ki + 1;
-                        break;
-                    }
-                }
-            }
-            ranks.push(rank);
-        }
-        return ranks.some((r) => r !== null) ? ranks : null;
-    }
-
-    function getGroupTrajectory(group: { tokens: string[] }, pos: number): (number | null)[] | null {
-        if (state.trajectoryMetric === "rank") {
-            const result: (number | null)[] = widgetData.layers.map(() => null);
-            let hasAnyData = false;
-            for (const tok of group.tokens) {
-                const rankTraj = getRankTrajectoryForToken(tok, pos);
-                if (rankTraj) {
-                    hasAnyData = true;
-                    for (let j = 0; j < result.length; j++) {
-                        if (rankTraj[j] !== null) {
-                            if (result[j] === null || rankTraj[j]! < result[j]!) {
-                                result[j] = rankTraj[j];
-                            }
-                        }
-                    }
-                }
-            }
-            return hasAnyData ? result : null;
-        }
-
-        const result: number[] = widgetData.layers.map(() => 0);
-        let hasAnyData = false;
-        for (const tok of group.tokens) {
-            const traj = getTrajectoryForToken(tok, pos);
-            if (traj) {
-                hasAnyData = true;
-                for (let j = 0; j < result.length; j++) {
-                    result[j] += traj[j];
-                }
-            }
-        }
-        return hasAnyData ? result : null;
-    }
-
-    function getGroupProbAtLayer(group: { tokens: string[] }, pos: number, layerIdx: number): number {
-        let sum = 0;
-        for (const tok of group.tokens) {
-            const traj = getTrajectoryForToken(tok, pos);
-            if (traj) sum += traj[layerIdx] || 0;
-        }
-        return sum;
-    }
-
-    function getWinningGroupAtCell(pos: number, layerIdx: number) {
-        const cellData = widgetData.cells[pos][layerIdx];
-        let winningProb = cellData.prob;
-        let winningGroup: { color: string } | null = null;
-        for (const group of state.pinnedGroups) {
-            const groupProb = getGroupProbAtLayer(group, pos, layerIdx);
-            if (groupProb > winningProb) {
-                winningProb = groupProb;
-                winningGroup = group;
-            }
-        }
-        return winningGroup;
-    }
-
-    function findPinnedRow(pos: number): number {
-        for (let i = 0; i < state.pinnedRows.length; i++) {
-            if (state.pinnedRows[i].pos === pos) return i;
-        }
-        return -1;
-    }
-
-    function getLineStyleForRow(pos: number) {
-        const idx = findPinnedRow(pos);
-        if (idx >= 0) return state.pinnedRows[idx].lineStyle;
-        return lineStyles[0];
-    }
-
-    function allPinnedGroupsBelowThreshold(pos: number, threshold: number): boolean {
-        if (state.pinnedGroups.length === 0) return true;
-        for (const group of state.pinnedGroups) {
-            const traj = getGroupTrajectory(group, pos);
-            if (traj) {
-                const maxProb = Math.max(...traj.filter((v): v is number => v !== null));
-                if (maxProb >= threshold) return false;
-            }
-        }
-        return true;
-    }
-
-    function findHighestProbToken(pos: number, minLayer: number, minProb: number): string | null {
-        let bestToken: string | null = null;
-        let bestProb = 0;
-        for (let li = minLayer; li < widgetData.cells[pos].length; li++) {
-            const cellData = widgetData.cells[pos][li];
-            if (cellData.prob > bestProb) {
-                bestProb = cellData.prob;
-                bestToken = cellData.token;
-            }
-            for (const item of cellData.topk) {
-                if (item.prob > bestProb) {
-                    bestProb = item.prob;
-                    bestToken = item.token;
-                }
-            }
-        }
-        return bestProb >= minProb ? bestToken : null;
-    }
-
-    function togglePinnedRow(pos: number): boolean {
-        const idx = findPinnedRow(pos);
-        if (idx >= 0) {
-            state.pinnedRows.splice(idx, 1);
-            return false;
-        }
-        if (allPinnedGroupsBelowThreshold(pos, 0.01)) {
-            const bestToken = findHighestProbToken(pos, 2, 0.05);
-            if (bestToken && findGroupForToken(bestToken) < 0) {
-                state.pinnedGroups.push({ color: getNextColor(), tokens: [bestToken] });
-                state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-            }
-        }
-        const styleIdx = state.pinnedRows.length % lineStyles.length;
-        state.pinnedRows.push({ pos, lineStyle: lineStyles[styleIdx] });
-        return true;
+        return { shownLayers, stride, start };
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // RENDERING
+    // DOM SHELL
     // ═══════════════════════════════════════════════════════════════
+    container.innerHTML = `
+        <div id="${uid}" tabindex="-1">
+            <div class="ll-scroll" id="${uid}_scroll" tabindex="0"></div>
+            <div class="ll-nav" id="${uid}_nav"></div>
+            <div class="ll-lineplot-wrap ll-hidden" id="${uid}_lp_wrap">
+                <div class="ll-lineplot-head">
+                    <span class="ll-lineplot-title">trajectory</span>
+                    <span class="ll-lineplot-token" id="${uid}_lp_token"></span>
+                </div>
+                <div class="ll-lineplot-box"><div class="ll-lineplot" id="${uid}_lp"></div></div>
+            </div>
+            <div class="ll-tooltip" id="${uid}_tt"></div>
+            <div class="ll-popup" id="${uid}_popup">
+                <span class="ll-popup-close" id="${uid}_popup_close">&times;</span>
+                <div class="ll-popup-header" id="${uid}_popup_hdr"></div>
+                <div class="ll-popup-body" id="${uid}_popup_body"></div>
+            </div>
+        </div>
+    `;
 
-    function render() {
-        buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
+    const widgetEl = document.getElementById(uid)!;
+    const scrollEl = document.getElementById(uid + "_scroll")!;
+    const navEl = document.getElementById(uid + "_nav")!;
+    const lpWrap = document.getElementById(uid + "_lp_wrap")!;
+    const lpTokenEl = document.getElementById(uid + "_lp_token")!;
+    const lpEl = document.getElementById(uid + "_lp")!;
+    const ttEl = document.getElementById(uid + "_tt")!;
+    const popupEl = document.getElementById(uid + "_popup")!;
+    const popupHdrEl = document.getElementById(uid + "_popup_hdr")!;
+    const popupBodyEl = document.getElementById(uid + "_popup_body")!;
+
+    // Portal popup to body so position: fixed isn't broken by a
+    // transformed ancestor (and it can extend past the card edge).
+    document.body.appendChild(popupEl);
+
+    let linePlot: LinePlotCore | null = null;
+    let overlayEl: HTMLElement | null = null;
+    let lpHidden = true; // current line-plot visibility (for fill-mode re-fit)
+
+    // Fill mode = the host gives us a definite bounded box and expects the
+    // widget to fill it (the workbench panel). Detected by the *absence* of
+    // --ll-aspect-ratio, which the Jupyter Python wrapper sets but the
+    // workbench React mount does not. In fill mode the card becomes a flex
+    // column and the heatmap scroll region grows to use the leftover height;
+    // otherwise the card is content-sized with a fixed-height scroll region.
+    const fillMode = !getComputedStyle(widgetEl).getPropertyValue("--ll-aspect-ratio").trim();
+    if (fillMode) widgetEl.classList.add("ll-fill");
+
+    // Effective cell dimensions, recomputed each render.
+    //  - WIDTH (both modes): the visible columns fill the available width
+    //    exactly (clamped to [MIN_CELL, MAX_CELL]). Because the column COUNT
+    //    already adapts to the width (maxColsFit), each column is ≥ MIN_CELL,
+    //    so the grid fits without horizontal scroll.
+    //  - HEIGHT: fill mode (workbench) stretches rows to use the panel's
+    //    spare vertical space; content mode (Jupyter) uses the fixed row
+    //    height with a capped scroll region.
+    let cellW = MIN_CELL;
+    let rowH = ROW_H;
+    function computeFillSizes() {
+        const availW = heatmapAvailW();
+        const nCols = computeShownLayers().shownLayers.length;
+        cellW = nCols > 0
+            ? Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((availW - ROW_LABEL_W) / nCols)))
+            : MIN_CELL;
+        if (!fillMode) { rowH = ROW_H; return; }
+        const availH = scrollEl.clientHeight;
+        const reserved = HDR_H + 6 + 28; // sticky header + bottom axis caption
+        const hForRows = availH - reserved;
+        const stretchRows = nRows > 0 && nRows * ROW_H < hForRows;
+        rowH = stretchRows ? Math.floor(hForRows / nRows) : ROW_H;
     }
 
-    function computeVisibleLayers(cellWidth: number, containerWidth: number) {
-        const availableWidth = containerWidth - state.inputTokenWidth - 1;
-        const maxCols = Math.max(1, Math.floor(availableWidth / cellWidth));
-        if (maxCols >= nLayers) {
-            return { stride: 1, indices: widgetData.layers.map((_: number, i: number) => i) };
+    // ═══════════════════════════════════════════════════════════════
+    // RENDER: HEATMAP
+    // ═══════════════════════════════════════════════════════════════
+    function renderHeatmap() {
+        const hex = baseHex();
+        const dark = isDarkMode();
+        // Grid separators: light "breathing room" lines on the light field,
+        // subtle dark lines in dark mode (so they read on the colored cells
+        // and vanish on the faint ones — mirroring the light behavior).
+        const gridBorder = state.showGrid
+            ? (dark
+                ? "border-right:1px solid rgba(0,0,0,0.28);border-bottom:1px solid rgba(0,0,0,0.22);"
+                : "border-right:1px solid rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.45);")
+            : "";
+
+        // Bound the card width FIRST so computeFillSizes() reads a reliable
+        // scroll inner width (the card can't be stretched by the wide grid).
+        //  - fill (workbench): pin to the measured host px — the host is
+        //    bounded by the display panel (overflow:hidden), a hard cap
+        //    against any ancestor flex quirk.
+        //  - content (Jupyter): width:100% of the (bounded) output container.
+        if (fillMode) {
+            const hostW = (container as HTMLElement).clientWidth;
+            widgetEl.style.width = hostW > 0 ? hostW + "px" : "100%";
+            widgetEl.style.maxWidth = "100%";
+            scrollEl.style.maxHeight = "";
+        } else {
+            widgetEl.style.width = "";
+            widgetEl.style.maxWidth = "";
+            scrollEl.style.maxHeight = SCROLL_MAX_H + "px";
         }
-        const stride = maxCols > 1 ? Math.max(1, Math.floor((nLayers - 1) / (maxCols - 1))) : nLayers;
-        const indices: number[] = [];
-        for (let i = nLayers - 1; i >= 0; i -= stride) indices.unshift(i);
-        while (indices.length > maxCols) indices.shift();
-        return { stride, indices };
-    }
 
-    // Stable reference for current positions used by onLineRemoved
-    let currentPositionsToShow: number[] = [];
+        computeFillSizes();
+        const { shownLayers } = computeShownLayers();
+        const nCols = shownLayers.length;
+        const tableWidth = Math.round(ROW_LABEL_W + cellW * nCols);
+        const cols = `${ROW_LABEL_W}px repeat(${nCols}, ${cellW}px)`;
 
-    // Stable onLineRemoved callback — only created once, references currentPositionsToShow
-    const stableOnLineRemoved = (lineIdx: number) => {
-        // Map lineIdx back to group
-        let idx = 0;
-        for (let pi = 0; pi < currentPositionsToShow.length; pi++) {
-            for (let gi = 0; gi < state.pinnedGroups.length; gi++) {
-                const traj = getGroupTrajectory(state.pinnedGroups[gi], currentPositionsToShow[pi]);
-                if (!traj) continue;
-                if (idx === lineIdx) {
-                    state.pinnedGroups.splice(gi, 1);
-                    if (state.lastPinnedGroupIndex >= state.pinnedGroups.length) {
-                        state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-                    }
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                    return;
-                }
-                idx++;
+        let html = `<div class="ll-grid-inner" style="width:${tableWidth}px;min-width:${tableWidth}px;">`;
+
+        // Header row
+        html += `<div class="ll-hdr-row" style="display:grid;grid-template-columns:${cols};height:${HDR_H + 6}px;">`;
+        html += `<div class="ll-corner">token</div>`;
+        for (const l of shownLayers) {
+            html += `<div class="ll-hdr-cell">${widgetData.layers[l]}</div>`;
+        }
+        html += `</div>`;
+
+        // Rows
+        for (let r = 0; r < nRows; r++) {
+            const tok = widgetData.tokens[r];
+            const bos = isBosToken(tok);
+            const sel = r === state.selectedRow;
+            html += `<div class="ll-row" data-rowwrap="${r}">`;
+            if (sel) html += `<div class="ll-row-rail"></div>`;
+            html += `<div class="ll-row-grid${sel ? " ll-row-sel" : ""}" data-row="${r}" `
+                + `style="display:grid;grid-template-columns:${cols};height:${rowH}px;">`;
+
+            // Row label
+            html += `<div class="ll-row-label">`;
+            html += bos
+                ? `<span class="ll-bos-pill">bos</span>`
+                : `<span class="ll-cell-text" style="${sel ? "font-weight:600;" : ""}">${tokenInnerHTML(tok)}</span>`;
+            html += `</div>`;
+
+            // Cells
+            for (const l of shownLayers) {
+                const c = widgetData.cells[r][l];
+                const prob = c.prob;
+                // Orange ramp for cells predicting the final next token.
+                const isFinal = finalPredToken !== "" && c.token === finalPredToken;
+                const bg = cellBg(prob, isFinal ? FINAL_PRED_HEX : hex, dark);
+                const fg = cellFg(prob, dark);
+                const low = prob < 0.18;
+                const op = state.dimLow && low ? "opacity:0.55;" : "";
+                // Colored contour where a pinned trajectory token is predicted.
+                const pc = pinColorFor(c.token);
+                const contour = pc ? `box-shadow:inset 0 0 0 2px ${pc};` : "";
+                html += `<div class="ll-cell${pc ? " ll-cell-pinned" : ""}" data-row="${r}" data-layer="${l}" `
+                    + `style="background:${bg};color:${fg};padding:0 6px;${op}${gridBorder}${contour}">`
+                    + `<span class="ll-cell-text">${tokenInnerHTML(c.token)}</span>`
+                    + `</div>`;
             }
+            html += `</div></div>`;
         }
-    };
 
-    /**
-     * Update LinePlotCore with current trajectory data.
-     * Replaces the old SVG-based drawAllTrajectories.
-     */
-    function updateChart(
-        hoverTrajectory: number[] | null,
-        hoverColor: string | null,
-        hoverLabel: string | null,
-        pos: number,
-    ): void {
-        const isRankMode = state.trajectoryMetric === "rank";
-        currentPositionsToShow = state.pinnedRows.length > 0
-            ? state.pinnedRows.map((pr) => pr.pos)
-            : [pos];
+        // Bottom axis caption
+        html += `<div style="display:grid;grid-template-columns:${cols};margin-top:6px;">`
+            + `<div></div>`
+            + `<div class="ll-axis-caption" style="grid-column:2 / span ${nCols};">layer</div>`
+            + `</div>`;
 
-        // Build richLines from pinned groups
+        html += `</div>`;
+        scrollEl.innerHTML = html;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RENDER: LAYER NAVIGATOR
+    // ═══════════════════════════════════════════════════════════════
+    function renderNavigator() {
+        const hex = baseHex();
+        const dark = isDarkMode();
+        const { stride, start } = computeShownLayers();
+        const size = state.viewSize;
+        const atFull = size >= nLayers;
+
+        // Range label
+        let rangeHtml = `<span class="ll-nav-range-key">layers</span>`;
+        if (atFull) {
+            rangeHtml += `all ${nLayers}` + (stride > 1 ? `<span class="ll-dim"> · every ${stride}</span>` : "");
+        } else {
+            rangeHtml += `${start}–${start + size - 1}<span class="ll-dim"> / ${nLayers}</span>`
+                + (stride > 1 ? `<span class="ll-dim"> · ≈1/${stride}</span>` : "");
+        }
+
+        // Skyline bars
+        let bars = "";
+        for (let l = 0; l < nLayers; l++) {
+            const p = layerSummary[l] || 0;
+            const h = Math.max(8, Math.round(p * 92));
+            bars += `<div class="ll-skyline-bar" style="height:${h}%;background:${cellBg(p, hex, dark)}"></div>`;
+        }
+        const winLeft = (start / nLayers) * 100;
+        const winWidth = (size / nLayers) * 100;
+
+        // Ticks: multiples of 8 (by layer index) plus the final layer.
+        const tickIdxs: number[] = [];
+        for (let l = 0; l < nLayers; l += 8) tickIdxs.push(l);
+        if (tickIdxs[tickIdxs.length - 1] !== nLayers - 1) tickIdxs.push(nLayers - 1);
+        let ticksHtml = "";
+        const denom = Math.max(1, nLayers - 1);
+        for (const idx of tickIdxs) {
+            const isEnd = idx === nLayers - 1;
+            const isStart = idx === 0;
+            const pct = (idx / denom) * 100;
+            const tx = isEnd ? "translateX(-100%)" : isStart ? "translateX(0)" : "translateX(-50%)";
+            ticksHtml += `<span class="ll-nav-tick" style="left:${pct}%;transform:${tx}">${widgetData.layers[idx]}</span>`;
+        }
+
+        navEl.innerHTML = `
+            <div class="ll-nav-range">${rangeHtml}</div>
+            <div class="ll-nav-mid">
+                <div class="ll-skyline" id="${uid}_sky">
+                    <div class="ll-skyline-bars">${bars}</div>
+                    <div class="ll-skyline-win" id="${uid}_win" style="left:${winLeft}%;width:${winWidth}%">
+                        <div class="ll-skyline-handle" style="left:-1px"></div>
+                        <div class="ll-skyline-handle" style="right:-1px"></div>
+                    </div>
+                </div>
+                <div class="ll-nav-ticks">${ticksHtml}</div>
+            </div>
+            <div class="ll-nav-controls">
+                <button class="ll-nav-btn" data-nav="panL" title="Pan left" ${start <= 0 ? "disabled" : ""}>${ICON_CHEVL}</button>
+                <button class="ll-nav-btn" data-nav="panR" title="Pan right" ${start + size >= nLayers ? "disabled" : ""}>${ICON_CHEVR}</button>
+                <div class="ll-nav-sep"></div>
+                <button class="ll-nav-btn" data-nav="zoomIn" title="Zoom in">${ICON_PLUS}</button>
+                <button class="ll-nav-btn" data-nav="zoomOut" title="Zoom out" ${atFull ? "disabled" : ""}>${ICON_MINUS}</button>
+                <button class="ll-nav-btn" data-nav="reset" title="Reset to overview">${ICON_RESET_SM}</button>
+            </div>
+        `;
+        attachSkylineDrag();
+    }
+
+    // Cheap: just reposition the window overlay during a drag.
+    function updateNavWindow() {
+        const win = document.getElementById(uid + "_win");
+        if (!win) return;
+        const maxStart = Math.max(0, nLayers - state.viewSize);
+        const start = Math.max(0, Math.min(maxStart, state.viewStart));
+        win.style.left = (start / nLayers) * 100 + "%";
+        win.style.width = (state.viewSize / nLayers) * 100 + "%";
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // NAVIGATION ACTIONS
+    // ═══════════════════════════════════════════════════════════════
+    // Recomputed from current nLayers (so it stays correct after setData).
+    function zoomSteps(): number[] {
+        return Array.from(new Set([nLayers, 48, 32, 20, 14, 10, 8]))
+            .filter((v) => v <= nLayers && v >= 1)
+            .sort((a, b) => a - b);
+    }
+
+    function clampStart(s: number): number {
+        return Math.max(0, Math.min(Math.max(0, nLayers - state.viewSize), s));
+    }
+
+    let rebuildScheduled = false;
+    function scheduleHeatmapRebuild() {
+        if (rebuildScheduled) return;
+        rebuildScheduled = true;
+        requestAnimationFrame(() => {
+            rebuildScheduled = false;
+            renderHeatmap();
+            updateNavWindow();
+        });
+    }
+
+    function panBy(d: number) {
+        const next = clampStart(state.viewStart + d);
+        if (next === state.viewStart) return;
+        state.viewStart = next;
+        renderHeatmap();
+        renderNavigator();
+        emitStateChange();
+    }
+
+    function setStart(s: number) {
+        const next = clampStart(s);
+        if (next === state.viewStart) return;
+        state.viewStart = next;
+        scheduleHeatmapRebuild();
+    }
+
+    // Zoom one step on the discrete ladder, keeping `centerLayer` roughly
+    // fixed (so wheel-zoom focuses where the cursor is; button-zoom passes
+    // the window center).
+    function zoomAtLayer(direction: number, centerLayer: number) {
+        const steps = zoomSteps();
+        const idx = steps.findIndex((v) => v >= state.viewSize);
+        const cur = idx === -1 ? steps.length - 1 : idx;
+        const next = direction < 0 ? Math.max(0, cur - 1) : Math.min(steps.length - 1, cur + 1);
+        const newSize = steps[next];
+        if (newSize === state.viewSize) return;
+        state.viewSize = newSize;
+        state.viewStart = Math.max(0, Math.min(nLayers - newSize, Math.round(centerLayer - newSize / 2)));
+        renderHeatmap();
+        renderNavigator();
+        emitStateChange();
+    }
+
+    function zoom(direction: number) {
+        zoomAtLayer(direction, state.viewStart + state.viewSize / 2);
+    }
+
+    function resetView() {
+        state.viewSize = nLayers;
+        state.viewStart = 0;
+        renderHeatmap();
+        renderNavigator();
+        emitStateChange();
+    }
+
+    // ── Skyline drag ──
+    let dragState: { startX: number; startStart: number; layerW: number } | null = null;
+    function attachSkylineDrag() {
+        const sky = document.getElementById(uid + "_sky");
+        if (!sky) return;
+        sky.addEventListener("pointerdown", (e: PointerEvent) => {
+            const rect = sky.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const layerW = rect.width / nLayers;
+            const maxStart = Math.max(0, nLayers - state.viewSize);
+            const start = Math.max(0, Math.min(maxStart, state.viewStart));
+            const winL = start * layerW;
+            const winR = (start + state.viewSize) * layerW;
+            let newStart = start;
+            if (x < winL || x > winR) {
+                newStart = clampStart(Math.round(x / layerW) - Math.floor(state.viewSize / 2));
+                state.viewStart = newStart;
+                scheduleHeatmapRebuild();
+            }
+            dragState = { startX: x, startStart: newStart, layerW };
+            sky.classList.add("ll-grabbing");
+            try { sky.setPointerCapture(e.pointerId); } catch { /* noop */ }
+        });
+        sky.addEventListener("pointermove", (e: PointerEvent) => {
+            if (!dragState) return;
+            const rect = sky.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const dLayers = (x - dragState.startX) / dragState.layerW;
+            setStart(Math.round(dragState.startStart + dLayers));
+        });
+        const end = (e: PointerEvent) => {
+            if (!dragState) return;
+            dragState = null;
+            sky.classList.remove("ll-grabbing");
+            try { sky.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+            renderNavigator(); // sync range label + button disabled states
+            emitStateChange();
+        };
+        sky.addEventListener("pointerup", end);
+        sky.addEventListener("pointercancel", end);
+        // Wheel over the skyline zooms in/out, centered on the layer under
+        // the cursor — a quick way to drill into a region without the
+        // buttons. Horizontal-ish wheel (shift / trackpad x) pans instead.
+        sky.addEventListener("wheel", (e: WheelEvent) => {
+            e.preventDefault();
+            const rect = sky.getBoundingClientRect();
+            if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+                panBy(e.deltaX > 0 ? 1 : -1);
+                return;
+            }
+            const cursorLayer = Math.round((e.clientX - rect.left) / rect.width * nLayers);
+            zoomAtLayer(e.deltaY < 0 ? -1 : 1, cursorLayer);
+        }, { passive: false });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SELECTION + LINE PLOT
+    // ═══════════════════════════════════════════════════════════════
+    function selectRow(row: number, layerIdx?: number, scroll = false) {
+        state.selectedRow = row;
+        state.selectedLayerIdx = layerIdx ?? widgetData.layers.length - 1;
+        renderHeatmap();
+        updateLinePlot();
+        if (scroll) scrollToRow(row);
+        emitStateChange();
+    }
+
+    function scrollToRow(idx: number) {
+        const el = scrollEl.querySelector(`[data-rowwrap="${idx}"]`) as HTMLElement | null;
+        if (!el) return;
+        const target = el.offsetTop - scrollEl.clientHeight / 2 + el.offsetHeight / 2;
+        scrollEl.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    }
+
+    // The trajectory plot shows the pinned tokens' probability curves at the
+    // currently selected row's position, plus an optional dashed hover
+    // preview. Hidden entirely when nothing is pinned and nothing hovered.
+    function updateLinePlot(overlay?: { values: (number | null)[]; label: string; color: string } | null) {
+        const pos = state.selectedRow;
         const richLines: LinePlotLine[] = [];
-        currentPositionsToShow.forEach((showPos) => {
-            const lineStyle = getLineStyleForRow(showPos);
-            state.pinnedGroups.forEach((group) => {
-                const traj = getGroupTrajectory(group, showPos);
-                if (!traj) return;
-                const values = traj.map(v => v === null ? null : v) as (number | null)[];
-                let label = getGroupLabel(group);
-                if (state.pinnedRows.length > 1) {
-                    label += " (" + visualizeSpaces(widgetData.tokens[showPos]) + ")";
-                }
+        if (pos !== null) {
+            for (const p of state.pinned) {
+                const traj = trajectoryForToken(pos, p.token);
+                if (!traj) continue;
                 richLines.push({
-                    values,
-                    label,
-                    color: group.color,
-                    dashPattern: lineStyle.dash || undefined,
-                    removable: true,
+                    values: traj.map((v) => (v === null || v === undefined ? null : v)) as (number | null)[],
+                    label: tokenPlain(p.token),
+                    color: p.color,
+                    removable: false,
                 });
-            });
-        });
-
-        // Hide the chart entirely when no persistent trajectories are plotted.
-        // The hover overlay is suppressed too — otherwise moving between cells
-        // would flicker the chart in and out. Hover preview only activates once
-        // the user pins at least one trajectory.
-        const chartContainer = dom.chartContainer();
-        const wasHidden = chartContainer.style.display === "none";
-        if (richLines.length === 0) {
-            chartContainer.style.display = "none";
-            return;
+            }
         }
-        if (wasHidden) {
-            chartContainer.style.display = "";
-            applyChartSizing();
-            // Force synchronous layout so LinePlotCore measures real dimensions
-            // instead of the 0×0 it would see right after display:none → "".
-            void chartContainer.offsetHeight;
-        }
-
-        // Build xLabels from layer indices
-        const xLabels = widgetData.layers.map((l: number) => l);
-
-        const plotData = {
-            lines: [] as number[][],
-            richLines,
-            xLabels,
-        };
-
-        const plotOptions: Record<string, unknown> = {
-            darkMode: isDarkMode(),
-            mode: isRankMode ? "rank" as const : "probability" as const,
-            invertYAxis: isRankMode,
-            autoScale: true,
-            legendPosition: "right" as const,
-            showDataPoints: true,
-            xRangeStart: state.plotMinLayer,
-            xAxisLabel: "Layer",
-            yAxisLabel: isRankMode ? "Rank" : "Probability",
-            transparentBackground: true,
-        };
-
-        if (!linePlot) {
-            const chartDiv = dom.chartDiv();
-            linePlot = new LinePlotCore(chartDiv, plotData, { ...plotOptions, onLineRemoved: stableOnLineRemoved } as any);
+        const shouldHide = richLines.length === 0 && !overlay;
+        if (shouldHide) {
+            lpWrap.classList.add("ll-hidden");
         } else {
-            linePlot.setData(plotData);
-            linePlot.setOptions(plotOptions as any);
+            lpWrap.classList.remove("ll-hidden");
+            lpTokenEl.textContent = pos === null
+                ? ""
+                : isBosToken(widgetData.tokens[pos]) ? "position " + pos + " · bos" : "position " + pos + " · " + tokenPlain(widgetData.tokens[pos]);
+
+            const plotData = { lines: [] as number[][], richLines, xLabels: widgetData.layers };
+            const plotOptions: Record<string, unknown> = {
+                darkMode: isDarkMode(),
+                mode: "probability" as const,
+                autoScale: true,
+                legendPosition: richLines.length > 1 ? ("right" as const) : ("none" as const),
+                showDataPoints: true,
+                xAxisLabel: "layer",
+                yAxisLabel: "probability",
+                transparentBackground: true,
+            };
+            if (!linePlot) {
+                // Pre-set min-height so LinePlotCore won't force its default
+                // 300px (it only sets min-height when the inline value is
+                // empty). The .ll-lineplot-box already gives a definite 200px.
+                lpEl.style.minHeight = "0";
+                linePlot = new LinePlotCore(lpEl, plotData, plotOptions as any);
+            } else {
+                linePlot.setData(plotData);
+                linePlot.setOptions(plotOptions as any);
+            }
+            if (overlay) {
+                (linePlot as any).setOverlay?.({
+                    values: overlay.values, label: overlay.label, color: overlay.color,
+                    dashPattern: "4,2", isOverlay: true,
+                });
+            } else {
+                (linePlot as any).setOverlay?.(null);
+            }
         }
 
-        // Set overlay for hover trajectory
-        if (hoverTrajectory && hoverLabel) {
-            linePlot.setOverlay({
-                values: hoverTrajectory,
-                label: hoverLabel,
-                color: hoverColor || "#999",
-                dashPattern: "4,2",
-                isOverlay: true,
-            });
+        // Showing/hiding the plot changes the heatmap's available height in
+        // fill mode — re-fit the cells once, only when visibility flips.
+        if (fillMode && shouldHide !== lpHidden) {
+            lpHidden = shouldHide;
+            requestAnimationFrame(() => renderHeatmap());
         } else {
-            linePlot.setOverlay(null);
+            lpHidden = shouldHide;
         }
     }
 
-    // Cross-browser fallback for "rows fill spare vertical space" — Chrome
-    // distributes a table's min-height: 100% across <tr> rows, Firefox and
-    // Safari historically don't. We explicitly set tr.style.height so the
-    // behavior is uniform. When the table's natural height already exceeds
-    // the scroll container, we leave the rows at their natural size and
-    // let .table-scroll's overflow: auto handle scrolling.
-    function stretchRowsToFit(): void {
-        const scrollEl = document.querySelector(
-            "#" + uid + " .table-scroll",
-        ) as HTMLElement | null;
-        const tableEl = dom.table();
-        if (!scrollEl || !tableEl) return;
-        const trs = tableEl.querySelectorAll("tr");
-        if (trs.length === 0) return;
-        // Reset prior heights before measuring so a previous stretched
-        // state doesn't bias the calculation.
-        trs.forEach((tr) => { (tr as HTMLElement).style.height = ""; });
-        const scrollH = scrollEl.clientHeight;
-        const tableH = tableEl.getBoundingClientRect().height;
-        if (tableH >= scrollH - 1) return; // no spare space (≥ within 1px)
-        const target = Math.max(22, Math.floor(scrollH / trs.length));
-        trs.forEach((tr) => { (tr as HTMLElement).style.height = target + "px"; });
+    // ═══════════════════════════════════════════════════════════════
+    // TOOLTIP
+    // ═══════════════════════════════════════════════════════════════
+    function showTooltip(row: number, layerIdx: number, clientX: number, clientY: number) {
+        const cell = widgetData.cells[row]?.[layerIdx];
+        if (!cell) return;
+        const hex = baseHex();
+        const truthRow = isBosToken(widgetData.tokens[row]) ? "bos" : tokenPlain(widgetData.tokens[row]);
+        ttEl.innerHTML =
+            `<div class="ll-tt-head">`
+            + `<span class="ll-tt-swatch" style="background:${cellBg(cell.prob, hex, isDarkMode())}"></span>`
+            + `<span class="ll-tt-token">${escapeHtml(tokenPlain(cell.token))}</span>`
+            + `</div>`
+            + `<div class="ll-tt-grid">`
+            + `<span>probability</span><span class="ll-tt-val">${(cell.prob * 100).toFixed(1)}%</span>`
+            + `<span>layer</span><span class="ll-tt-val">${widgetData.layers[layerIdx]} / ${widgetData.layers[nLayers - 1]}</span>`
+            + `<span>position</span><span class="ll-tt-val">${row} · ${escapeHtml(truthRow)}</span>`
+            + `</div>`;
+        ttEl.classList.add("ll-visible");
+
+        const wrapRect = widgetEl.getBoundingClientRect();
+        const ttW = ttEl.offsetWidth || 220;
+        const ttH = ttEl.offsetHeight || 90;
+        let x = clientX - wrapRect.left + 16;
+        // Flip to the left of the cursor if near the right edge.
+        if (clientX + ttW + 24 > window.innerWidth - 8) x = clientX - wrapRect.left - ttW - 12;
+        let y = clientY - wrapRect.top - 50;
+        x = Math.max(6, Math.min(x, wrapRect.width - ttW - 6));
+        y = Math.max(6, Math.min(y, wrapRect.height - ttH - 6));
+        ttEl.style.left = x + "px";
+        ttEl.style.top = y + "px";
+    }
+    function hideTooltip() { ttEl.classList.remove("ll-visible"); }
+
+    // ═══════════════════════════════════════════════════════════════
+    // POPUP (top-k predictions on cell click) + dismiss overlay
+    // ═══════════════════════════════════════════════════════════════
+    function showOverlay() {
+        removeOverlay();
+        overlayEl = document.createElement("div");
+        overlayEl.style.cssText = "position:fixed;inset:0;z-index:49;";
+        overlayEl.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); closePopup(); });
+        document.body.appendChild(overlayEl);
+    }
+    function removeOverlay() {
+        if (overlayEl) { overlayEl.remove(); overlayEl = null; }
     }
 
-    function buildTable(cellWidth: number, visibleLayerIndices: number[], maxRows: number | null, stride?: number) {
-        state.currentVisibleIndices = visibleLayerIndices;
-        state.currentMaxRows = maxRows;
-        if (stride !== undefined) state.currentStride = stride;
+    function showPopup(row: number, layer: number, cellEl: HTMLElement) {
+        const cellData = widgetData.cells[row]?.[layer];
+        if (!cellData) return;
+        // Capture the cell's screen rect BEFORE renderHeatmap() rebuilds the
+        // grid (which detaches cellEl and would zero out its rect).
+        const cellRect = cellEl.getBoundingClientRect();
+        state.openPopup = { row, layer };
+        state.selectedRow = row;
+        state.selectedLayerIdx = layer;
 
-        // In fill mode (workbench — no outer aspect-ratio cap, host
-        // supplies a bounded box), expand the rendered cellWidth so the
-        // visible layers fill the available horizontal space. Stride
-        // logic is unchanged: which layers are visible is still computed
-        // upstream from state.currentCellWidth. We only stretch the
-        // already-chosen cells to consume horizontal slack — most
-        // visible with few-layer models or when integer rounding in
-        // stride leaves significant slack on the right.
-        if (isFillMode() && visibleLayerIndices.length > 0) {
-            const available = Math.max(
-                0,
-                measureHostWidth() - state.inputTokenWidth - 1,
-            );
-            const fitWidth = available / visibleLayerIndices.length;
-            // Only expand, never shrink below what stride computed against.
-            if (fitWidth > cellWidth) cellWidth = fitWidth;
-        }
+        const posTok = isBosToken(widgetData.tokens[row]) ? "bos" : tokenPlain(widgetData.tokens[row]);
+        popupHdrEl.innerHTML =
+            `Layer <b>${widgetData.layers[layer]}</b>, Position <b>${row}</b>`
+            + `<div class="ll-popup-sub">input <code>${escapeHtml(posTok)}</code></div>`;
 
-        const table = dom.table();
+        renderPopupBody(row, layer);
+        renderHeatmap();
+        updateLinePlot();
+
+        popupEl.style.visibility = "hidden";
+        popupEl.classList.add("ll-visible");
+        positionPopup(cellRect);
+        popupEl.style.visibility = "";
+        showOverlay();
+    }
+
+    function renderPopupBody(row: number, layer: number) {
+        const cellData = widgetData.cells[row][layer];
         let html = "";
-        const totalTokens = widgetData.tokens.length;
-        let visiblePositions: number[];
-
-        if (maxRows === null || maxRows >= totalTokens) {
-            visiblePositions = widgetData.tokens.map((_: string, i: number) => i);
-        } else {
-            const pinnedPositions = state.pinnedRows.map((pr) => pr.pos);
-            const pinnedSet = new Set(pinnedPositions);
-            if (pinnedPositions.length >= maxRows) {
-                visiblePositions = pinnedPositions.slice();
-                if (!pinnedSet.has(totalTokens - 1)) visiblePositions.push(totalTokens - 1);
-            } else {
-                const remainingSlots = maxRows - pinnedPositions.length;
-                const unpinnedPositions: number[] = [];
-                for (let i = totalTokens - 1; i >= 0 && unpinnedPositions.length < remainingSlots; i--) {
-                    if (!pinnedSet.has(i)) unpinnedPositions.push(i);
-                }
-                unpinnedPositions.reverse();
-                visiblePositions = [];
-                for (let i = 0; i < totalTokens; i++) {
-                    if (pinnedSet.has(i) || unpinnedPositions.indexOf(i) >= 0) {
-                        visiblePositions.push(i);
-                    }
-                }
-            }
-        }
-
-        html += "<colgroup>";
-        html += '<col style="width:' + state.inputTokenWidth + 'px;">';
-        visibleLayerIndices.forEach(() => {
-            html += '<col style="width:' + cellWidth + 'px;">';
+        cellData.topk.forEach((item, ki) => {
+            const pc = pinColorFor(item.token);
+            const pinnedStyle = pc ? `background:${pc}22;border-left-color:${pc};` : "";
+            html += `<div class="ll-topk${pc ? " ll-topk-pinned" : ""}" data-ki="${ki}" style="${pinnedStyle}" title="click to track trajectory">`
+                + `<span class="ll-topk-tok">${tokenInnerHTML(item.token)}</span>`
+                + `<span class="ll-topk-prob">${(item.prob * 100).toFixed(1)}%</span>`
+                + `</div>`;
         });
-        html += "</colgroup>";
+        popupBodyEl.innerHTML = html;
 
-        const halfwayCol = Math.floor(visibleLayerIndices.length / 2);
-        const defaultBaseColor = "#8844ff";
-        const defaultNextColor = "#cc6622";
-
-        function getColorForMode(mode: string): string {
-            if (mode === "top") return state.heatmapBaseColor || defaultBaseColor;
-            if (mode === "entropy") return "#9c27b0";
-            const groupColor = getColorForToken(mode);
-            if (groupColor) return groupColor;
-            return state.heatmapNextColor || defaultNextColor;
-        }
-
-        function getProbForMode(mode: string, cellData: any, pos: number, li: number): number {
-            if (mode === "top") return cellData.prob;
-            if (mode === "entropy") {
-                if (v2Data?.entropy?.[li]) return v2Data.entropy[li][pos] / maxEntropy;
-                return 0;
-            }
-            const found = cellData.topk.find((t: any) => t.token === mode);
-            return found ? found.prob : 0;
-        }
-
-        visiblePositions.forEach((pos, rowIdx) => {
-            const tok = widgetData.tokens[pos];
-            const isFirstVisibleRow = rowIdx === 0;
-            const isPinnedRow = findPinnedRow(pos) >= 0;
-            const rowLineStyle = getLineStyleForRow(pos);
-
-            html += "<tr>";
-            let inputStyle = "width:" + state.inputTokenWidth + "px; max-width:" + state.inputTokenWidth + "px;";
-            if (isPinnedRow) {
-                inputStyle += isDarkMode() ? " background: #4a4a00; color: #fff;" : " background: #fff59d;";
-            }
-            html += '<td class="input-token' + (isPinnedRow ? " pinned-row" : "") + '" data-pos="' + pos + '" title="' + escapeHtml(tok) + '" style="' + inputStyle + '">';
-
-            if (isPinnedRow) {
-                const miniScale = getContentFontSizePx() / 10;
-                const miniWidth = 20 * miniScale;
-                const miniHeight = 10 * miniScale;
-                const miniStroke = 1.5 * miniScale;
-                html += '<svg width="' + miniWidth + '" height="' + miniHeight + '" style="vertical-align: middle; margin-right: 2px;">';
-                html += '<line x1="0" y1="' + miniHeight / 2 + '" x2="' + miniWidth + '" y2="' + miniHeight / 2 + '" stroke="' + (isDarkMode() ? "#ccc" : "#333") + '" stroke-width="' + miniStroke + '"';
-                if (rowLineStyle.dash) {
-                    const scaledDash = rowLineStyle.dash.split(",").map((v) => parseFloat(v) * miniScale).join(",");
-                    html += ' stroke-dasharray="' + scaledDash + '"';
-                }
-                html += "/></svg>";
-            }
-
-            html += escapeHtml(tok);
-            if (isFirstVisibleRow) html += '<div class="resize-handle-input" data-col="-1"></div>';
-            html += "</td>";
-
-            visibleLayerIndices.forEach((li, colIdx) => {
-                const cellData = widgetData.cells[pos][li];
-                let cellProb = 0;
-                let winningColor: string | null = null;
-                let winningMode: string | null = null;
-
-                if (state.colorModes.length > 0) {
-                    state.colorModes.forEach((mode) => {
-                        const modeProb = getProbForMode(mode, cellData, pos, li);
-                        const wins = winningMode === "top" ? modeProb >= cellProb
-                            : mode === "top" ? modeProb > cellProb
-                            : modeProb >= cellProb;
-                        if (wins) {
-                            cellProb = modeProb;
-                            winningColor = getColorForMode(mode);
-                            winningMode = mode;
-                        }
-                    });
-                }
-
-                let color: string;
-                let textColor: string;
-                if (!state.showHeatmap || state.colorModes.length === 0) {
-                    color = isDarkMode() ? "#1e1e1e" : "#fff";
-                    textColor = isDarkMode() ? "#e0e0e0" : "#333";
-                } else {
-                    color = probToColor(cellProb, winningColor, isDarkMode());
-                    textColor = isDarkMode()
-                        ? (cellProb < 0.7 ? "#e0e0e0" : "#fff")
-                        : (cellProb < 0.5 ? "#333" : "#fff");
-                }
-
-                let pinnedColor = getColorForToken(cellData.token);
-                if (!pinnedColor) {
-                    const wg = getWinningGroupAtCell(pos, li);
-                    if (wg) pinnedColor = wg.color;
-                }
-                const pinnedStyle = pinnedColor ? "box-shadow: inset 0 0 0 2px " + pinnedColor + ";" : "";
-                const isMainPrediction = rowIdx === visiblePositions.length - 1 && colIdx === visibleLayerIndices.length - 1;
-                const boldStyle = isMainPrediction ? "font-weight: bold;" : "";
-                const hasHandle = isFirstVisibleRow && colIdx < halfwayCol;
-
-                html += '<td class="pred-cell' + (pinnedColor ? " pinned" : "") + '" data-pos="' + pos + '" data-li="' + li + '" data-col="' + colIdx + '" style="background:' + color + "; color:" + textColor + "; width:" + cellWidth + "px; max-width:" + cellWidth + "px; " + pinnedStyle + boldStyle + '">' + escapeHtml(cellData.token);
-                if (hasHandle) html += '<div class="resize-handle" data-col="' + colIdx + '"></div>';
-                html += "</td>";
+        popupBodyEl.querySelectorAll<HTMLElement>(".ll-topk").forEach((el) => {
+            const ki = parseInt(el.dataset.ki!);
+            const item = cellData.topk[ki];
+            el.addEventListener("mouseenter", () => {
+                const traj = trajectoryForToken(row, item.token);
+                if (traj) updateLinePlot({ values: traj.map((v) => v ?? null), label: tokenPlain(item.token), color: "#999" });
             });
-            html += "</tr>";
-        });
-
-        html += "<tr>";
-        html += '<th class="corner-hdr" style="width:' + state.inputTokenWidth + "px; max-width:" + state.inputTokenWidth + 'px;">Layer<div class="resize-handle-input" data-col="-1"></div></th>';
-        visibleLayerIndices.forEach((li, colIdx) => {
-            const hasHandle = colIdx < halfwayCol;
-            html += '<th class="layer-hdr" style="width:' + cellWidth + "px; max-width:" + cellWidth + 'px;">' + widgetData.layers[li];
-            if (hasHandle) html += '<div class="resize-handle" data-col="' + colIdx + '"></div>';
-            html += "</th>";
-        });
-        html += "</tr>";
-
-        table.innerHTML = html;
-        attachCellListeners();
-        attachResizeListeners();
-        // Fallback for browsers (Firefox / Safari) that don't distribute
-        // a table's min-height across <tr> rows. We do it explicitly in JS.
-        stretchRowsToFit();
-
-        updateChart(null, null, null, state.currentHoverPos);
-        updateTitle();
-
-        const hint = dom.resizeHint();
-        const hintMain = state.currentStride > 1
-            ? "showing every " + state.currentStride + " layers ending at " + (nLayers - 1)
-            : "showing all " + nLayers + " layers";
-        hint.innerHTML = '<span class="resize-hint-main">' + hintMain + '</span><span class="resize-hint-extra"> (drag column borders to adjust)</span>';
-        hint.addEventListener("mouseenter", function () {
-            const extra = hint.querySelector(".resize-hint-extra") as HTMLElement;
-            if (extra) extra.style.display = "inline";
-            dom.widget().classList.add("show-all-handles");
-        });
-        hint.addEventListener("mouseleave", function () {
-            const extra = hint.querySelector(".resize-hint-extra") as HTMLElement;
-            if (extra) extra.style.display = "none";
-            dom.widget().classList.remove("show-all-handles");
-        });
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // TITLE AND MENU
-    // ═══════════════════════════════════════════════════════════════
-
-    function updateTitle() {
-        const titleEl = dom.title();
-        if (state.maxTableWidth !== null) {
-            titleEl.style.maxWidth = state.maxTableWidth + "px";
-        } else {
-            titleEl.style.maxWidth = "";
-        }
-        titleEl.style.whiteSpace = "normal";
-
-        let displayLabel = "";
-        let pinnedColor: string | null = null;
-        let useColoredBy = true;
-
-        if (state.colorModes.length === 0) {
-            displayLabel = "";
-            useColoredBy = false;
-        } else if (state.colorModes.length === 1) {
-            const mode = state.colorModes[0];
-            if (mode === "top") {
-                displayLabel = "top prediction";
-            } else {
-                const groupIdx = findGroupForToken(mode);
-                if (groupIdx >= 0) {
-                    displayLabel = getGroupLabel(state.pinnedGroups[groupIdx]);
-                    pinnedColor = state.pinnedGroups[groupIdx].color;
-                } else {
-                    displayLabel = visualizeSpaces(mode);
-                }
-                const lastPos = widgetData.tokens.length - 1;
-                const lastLayerIdx = state.currentVisibleIndices[state.currentVisibleIndices.length - 1];
-                const topToken = widgetData.cells[lastPos][lastLayerIdx].token;
-                if (mode === topToken) {
-                    const tokens = widgetData.tokens.slice();
-                    const toks = (tokens.length > 0 && /^<[^>]+>$/.test(tokens[0].trim())) ? tokens.slice(1) : tokens;
-                    if (toks.length >= 3) {
-                        const suffix = toks.slice(-3).join("");
-                        if (suffix.length > 0 && state.customTitle.endsWith(suffix)) useColoredBy = false;
-                    }
-                }
-            }
-        } else {
-            const labels = state.colorModes.map((mode) => {
-                if (mode === "top") return "top prediction";
-                const groupIdx = findGroupForToken(mode);
-                if (groupIdx >= 0) return getGroupLabel(state.pinnedGroups[groupIdx]);
-                return visualizeSpaces(mode);
-            });
-            displayLabel = labels.join(" and ");
-        }
-
-        let btnStyle = pinnedColor ? "background: " + pinnedColor + "22;" : "";
-        if (state.colorModes.length === 0) {
-            btnStyle = "background: transparent; border: none; color: transparent; cursor: pointer;";
-            displayLabel = "colored by None";
-        }
-
-        const labelPrefix = useColoredBy ? "colored by " : "";
-        const labelContent = "(" + labelPrefix + escapeHtml(displayLabel) + ")";
-        titleEl.innerHTML = '<span class="ll-title-text" id="' + uid + '_title_text" style="cursor: text;">' + escapeHtml(state.customTitle) + "</span> " + '<span class="color-mode-btn" id="' + uid + '_color_btn" style="' + btnStyle + '">' + labelContent + "</span>";
-        dom.colorBtn()?.addEventListener("click", showColorModeMenu);
-        dom.titleText()?.addEventListener("click", startTitleEdit);
-    }
-
-    function startTitleEdit(e: Event) {
-        e.stopPropagation();
-        const titleTextEl = dom.titleText();
-        if (!titleTextEl) return;
-        const currentText = state.customTitle;
-        const input = document.createElement("input");
-        input.type = "text";
-        input.value = currentText;
-        input.style.cssText = "font-size: var(--ll-title-size, 20px); font-weight: 600; font-family: inherit; border: 1px solid #2196F3; border-radius: 3px; padding: 1px 4px; outline: none; width: " + Math.max(200, titleTextEl.offsetWidth) + "px;" + (isDarkMode() ? " background: #1e1e1e; color: #e0e0e0;" : "");
-        titleTextEl.innerHTML = "";
-        titleTextEl.appendChild(input);
-        input.focus();
-        input.select();
-
-        function finishEdit() {
-            const newTitle = input.value.trim();
-            if (newTitle) {
-                state.customTitle = newTitle;
-            } else {
-                const tokens = widgetData.tokens.slice();
-                const toks = (tokens.length > 0 && /^<[^>]+>$/.test(tokens[0].trim())) ? tokens.slice(1) : tokens;
-                state.customTitle = toks.join("");
-            }
-            updateTitle();
-        }
-
-        input.addEventListener("blur", finishEdit);
-        input.addEventListener("keydown", function (ev) {
-            if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
-            else if (ev.key === "Escape") { ev.preventDefault(); input.value = state.customTitle; input.blur(); }
-        });
-    }
-
-    function showColorModeMenu(e: Event) {
-        e.stopPropagation();
-        closePopup();
-        state.colorPickerTarget = null;
-        const menu = dom.colorMenu();
-        if (menu.classList.contains("visible")) { menu.classList.remove("visible"); return; }
-        const btn = e.target as HTMLElement;
-        // Color menu uses position: fixed (escapes widget overflow:hidden),
-        // so coords are viewport-relative. Initial placeholder position;
-        // positionMenuBelowButton() repositions after the menu is laid out.
-        // visibility: hidden between .visible toggle and reposition avoids
-        // the brief flash at the placeholder position.
-        menu.style.visibility = "hidden";
-        const rect = btn.getBoundingClientRect();
-        menu.style.left = rect.left + "px";
-        menu.style.top = (rect.bottom + 5) + "px";
-
-        const lastPos = widgetData.tokens.length - 1;
-        const lastLayerIdx = state.currentVisibleIndices[state.currentVisibleIndices.length - 1];
-        const topToken = widgetData.cells[lastPos][lastLayerIdx].token;
-
-        interface MenuItem { mode: string; label: string; color: string; colorType: string; groupIdx: number | null; borderColor?: string }
-        const menuItems: MenuItem[] = [];
-        menuItems.push({ mode: "top", label: "top prediction", color: state.heatmapBaseColor || "#8844ff", colorType: "heatmap", groupIdx: null });
-        if (hasEntropyData()) {
-            menuItems.push({ mode: "entropy", label: "entropy (uncertainty)", color: "#9c27b0", colorType: "entropy", groupIdx: null });
-        }
-        if (findGroupForToken(topToken) < 0) {
-            menuItems.push({ mode: topToken, label: topToken, color: state.heatmapNextColor || "#cc6622", colorType: "heatmapNext", groupIdx: null });
-        }
-        state.pinnedGroups.forEach((group, idx) => {
-            menuItems.push({ mode: group.tokens[0], label: getGroupLabel(group), color: group.color, colorType: "trajectory", groupIdx: idx, borderColor: group.color });
-        });
-
-        let html = "";
-        menuItems.forEach((item, idx) => {
-            const isActive = state.colorModes.indexOf(item.mode) >= 0;
-            const borderStyle = item.borderColor ? "border-left: 3px solid " + item.borderColor + ";" : "";
-            const checkmark = isActive ? '<span style="padding: 8px 10px 8px 20px; font-weight: bold;">\u2713</span>' : '<span style="padding: 8px 10px 8px 20px; visibility: hidden;">\u2713</span>';
-            html += '<div class="color-menu-item" data-mode="' + escapeHtml(item.mode) + '" data-idx="' + idx + '" style="' + borderStyle + '">';
-            html += checkmark + '<span class="color-menu-label">' + escapeHtml(item.label) + "</span>";
-            html += '<input type="color" class="color-swatch" value="' + item.color + '" data-idx="' + idx + '">';
-            html += "</div>";
-        });
-
-        const noneActive = state.colorModes.length === 0;
-        const noneCheck = noneActive ? '<span style="padding: 8px 10px 8px 20px; font-weight: bold;">\u2713</span>' : '<span style="padding: 8px 10px 8px 20px; visibility: hidden;">\u2713</span>';
-        html += '<div class="color-menu-item" data-mode="none" style="border-top: 1px solid #eee; margin-top: 4px;">' + noneCheck + '<span class="color-menu-label">None</span></div>';
-
-        menu.innerHTML = html;
-        menu.classList.add("visible");
-        positionMenuNearButton(menu, rect);
-        menu.style.visibility = "";
-        showOverlay(closeColorModeMenu);
-
-        menu.querySelectorAll<HTMLElement>(".color-menu-item").forEach((item) => {
-            item.addEventListener("click", function (ev: MouseEvent) {
-                if ((ev.target as HTMLElement).classList.contains("color-swatch")) return;
-                ev.stopPropagation();
-                const mode = item.dataset.mode!;
-                const isModifierClick = ev.shiftKey || ev.ctrlKey || ev.metaKey;
-
-                if (isModifierClick && mode !== "none") {
-                    const idx = state.colorModes.indexOf(mode);
-                    if (idx >= 0) state.colorModes.splice(idx, 1);
-                    else state.colorModes.push(mode);
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                    return;
-                }
-
-                item.style.animation = "menuBlink-" + uid + " 0.2s ease-in-out";
-                setTimeout(function () {
-                    if (mode === "none") state.colorModes = [];
-                    else state.colorModes = [mode];
-                    menu.classList.remove("visible");
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                }, 200);
-            });
-        });
-
-        menu.querySelectorAll<HTMLInputElement>(".color-swatch").forEach((swatch) => {
-            const idx = parseInt(swatch.dataset.idx!);
-            const itemData = menuItems[idx];
-            const menuItem = swatch.closest(".color-menu-item") as HTMLElement;
-            swatch.addEventListener("click", (ev) => { ev.stopPropagation(); menuItem?.classList.add("picking"); });
-            swatch.addEventListener("input", (ev) => {
-                ev.stopPropagation();
-                const newColor = swatch.value;
-                if (itemData.colorType === "heatmap") state.heatmapBaseColor = newColor;
-                else if (itemData.colorType === "heatmapNext") state.heatmapNextColor = newColor;
-                else if (itemData.colorType === "trajectory" && itemData.groupIdx !== null) {
-                    state.pinnedGroups[itemData.groupIdx].color = newColor;
-                    if (menuItem) menuItem.style.borderLeftColor = newColor;
-                }
-                buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-            });
-            swatch.addEventListener("change", () => { menuItem?.classList.remove("picking"); });
-        });
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // CELL INTERACTION + POPUP
-    // ═══════════════════════════════════════════════════════════════
-
-    function attachCellListeners() {
-        document.querySelectorAll<HTMLElement>("#" + uid + " .pred-cell, #" + uid + " .input-token").forEach((cell) => {
-            const pos = parseInt(cell.dataset.pos!);
-            if (isNaN(pos)) return;
-            const isInputToken = cell.classList.contains("input-token");
-
-            cell.addEventListener("mouseenter", function () {
-                state.currentHoverPos = pos;
-                if (isInputToken) {
-                    const bestToken = findHighestProbToken(pos, 2, 0.05);
-                    if (bestToken && findGroupForToken(bestToken) < 0) {
-                        const traj = getTrajectoryForToken(bestToken, pos);
-                        updateChart(traj, "#999", bestToken, pos);
-                    } else {
-                        updateChart(null, null, null, pos);
-                    }
-                } else {
-                    const li = cell.dataset.li ? parseInt(cell.dataset.li) : 0;
-                    const cellData = widgetData.cells[pos][li] || widgetData.cells[pos][0];
-                    updateChart(cellData.trajectory, "#999", cellData.token, pos);
-                }
-            });
-
-            cell.addEventListener("mouseleave", function () {
-                updateChart(null, null, null, state.currentHoverPos);
-            });
-        });
-
-        document.querySelectorAll<HTMLElement>("#" + uid + " .input-token").forEach((cell) => {
-            const pos = parseInt(cell.dataset.pos!);
-            if (isNaN(pos)) return;
-            cell.addEventListener("click", function (e) {
+            el.addEventListener("mouseleave", () => updateLinePlot());
+            el.addEventListener("click", (e) => {
                 e.stopPropagation();
-                closePopup();
-                dom.colorMenu().classList.remove("visible");
-                togglePinnedRow(pos);
-                buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
+                togglePin(item.token);
+                renderHeatmap();
+                renderPopupBody(row, layer);
+                updateLinePlot();
+                emitStateChange();
             });
         });
+    }
 
-        document.querySelectorAll<HTMLElement>("#" + uid + " .pred-cell").forEach((cell) => {
-            const pos = parseInt(cell.dataset.pos!);
-            const li = parseInt(cell.dataset.li!);
-            const cellData = widgetData.cells[pos][li];
-
-            cell.addEventListener("click", function (e) {
-                e.stopPropagation();
-                if (e.shiftKey) {
-                    togglePinnedTrajectory(cellData.token, true);
-                    buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                    return;
-                }
-                const colorMenu = dom.colorMenu();
-                if (colorMenu?.classList.contains("visible")) { colorMenu.classList.remove("visible"); return; }
-                if (state.openPopupCell) { closePopup(); return; }
-                document.querySelectorAll("#" + uid + " .pred-cell.selected").forEach((c) => c.classList.remove("selected"));
-                cell.classList.add("selected");
-                showPopup(cell, pos, li, cellData);
-            });
-        });
-
-        dom.popupClose().addEventListener("click", closePopup);
+    function positionPopup(cellRect: DOMRect) {
+        const margin = 6, gap = 6;
+        const w = popupEl.offsetWidth || 220;
+        const h = popupEl.offsetHeight || 160;
+        const minLeft = margin, maxLeft = window.innerWidth - w - margin;
+        const minTop = margin, maxTop = window.innerHeight - h - margin;
+        const anchors = [
+            { left: cellRect.right + gap, top: cellRect.top },
+            { left: cellRect.left - gap - w, top: cellRect.top },
+            { left: cellRect.left, top: cellRect.bottom + gap },
+            { left: cellRect.left, top: cellRect.top - gap - h },
+        ];
+        let chosen = anchors[0];
+        for (const a of anchors) {
+            if (a.left >= minLeft && a.left <= maxLeft && a.top >= minTop && a.top <= maxTop) { chosen = a; break; }
+        }
+        popupEl.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
+        popupEl.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
     }
 
     function closePopup() {
-        const popup = dom.popup();
-        if (popup) popup.classList.remove("visible");
-        document.querySelectorAll("#" + uid + " .pred-cell.selected").forEach((c) => c.classList.remove("selected"));
-        state.openPopupCell = null;
+        state.openPopup = null;
+        popupEl.classList.remove("ll-visible");
         removeOverlay();
+        renderHeatmap();
+        updateLinePlot();
     }
 
-    function closeColorModeMenu() {
-        const menu = dom.colorMenu();
-        if (menu) menu.classList.remove("visible");
-        removeOverlay();
-    }
-
-    function showOverlay(onDismiss: () => void) {
-        removeOverlay();
-        const overlay = document.createElement("div");
-        overlay.id = uid + "_overlay";
-        overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:50;";
-        overlay.addEventListener("mousedown", function (e) {
-            e.stopPropagation();
-            e.preventDefault();
-            onDismiss();
-        });
-        document.body.appendChild(overlay);
-    }
-
-    function removeOverlay() {
-        const overlay = dom.overlay();
-        if (overlay) overlay.remove();
-    }
-
-    function showPopup(cell: HTMLElement, pos: number, li: number, cellData: any) {
-        closeColorModeMenu();
-        state.colorPickerTarget = null;
-        state.openPopupCell = cell;
-        const popup = dom.popup();
-        // Popup uses position: fixed (to escape widget overflow:hidden),
-        // so coords are viewport-relative — no widget offset subtraction.
-        // Pre-set visibility: hidden so the popup is laid out but invisible
-        // between the .visible toggle and positionPopupNearCell — eliminates
-        // the brief flash at the placeholder position for slow renders.
-        popup.style.visibility = "hidden";
-        const rect = cell.getBoundingClientRect();
-        const gap = 5;
-        popup.style.left = (rect.left + rect.width + gap) + "px";
-        popup.style.top = rect.top + "px";
-
-        dom.popupLayer().textContent = String(widgetData.layers[li]);
-        dom.popupPos().innerHTML = pos + "<br>Input <code>" + escapeHtml(visualizeSpaces(widgetData.tokens[pos])) + "</code>";
-
-        let contentHtml = "";
-        cellData.topk.forEach((item: any, ki: number) => {
-            const probPct = (item.prob * 100).toFixed(1);
-            const pinnedColor = getColorForToken(item.token);
-            const pinnedStyle = pinnedColor ? "background: " + pinnedColor + "22; border-left-color: " + pinnedColor + ";" : "";
-            const visualizedToken = visualizeSpaces(item.token);
-            const tooltipToken = visualizeSpaces(item.token, true);
-            contentHtml += '<div class="topk-item' + (pinnedColor ? " pinned" : "") + '" data-ki="' + ki + '" style="' + pinnedStyle + '" title="' + escapeHtml(tooltipToken) + '">';
-            contentHtml += '<span class="topk-token">' + escapeHtml(visualizedToken) + "</span>";
-            contentHtml += '<span class="topk-prob">' + probPct + "%</span></div>";
-        });
-
-        const firstToken = cellData.topk[0].token;
-        const firstIsPinned = findGroupForToken(firstToken) >= 0;
-        if (firstIsPinned && hasSimilarTokensInList(cellData.topk, firstToken)) {
-            contentHtml += '<div style="font-size: var(--ll-content-size, 14px); font-style: italic; color: #666; margin-top: 8px; padding-top: 6px; border-top: 1px solid #eee;">Shift-click to group tokens</div>';
-        }
-
-        dom.popupContent().innerHTML = contentHtml;
-
-        document.querySelectorAll<HTMLElement>("#" + uid + "_popup_content .topk-item").forEach((item) => {
-            const ki = parseInt(item.dataset.ki!);
-            const tokData = cellData.topk[ki];
-
-            item.addEventListener("mouseenter", function () {
-                document.querySelectorAll("#" + uid + "_popup_content .topk-item").forEach((it) => it.classList.remove("active"));
-                item.classList.add("active");
-                updateChart(tokData.trajectory, "#999", tokData.token, pos);
-            });
-            item.addEventListener("mouseleave", function () {
-                item.classList.remove("active");
-                updateChart(null, null, null, pos);
-            });
-            item.addEventListener("click", function (e) {
-                e.stopPropagation();
-                const addToGroup = e.shiftKey || e.ctrlKey || e.metaKey;
-                togglePinnedTrajectory(tokData.token, addToGroup);
-                buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-                const newCell = document.querySelector("#" + uid + " .pred-cell[data-pos='" + pos + "'][data-li='" + li + "']") as HTMLElement;
-                if (newCell) { newCell.classList.add("selected"); showPopup(newCell, pos, li, cellData); }
-            });
-        });
-
-        popup.classList.add("visible");
-        positionPopupNearCell(popup, rect, gap);
-        popup.style.visibility = "";
-        showOverlay(closePopup);
-        updateChart(cellData.trajectory, "#999", cellData.token, pos);
-    }
-
-    // Place the popup near a heatmap cell, trying four anchors in order
-    // (right / left / below / above) and falling back to a clamped
-    // placement when none fit cleanly. The popup is constrained to stay
-    // inside the widget's bounding box; if the widget is too small on a
-    // given axis, we relax to the viewport so the popup remains visible.
-    //
-    // We also shrink the popup itself when the widget is small: maxWidth
-    // and maxHeight are pinned to the widget's dimensions before
-    // measuring, so the popup can't demand more space than the heatmap
-    // has. overflow-y: auto on the popup then makes the topk list scroll
-    // internally if it overflows.
-    // Place the color-mode menu near its trigger button. Simpler than the
-    // popup positioning because the menu is anchored to a single button
-    // (vs. a heatmap cell) and only needs two candidate anchors (below
-    // the button, then above it). Same widget-then-viewport bounds
-    // strategy as positionPopupNearCell.
-    function positionMenuNearButton(
-        menu: HTMLElement,
-        btnRect: DOMRect,
-    ): void {
-        const widgetRect = dom.widget().getBoundingClientRect();
-        const margin = 4;
-        const gap = 5;
-
-        // Cap menu dimensions to the widget, with usable floors.
-        const FLOOR_W = 150;
-        const FLOOR_H = 100;
-        const CAP_W = 280;
-        const CAP_H = 360;
-        menu.style.maxWidth = Math.max(FLOOR_W, Math.min(CAP_W, widgetRect.width - 2 * margin)) + "px";
-        menu.style.maxHeight = Math.max(FLOOR_H, Math.min(CAP_H, widgetRect.height - 2 * margin)) + "px";
-
-        void menu.offsetWidth;
-        const rect = menu.getBoundingClientRect();
-        const menuW = rect.width;
-        const menuH = rect.height;
-
-        const widgetFitsH = widgetRect.width >= menuW + 2 * margin;
-        const widgetFitsV = widgetRect.height >= menuH + 2 * margin;
-        const minLeft = widgetFitsH ? widgetRect.left + margin : margin;
-        const maxLeft = (widgetFitsH ? widgetRect.right : window.innerWidth) - menuW - margin;
-        const minTop = widgetFitsV ? widgetRect.top + margin : margin;
-        const maxTop = (widgetFitsV ? widgetRect.bottom : window.innerHeight) - menuH - margin;
-
-        const anchors: { left: number; top: number }[] = [
-            { left: btnRect.left, top: btnRect.bottom + gap },           // below
-            { left: btnRect.left, top: btnRect.top - gap - menuH },      // above
-        ];
-
-        let chosen = anchors[0];
-        for (const a of anchors) {
-            if (
-                a.left >= minLeft && a.left <= maxLeft &&
-                a.top >= minTop && a.top <= maxTop
-            ) {
-                chosen = a;
-                break;
-            }
-        }
-
-        menu.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
-        menu.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
-    }
-
-    function positionPopupNearCell(
-        popup: HTMLElement,
-        cellRect: DOMRect,
-        gap: number,
-    ): void {
-        const widgetRect = dom.widget().getBoundingClientRect();
-        const margin = 4;
-
-        // Cap popup dimensions to the widget. We keep a usable floor
-        // (FLOOR_W × FLOOR_H) so the popup is never tinier than usable;
-        // if the widget is smaller than that, the popup will overflow the
-        // widget on that axis and the positioning fallback below relaxes
-        // to viewport bounds so the popup remains visible.
-        //
-        // CAP_W mirrors the CSS `max-width: 260px` on #${uid}_popup — keep
-        // these in sync (CSS still wins if they drift, but the JS upper
-        // bound here makes the cap visible at the point of computation).
-        // CAP_H is the same idea for height: stops the inline maxHeight
-        // from being misleadingly large on a very tall widget.
-        const FLOOR_W = 140;
-        const FLOOR_H = 120;
-        const CAP_W = 260;
-        const CAP_H = 420;
-        const cappedW = Math.max(FLOOR_W, Math.min(CAP_W, widgetRect.width - 2 * margin));
-        const cappedH = Math.max(FLOOR_H, Math.min(CAP_H, widgetRect.height - 2 * margin));
-        popup.style.maxWidth = cappedW + "px";
-        popup.style.maxHeight = cappedH + "px";
-
-        // Defensive reflow before measuring: `.visible` was toggled in the
-        // synchronous caller, so layout is normally already fresh, but
-        // touching offsetWidth forces a sync layout pass in case a future
-        // refactor introduces an async hop between the style write and the
-        // getBoundingClientRect read.
-        void popup.offsetWidth;
-        const popupRect = popup.getBoundingClientRect();
-        const popupW = popupRect.width;
-        const popupH = popupRect.height;
-
-        // "Fits in widget" check: can a popup of size popupW × popupH be
-        // fully placed inside widgetRect after subtracting margins?
-        // - true  → constrain bounds to the widget (the soft preference).
-        // - false → relax to the viewport on that axis so the popup is
-        //           still fully visible somewhere on screen, even if it
-        //           visibly overflows the widget.
-        const widgetFitsH = widgetRect.width >= popupW + 2 * margin;
-        const widgetFitsV = widgetRect.height >= popupH + 2 * margin;
-        const minLeft = widgetFitsH ? widgetRect.left + margin : margin;
-        const maxLeft = (widgetFitsH ? widgetRect.right : window.innerWidth) - popupW - margin;
-        const minTop = widgetFitsV ? widgetRect.top + margin : margin;
-        const maxTop = (widgetFitsV ? widgetRect.bottom : window.innerHeight) - popupH - margin;
-
-        // Below/above anchors use the cell's horizontal MIDPOINT (not its
-        // left edge) so a thin cell with a wide popup doesn't push the
-        // popup off to the right and immediately fail the bounds check.
-        const cellMidX = cellRect.left + cellRect.width / 2;
-        const anchors: { left: number; top: number }[] = [
-            { left: cellRect.right + gap,            top: cellRect.top },                  // right
-            { left: cellRect.left - gap - popupW,    top: cellRect.top },                  // left
-            { left: cellMidX - popupW / 2,           top: cellRect.bottom + gap },         // below (centered)
-            { left: cellMidX - popupW / 2,           top: cellRect.top - gap - popupH },   // above (centered)
-        ];
-
-        let chosen = anchors[0];
-        for (const a of anchors) {
-            if (
-                a.left >= minLeft && a.left <= maxLeft &&
-                a.top >= minTop && a.top <= maxTop
-            ) {
-                chosen = a;
-                break;
-            }
-        }
-
-        // Final clamp — guarantees the popup stays inside the chosen
-        // bounds even when no anchor fully fit (e.g. cell near a corner).
-        popup.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
-        popup.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
-    }
-
-    function togglePinnedTrajectory(token: string, addToGroup: boolean): boolean {
-        const existingGroupIdx = findGroupForToken(token);
-        if (addToGroup && state.lastPinnedGroupIndex >= 0 && state.lastPinnedGroupIndex < state.pinnedGroups.length) {
-            const lastGroup = state.pinnedGroups[state.lastPinnedGroupIndex];
-            if (existingGroupIdx === state.lastPinnedGroupIndex) {
-                lastGroup.tokens = lastGroup.tokens.filter((t) => t !== token);
-                if (lastGroup.tokens.length === 0) {
-                    state.pinnedGroups.splice(state.lastPinnedGroupIndex, 1);
-                    state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-                }
-                return false;
-            } else if (existingGroupIdx >= 0) {
-                state.pinnedGroups[existingGroupIdx].tokens = state.pinnedGroups[existingGroupIdx].tokens.filter((t) => t !== token);
-                if (state.pinnedGroups[existingGroupIdx].tokens.length === 0) {
-                    state.pinnedGroups.splice(existingGroupIdx, 1);
-                    if (state.lastPinnedGroupIndex > existingGroupIdx) state.lastPinnedGroupIndex--;
-                }
-                lastGroup.tokens.push(token);
-                return true;
-            } else {
-                lastGroup.tokens.push(token);
-                return true;
-            }
-        } else {
-            if (existingGroupIdx >= 0) {
-                const group = state.pinnedGroups[existingGroupIdx];
-                group.tokens = group.tokens.filter((t) => t !== token);
-                if (group.tokens.length === 0) {
-                    state.pinnedGroups.splice(existingGroupIdx, 1);
-                    if (state.lastPinnedGroupIndex >= state.pinnedGroups.length) state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-                }
-                return false;
-            } else {
-                state.pinnedGroups.push({ color: getNextColor(), tokens: [token] });
-                state.lastPinnedGroupIndex = state.pinnedGroups.length - 1;
-                return true;
-            }
-        }
-    }
+    document.getElementById(uid + "_popup_close")!.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closePopup();
+    });
 
     // ═══════════════════════════════════════════════════════════════
-    // RESIZE HANDLING
+    // EVENT WIRING (delegation)
     // ═══════════════════════════════════════════════════════════════
+    let hoverCell: HTMLElement | null = null;
 
-    // Fill mode = the workbench-style render path where the host gives us
-    // a bounded box and expects the widget to fill it. Detected by the
-    // *absence* of --ll-aspect-ratio on the widget root — that's the
-    // workbench React component's signal (it doesn't set the variable).
-    // Other "no cap" values like "unbounded"/"none"/"auto" are explicit
-    // Python opt-outs (content-driven height, no horizontal fill).
-    function isFillMode(): boolean {
-        const widget = dom.widget();
-        if (!widget) return false;
-        const raw = getComputedStyle(widget)
-            .getPropertyValue("--ll-aspect-ratio")
-            .trim();
-        return !raw;
-    }
-
-    function measureHostWidth(): number {
-        // Stride/fit calculations must match the heatmap viewport, not the
-        // broader notebook output. The viewport is sized by CSS to
-        // var(--ll-heatmap-width, 90%), which is typically narrower than
-        // the host container. Using the container's width here would
-        // produce a table that overflows the viewport on first render.
-        const wrapper = dom.tableWrapper();
-        const wrapperWidth = wrapper?.clientWidth ?? 0;
-        if (wrapperWidth > 0) return wrapperWidth;
-        // Fallbacks for edge cases where the wrapper isn't measurable yet
-        // (detached node, display:none ancestor, etc.).
-        const host = container as HTMLElement | null;
-        const hostWidth = host?.clientWidth ?? 0;
-        if (hostWidth > 0) return hostWidth;
-        const widgetWidth = dom.widget()?.offsetWidth ?? 0;
-        return widgetWidth || 900;
-    }
-
-    function getContainerWidth(): number {
-        const actualWidth = measureHostWidth();
-        return state.maxTableWidth !== null ? Math.min(state.maxTableWidth, actualWidth) : actualWidth;
-    }
-
-    function getActualContainerWidth(): number {
-        return measureHostWidth();
-    }
-
-    // The widget has three modes, distinguished by --ll-aspect-ratio:
-    //
-    //   1. Cap mode (Jupyter default): --ll-aspect-ratio is a ratio like
-    //      "5 / 3". JS sets max-height = host.clientWidth × (h/w). Short
-    //      content shrinks the widget; long content caps it and the
-    //      heatmap scrolls inside.
-    //
-    //   2. Opt-out mode (Jupyter explicit): --ll-aspect-ratio is set to
-    //      "unbounded" (Python forwards this when the user passes "none"
-    //      or "auto"). The widget is content-driven with NO cap; popups
-    //      and parent flow handle the rest. Distinct from fill mode
-    //      because the Python caller wants content-driven sizing, not
-    //      to fill an external bounded box.
-    //
-    //   3. Fill mode (workbench React, anywhere else): --ll-aspect-ratio
-    //      is NOT set. The widget fills its parent's full height. Caller
-    //      is responsible for giving us a bounded box (e.g. h-full
-    //      chained from an h-screen ancestor).
-    //
-    // We can't use CSS aspect-ratio for mode 1: it sets a *definite* height
-    // which, combined with flex-grow on .table-wrapper, reserves empty
-    // space below short content. max-height treats the ratio as a cap and
-    // lets the widget shrink to content when smaller.
-    function applyOuterCap(): void {
-        const widget = dom.widget();
-        if (!widget || !container) return;
-        const cs = getComputedStyle(widget);
-        const raw = cs.getPropertyValue("--ll-aspect-ratio").trim();
-        if (!raw) {
-            // Mode 3 — Fill mode (variable unset, e.g. workbench React).
-            widget.style.maxHeight = "";
-            widget.style.height = "100%";
+    scrollEl.addEventListener("mousemove", (e) => {
+        const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
+        if (!cellDiv) { if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; } hideTooltip(); return; }
+        if (hoverCell !== cellDiv) {
+            if (hoverCell) hoverCell.classList.remove("ll-cell-hover");
+            hoverCell = cellDiv;
+            hoverCell.classList.add("ll-cell-hover");
+        }
+        const row = parseInt(cellDiv.dataset.row!);
+        const layer = parseInt(cellDiv.dataset.layer!);
+        showTooltip(row, layer, e.clientX, e.clientY);
+    });
+    scrollEl.addEventListener("mouseleave", () => {
+        if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; }
+        hideTooltip();
+    });
+    scrollEl.addEventListener("click", (e) => {
+        const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
+        if (cellDiv) {
+            const row = parseInt(cellDiv.dataset.row!);
+            const layer = parseInt(cellDiv.dataset.layer!);
+            hideTooltip();
+            showPopup(row, layer, cellDiv);
             return;
         }
-        if (raw === "unbounded" || raw === "none" || raw === "auto") {
-            // Mode 2 — Opt-out: clear both, let content drive height.
-            widget.style.maxHeight = "";
-            widget.style.height = "";
-            return;
-        }
-        const hostWidth = (container as HTMLElement).clientWidth;
-        if (hostWidth <= 0) return;
-        const parts = raw.split("/").map((s) => parseFloat(s.trim()));
-        if (parts.length !== 2 || !parts[0] || !parts[1]) {
-            // Malformed ratio — fail safe to content-driven (mode 2).
-            widget.style.maxHeight = "";
-            widget.style.height = "";
-            return;
-        }
-        // Mode 1 — Cap mode.
-        widget.style.height = "";
-        widget.style.maxHeight = ((hostWidth * parts[1]) / parts[0]) + "px";
-    }
-
-    function attachResizeListeners() {
-        document.querySelectorAll<HTMLElement>("#" + uid + " .resize-handle-input").forEach((handle) => {
-            handle.addEventListener("mousedown", (e: MouseEvent) => {
-                closePopup();
-                state.colResizeDrag = { active: true, type: "input", startX: e.clientX, startWidth: state.inputTokenWidth, colIdx: 0 };
-                handle.classList.add("dragging");
-                e.preventDefault();
-                e.stopPropagation();
-            });
-        });
-        document.querySelectorAll<HTMLElement>("#" + uid + " .resize-handle").forEach((handle) => {
-            const colIdx = parseInt(handle.dataset.col!);
-            handle.addEventListener("mousedown", (e: MouseEvent) => {
-                closePopup();
-                state.colResizeDrag = { active: true, type: "column", startX: e.clientX, startWidth: state.currentCellWidth, colIdx };
-                handle.classList.add("dragging");
-                e.preventDefault();
-                e.stopPropagation();
-            });
-        });
-    }
-
-    // Document-level listeners for drag handling (named for cleanup in destroy)
-    const handleColResizeMove = (e: MouseEvent) => {
-        if (!state.colResizeDrag.active) return;
-        const delta = e.clientX - state.colResizeDrag.startX;
-        if (state.colResizeDrag.type === "input") {
-            state.inputTokenWidth = Math.max(40, Math.min(200, state.colResizeDrag.startWidth + delta));
-            const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-            buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-            notifyLinkedWidgets();
-        } else if (state.colResizeDrag.type === "column") {
-            const numCols = state.colResizeDrag.colIdx + 1;
-            const widthDelta = delta / numCols;
-            const newWidth = Math.max(minCellWidth, Math.min(maxCellWidth, state.colResizeDrag.startWidth + widthDelta));
-            if (Math.abs(newWidth - state.currentCellWidth) > 1) {
-                state.currentCellWidth = newWidth;
-                const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-                buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-                notifyLinkedWidgets();
-            }
-        }
-    };
-    document.addEventListener("mousemove", handleColResizeMove);
-
-    const handleGlobalMouseUp = () => {
-        if (state.colResizeDrag.active) {
-            state.colResizeDrag.active = false;
-            document.querySelectorAll("#" + uid + " .resize-handle-input, #" + uid + " .resize-handle").forEach((h) => h.classList.remove("dragging"));
-        }
-        state.yAxisDrag.active = false;
-        state.xAxisDrag.active = false;
-        state.plotMinLayerDrag.active = false;
-        if (state.rightEdgeDrag.active) {
-            state.rightEdgeDrag.active = false;
-            dom.resizeRight().classList.remove("dragging");
-        }
-    };
-    document.addEventListener("mouseup", handleGlobalMouseUp);
-
-    const handleXAxisDragMove = (e: MouseEvent) => {
-        if (!state.xAxisDrag.active) return;
-        const delta = e.clientY - state.xAxisDrag.startY;
-        const newHeight = Math.max(minChartHeight, Math.min(maxChartHeight, state.xAxisDrag.startHeight + delta));
-        if (Math.abs(newHeight - getActualChartHeight()) > 2) {
-            state.chartHeight = newHeight;
-            state.chartAspectRatio = null;  // explicit drag overrides aspect ratio
-            applyChartSizing();
-            updateChart(null, null, null, state.currentHoverPos);
-        }
-    };
-    document.addEventListener("mousemove", handleXAxisDragMove);
-
-    const handleYAxisDragMove = (e: MouseEvent) => {
-        if (!state.yAxisDrag.active) return;
-        const delta = e.clientX - state.yAxisDrag.startX;
-        state.inputTokenWidth = Math.max(40, Math.min(200, state.yAxisDrag.startWidth + delta));
-        const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-        buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-        notifyLinkedWidgets();
-    };
-    document.addEventListener("mousemove", handleYAxisDragMove);
-
-    const handlePlotMinLayerDragMove = (e: MouseEvent) => {
-        if (!state.plotMinLayerDrag.active) return;
-        const delta = e.clientX - state.plotMinLayerDrag.startX;
-        const dr = state.plotMinLayerDrag.dotRadius;
-        const uw = state.plotMinLayerDrag.usableWidth;
-        const layerIdx = state.plotMinLayerDrag.layerIdx;
-        let targetX = Math.max(dr, Math.min(uw - dr, state.plotMinLayerDrag.layerXAtStart + delta));
-        const t = (targetX - dr) / (uw - 2 * dr);
-        if (Math.abs(t - 1) < 0.001) return;
-        let newMinLayer = (t * (nLayers - 1) - layerIdx) / (t - 1);
-        newMinLayer = Math.max(0, Math.min(layerIdx - 0.1, newMinLayer));
-        if (Math.abs(newMinLayer - state.plotMinLayer) > 0.01) {
-            state.plotMinLayer = newMinLayer;
-            updateChart(null, null, null, state.currentHoverPos);
-        }
-    };
-    document.addEventListener("mousemove", handlePlotMinLayerDragMove);
-
-    // Bottom resize handle
-    let bottomDragActive = false, bottomStartY = 0, bottomStartMaxRows: number | null = null, bottomMeasuredRowHeight = 20;
-    {
-        const handle = dom.resizeBottom();
-        const table = dom.table();
-        handle.addEventListener("mousedown", (e: MouseEvent) => {
-            closePopup();
-            bottomDragActive = true;
-            bottomStartY = e.clientY;
-            bottomStartMaxRows = state.currentMaxRows;
-            const rows = table.querySelectorAll("tr");
-            if (rows.length >= 2) bottomMeasuredRowHeight = rows[1].getBoundingClientRect().height;
-            handle.classList.add("dragging");
-            e.preventDefault();
-            e.stopPropagation();
-        });
-    }
-    const handleBottomResizeMove = (e: MouseEvent) => {
-        if (!bottomDragActive) return;
-        const delta = e.clientY - bottomStartY;
-        const rowDelta = Math.round(delta / bottomMeasuredRowHeight);
-        const totalTokens = widgetData.tokens.length;
-        const startRows = bottomStartMaxRows === null ? totalTokens : bottomStartMaxRows;
-        let newMaxRows: number | null = Math.max(1, Math.min(totalTokens, startRows + rowDelta));
-        if (newMaxRows >= totalTokens) newMaxRows = null;
-        if (newMaxRows !== state.currentMaxRows) buildTable(state.currentCellWidth, state.currentVisibleIndices, newMaxRows);
-    };
-    document.addEventListener("mousemove", handleBottomResizeMove);
-    const handleBottomResizeUp = () => {
-        if (bottomDragActive) { bottomDragActive = false; dom.resizeBottom().classList.remove("dragging"); }
-    };
-    document.addEventListener("mouseup", handleBottomResizeUp);
-
-    // Right edge resize handle
-    (function () {
-        const handle = dom.resizeRight();
-        handle.addEventListener("mousedown", (e: MouseEvent) => {
-            closePopup();
-            state.rightEdgeDrag = {
-                active: true, startX: e.clientX,
-                startTableWidth: dom.table().offsetWidth,
-                startCellWidth: state.currentCellWidth,
-                hadMaxTableWidth: state.maxTableWidth !== null,
-                startMaxTableWidth: state.maxTableWidth,
-            };
-            handle.classList.add("dragging");
-            e.preventDefault();
-            e.stopPropagation();
-        });
-    })();
-
-    const handleRightEdgeResizeMove = (e: MouseEvent) => {
-        if (!state.rightEdgeDrag.active) return;
-        const delta = e.clientX - state.rightEdgeDrag.startX;
-        const actualContainerWidth = getActualContainerWidth();
-        let targetTableWidth = state.rightEdgeDrag.startTableWidth + delta;
-
-        if (delta >= 0) {
-            targetTableWidth = Math.min(targetTableWidth, actualContainerWidth);
-            if (targetTableWidth >= actualContainerWidth - state.currentCellWidth) state.maxTableWidth = null;
-            else state.maxTableWidth = targetTableWidth;
-
-            const availableForCells = targetTableWidth - state.inputTokenWidth - 1;
-            let numVisibleCols = state.currentVisibleIndices.length;
-            if (numVisibleCols > 0) {
-                let newCellWidth = availableForCells / numVisibleCols;
-                if (newCellWidth > maxCellWidth && numVisibleCols < nLayers) {
-                    numVisibleCols++;
-                    newCellWidth = availableForCells / numVisibleCols;
-                }
-                newCellWidth = Math.max(minCellWidth, Math.min(maxCellWidth, newCellWidth));
-                const threshold = 0.5 / Math.max(1, numVisibleCols);
-                if (Math.abs(newCellWidth - state.currentCellWidth) > threshold) {
-                    state.currentCellWidth = newCellWidth;
-                    const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-                    buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-                    notifyLinkedWidgets();
-                }
-            }
-        } else {
-            targetTableWidth = Math.max(state.inputTokenWidth + minCellWidth + 1, targetTableWidth);
-            if (!state.rightEdgeDrag.hadMaxTableWidth && targetTableWidth >= state.rightEdgeDrag.startTableWidth) state.maxTableWidth = null;
-            else state.maxTableWidth = targetTableWidth;
-            const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-            buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-            notifyLinkedWidgets();
-        }
-    };
-    document.addEventListener("mousemove", handleRightEdgeResizeMove);
-
-    // ═══════════════════════════════════════════════════════════════
-    // CHART RENDERING (now delegated to LinePlotCore via updateChart above)
-    // The old SVG-based drawAllTrajectories and drawSingleTrajectory have been
-    // replaced by updateChart() which uses LinePlotCore for canvas rendering.
-    // ═══════════════════════════════════════════════════════════════
-
-
-    // ═══════════════════════════════════════════════════════════════
-    // WIDGET LINKING + STATE SERIALIZATION
-    // ═══════════════════════════════════════════════════════════════
-
-    function getColumnState() {
-        return { cellWidth: state.currentCellWidth, inputTokenWidth: state.inputTokenWidth, maxTableWidth: state.maxTableWidth };
-    }
-
-    function setColumnState(colState: Record<string, unknown>, fromSync?: boolean) {
-        if (state.isSyncing) return;
-        let changed = false;
-        if (typeof colState.cellWidth === "number" && colState.cellWidth !== state.currentCellWidth) { state.currentCellWidth = colState.cellWidth; changed = true; }
-        if (typeof colState.inputTokenWidth === "number" && colState.inputTokenWidth !== state.inputTokenWidth) { state.inputTokenWidth = colState.inputTokenWidth; changed = true; }
-        if (colState.maxTableWidth !== undefined && colState.maxTableWidth !== state.maxTableWidth) { state.maxTableWidth = colState.maxTableWidth as number | null; changed = true; }
-        if (changed) {
-            const result = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-            buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-            if (!fromSync) notifyLinkedWidgets();
-        }
-    }
-
-    function notifyLinkedWidgets() {
-        if (state.isSyncing) return;
-        state.isSyncing = true;
-        const colState = getColumnState();
-        state.linkedWidgets.forEach((w: any) => { if (w.setColumnState) w.setColumnState(colState, true); });
-        state.isSyncing = false;
-    }
-
-    function getState(): LogitLensUIState {
-        return {
-            chartHeight: state.chartHeight,
-            chartAspectRatio: state.chartAspectRatio,
-            inputTokenWidth: state.inputTokenWidth,
-            cellWidth: state.currentCellWidth,
-            maxRows: state.currentMaxRows,
-            maxTableWidth: state.maxTableWidth,
-            plotMinLayer: state.plotMinLayer,
-            colorModes: state.colorModes.slice(),
-            title: state.customTitle,
-            colorIndex: state.colorIndex,
-            pinnedGroups: JSON.parse(JSON.stringify(state.pinnedGroups)),
-            lastPinnedGroupIndex: state.lastPinnedGroupIndex,
-            pinnedRows: state.pinnedRows.map((pr) => ({ pos: pr.pos, line: pr.lineStyle.name })),
-            heatmapBaseColor: state.heatmapBaseColor,
-            heatmapNextColor: state.heatmapNextColor,
-            darkMode: state.darkModeOverride,
-            showHeatmap: state.showHeatmap,
-            showChart: state.showChart,
-            trajectoryMetric: state.trajectoryMetric,
-        };
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // GLOBAL EVENT LISTENERS
-    // ═══════════════════════════════════════════════════════════════
-
-    dom.widget().addEventListener("mousedown", (e) => { if (e.shiftKey) e.preventDefault(); });
-    dom.widget().addEventListener("mouseleave", () => {
-        state.currentHoverPos = widgetData.tokens.length - 1;
-        updateChart(null, null, null, state.currentHoverPos);
+        const rowGrid = (e.target as HTMLElement).closest(".ll-row-grid") as HTMLElement | null;
+        if (rowGrid) selectRow(parseInt(rowGrid.dataset.row!));
     });
 
-    const colorPicker = dom.colorPicker();
-    colorPicker.addEventListener("input", (e) => {
-        if (!state.colorPickerTarget) return;
-        const newColor = (e.target as HTMLInputElement).value;
-        if (state.colorPickerTarget.type === "trajectory" && state.colorPickerTarget.groupIdx !== undefined) {
-            const group = state.pinnedGroups[state.colorPickerTarget.groupIdx];
-            if (group) { group.color = newColor; buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows); }
-        } else if (state.colorPickerTarget.type === "heatmap") {
-            state.heatmapBaseColor = newColor;
-            buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows);
-        }
-    });
-    colorPicker.addEventListener("change", () => { state.colorPickerTarget = null; });
-
-    // Initial build. applyOuterCap before computing visible layers so the
-    // widget's max-height / fill-parent height is in place before stride
-    // calc — both modes share the same stride/fit logic (skipping layers
-    // is purely a function of available width vs cellWidth, not of which
-    // host we're in).
-    applyOuterCap();
-    const containerWidth = getContainerWidth();
-    const result = computeVisibleLayers(state.currentCellWidth, containerWidth);
-    buildTable(state.currentCellWidth, result.indices, state.currentMaxRows, result.stride);
-
-    // Default the heatmap to its last row (the input's final token, whose
-    // last-layer cell is the canonical next-token prediction). If the
-    // table doesn't overflow vertically this is a no-op (scrollTop is
-    // clamped). Done once, after layout settles — subsequent rebuilds
-    // preserve whatever scroll position the user has navigated to.
-    requestAnimationFrame(() => {
-        const scrollEl = document.querySelector(
-            "#" + uid + " .table-scroll",
-        ) as HTMLElement | null;
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    // Keyboard nav when heatmap focused
+    scrollEl.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+        e.preventDefault();
+        const cur = state.selectedRow ?? -1;
+        const next = e.key === "ArrowDown" ? Math.min(nRows - 1, cur + 1) : Math.max(0, cur - 1);
+        selectRow(next, undefined, true);
     });
 
-    // Opt-in width instrumentation: set window.LL_DEBUG = true before render
-    // to log box metrics + computed style for the full layout chain
-    // including Jupyter/Cursor wrappers walked from the host container up.
-    if (typeof window !== "undefined" && (window as any).LL_DEBUG) {
-        requestAnimationFrame(() => {
-            const describe = (label: string, el: Element | null) => {
-                if (!el) { console.log(`[LL ${uid}] ${label}: <null>`); return; }
-                const h = el as HTMLElement;
-                const cs = getComputedStyle(h);
-                console.log(`[LL ${uid}] ${label}`, {
-                    tag: h.tagName.toLowerCase(),
-                    cls: h.className || "(none)",
-                    offset: [h.offsetWidth, h.offsetHeight],
-                    client: [h.clientWidth, h.clientHeight],
-                    scroll: [h.scrollWidth, h.scrollHeight],
-                    display: cs.display,
-                    width: cs.width,
-                    maxWidth: cs.maxWidth,
-                    minWidth: cs.minWidth,
-                    overflowX: cs.overflowX,
-                    overflowY: cs.overflowY,
-                    position: cs.position,
-                    flex: cs.flex,
-                    alignItems: cs.alignItems,
-                });
-            };
-            let cursor: Element | null = container;
-            const ancestors: Element[] = [];
-            while (cursor && ancestors.length < 6 && cursor !== document.body) {
-                ancestors.push(cursor);
-                cursor = cursor.parentElement;
-            }
-            ancestors.reverse().forEach((a, i) => describe(`ancestor[${i}]`, a));
-            describe("widget root", dom.widget());
-            describe(".table-wrapper", dom.tableWrapper());
-            describe(".table-scroll", document.querySelector("#" + uid + " .table-scroll"));
-            describe(".ll-table", dom.table());
-            describe(".chart-container", dom.chartContainer());
-            describe("chart_div", dom.chartDiv());
-        });
-    }
-
-    // Apply chart sizing. The chart-container never grows or shrinks via flex
-    // — it's the heatmap (.table-wrapper) that absorbs flex space changes.
-    // The line plot stays at its natural aspect-ratio-derived height so that
-    // it remains fully visible even when the heatmap is scrolling internally.
-    //   - chartAspectRatio set: aspect-ratio-derived height, flex: none
-    //   - chartHeight set (explicit px from drag): fixed height, flex: none
-    //   - neither: small min-height fallback, flex: none
-    function applyChartSizing() {
-        const chartContainer = dom.chartContainer();
-        if (state.chartAspectRatio) {
-            chartContainer.style.flex = "0 0 auto";
-            chartContainer.style.height = "auto";
-            chartContainer.style.minHeight = "";
-            chartContainer.style.aspectRatio = state.chartAspectRatio;
-        } else if (state.chartHeight !== null) {
-            chartContainer.style.flex = "0 0 auto";
-            chartContainer.style.height = state.chartHeight + "px";
-            chartContainer.style.minHeight = "";
-            chartContainer.style.aspectRatio = "";
-        } else {
-            chartContainer.style.flex = "0 0 auto";
-            chartContainer.style.height = "";
-            chartContainer.style.minHeight = "";
-            chartContainer.style.aspectRatio = "";
-        }
-    }
-    applyChartSizing();
-
-    // Observe container resizes (window resize, panel resize, etc.).
-    // Init from container.clientWidth so the dedup check below compares
-    // against the same value ResizeObserver reports (entry.contentRect.width).
-    let lastContainerWidth = (container as HTMLElement).clientWidth;
-    const containerResizeObserver = new ResizeObserver((entries) => {
-        const entry = entries[0];
-        if (!entry) return;
-        const newWidth = Math.round(entry.contentRect.width);
-        if (newWidth === lastContainerWidth || newWidth === 0) return;
-        lastContainerWidth = newWidth;
-        applyOuterCap();
-        const r = computeVisibleLayers(state.currentCellWidth, getContainerWidth());
-        buildTable(state.currentCellWidth, r.indices, state.currentMaxRows, r.stride);
-        notifyLinkedWidgets();
+    // Navigator buttons
+    navEl.addEventListener("click", (e) => {
+        const btn = (e.target as HTMLElement).closest("[data-nav]") as HTMLElement | null;
+        if (!btn || btn.hasAttribute("disabled")) return;
+        const act = btn.dataset.nav;
+        if (act === "panL") panBy(-Math.max(1, Math.floor(state.viewSize / 4)));
+        else if (act === "panR") panBy(Math.max(1, Math.floor(state.viewSize / 4)));
+        else if (act === "zoomIn") zoom(-1);
+        else if (act === "zoomOut") zoom(1);
+        else if (act === "reset") resetView();
     });
-    containerResizeObserver.observe(container);
 
-    // Apply dark-mode to the widget root and to the portaled popup/menu so
-    // their styles match wherever they're rendered.
-    function syncDarkMode(enabled: boolean): void {
-        applyDarkMode(dom.widget(), enabled, dom.popup(), dom.colorMenu());
+    // ═══════════════════════════════════════════════════════════════
+    // FULL RENDER + THEME
+    // ═══════════════════════════════════════════════════════════════
+    function renderAll() {
+        renderHeatmap();
+        renderNavigator();
+        updateLinePlot();
+        // The scroll region's true size isn't final until the nav + line
+        // plot have laid out (and, on first mount, until the host has its
+        // width), so re-measure and re-render the heatmap once layout
+        // settles — columns/cells then fit the real available box.
+        requestAnimationFrame(() => { renderHeatmap(); renderNavigator(); });
     }
 
-    syncDarkMode(isDarkMode());
+    function syncDark() {
+        applyDarkMode(widgetEl, isDarkMode(), popupEl);
+    }
 
-    // React to runtime theme changes (shared listener handles MutationObserver + matchMedia)
-    const cleanupDarkModeListener = onThemeModeChange(container, (currentDarkMode) => {
-        const widgetEl = dom.widget();
-        if (!widgetEl) return;
+    function emitStateChange() {
+        emit("stateChange", getState());
+    }
+
+    renderAll();
+    syncDark();
+
+    // Re-fit columns/cells when the host resizes (both modes — Jupyter cell
+    // resize and workbench panel resize). Observe the HOST container, not
+    // the card: in fill mode the card width is pinned to the host in px, so
+    // observing the card would never see the host's resize.
+    let resizeRaf = 0;
+    let lastObservedW = (container as HTMLElement)?.clientWidth ?? 0;
+    const resizeObserver = new ResizeObserver(() => {
+        const w = (container as HTMLElement)?.clientWidth ?? 0;
+        if (w === lastObservedW) return; // ignore height-only changes
+        lastObservedW = w;
+        if (resizeRaf) return;
+        resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; renderHeatmap(); });
+    });
+    if (container) resizeObserver.observe(container);
+
+    const cleanupTheme = onThemeModeChange(container, (dark) => {
         if (state.darkModeOverride === null) {
-            syncDarkMode(currentDarkMode);
-            buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
+            applyDarkMode(widgetEl, dark, popupEl);
+            // Cell/skyline colors are baked into the markup at render time,
+            // so re-render them for the new theme.
+            renderHeatmap();
+            renderNavigator();
+            updateLinePlot();
         }
     });
 
     // ═══════════════════════════════════════════════════════════════
     // PUBLIC INTERFACE
     // ═══════════════════════════════════════════════════════════════
+    function getState(): LogitLensUIState {
+        return {
+            ramp: state.ramp,
+            showGrid: state.showGrid,
+            dimLowProb: state.dimLow,
+            selectedRow: state.selectedRow,
+            darkMode: state.darkModeOverride,
+        };
+    }
 
-    const publicInterface: LogitLensWidgetInterface = {
+    const widget: LogitLensWidgetInterface = {
         getState,
         setState: (s: Partial<LogitLensUIState>) => {
-            // Apply individual state fields
+            if (s.ramp !== undefined) state.ramp = s.ramp;
+            if (s.showGrid !== undefined) state.showGrid = s.showGrid;
+            if (s.dimLowProb !== undefined) state.dimLow = s.dimLowProb;
+            if (s.selectedRow !== undefined) state.selectedRow = s.selectedRow;
             if (s.darkMode !== undefined) state.darkModeOverride = s.darkMode;
-            if (s.title !== undefined) state.customTitle = s.title;
-            if (s.showHeatmap !== undefined) state.showHeatmap = s.showHeatmap;
-            if (s.showChart !== undefined) state.showChart = s.showChart;
-            if (s.trajectoryMetric !== undefined) state.trajectoryMetric = s.trajectoryMetric;
-            if (s.colorModes !== undefined) state.colorModes = s.colorModes.slice();
-            if (s.pinnedGroups !== undefined) state.pinnedGroups = JSON.parse(JSON.stringify(s.pinnedGroups));
-            if (s.chartHeight !== undefined) { state.chartHeight = s.chartHeight ?? null; }
-            if (s.chartAspectRatio !== undefined) { state.chartAspectRatio = s.chartAspectRatio ?? null; }
-            if (s.chartHeight !== undefined || s.chartAspectRatio !== undefined) applyChartSizing();
-            syncDarkMode(isDarkMode());
-            render();
+            syncDark();
+            renderAll();
         },
         setData: (data: LogitLensData) => {
-            const dr = normalizeData(data);
-            widgetData = dr.normalized;
-            v2Data = dr.v2Data;
-            render();
+            dataResult = normalizeData(data);
+            widgetData = dataResult.normalized;
+            v2Data = dataResult.v2Data;
+            recomputeDerived();
+            state.selectedRow = null;
+            state.selectedLayerIdx = null;
+            renderAll();
         },
-        setTitle: (title: string) => {
-            state.customTitle = title || "";
-            updateTitle();
-            emitEvent(state, "title", state.customTitle);
-        },
+        setTitle: () => { /* header is fixed in the new design */ },
         setThemeMode: (enabled: boolean) => {
             state.darkModeOverride = !!enabled;
-            syncDarkMode(isDarkMode());
-            buildTable(state.currentCellWidth, state.currentVisibleIndices, state.currentMaxRows, state.currentStride);
+            syncDark();
+            renderHeatmap();
+            renderNavigator();
+            updateLinePlot();
         },
         getThemeMode: () => isDarkMode(),
-        hasEntropyData,
-        hasRankData,
-        linkColumnsTo: (other: LogitLensWidgetInterface) => {
-            if (state.linkedWidgets.indexOf(other as any) < 0) state.linkedWidgets.push(other as any);
-            (other as any).setColumnState?.(getColumnState(), true);
+        hasEntropyData: () => !!v2Data && Array.isArray(v2Data.entropy) && v2Data.entropy.length > 0,
+        hasRankData: () => {
+            if (!v2Data?.tracked) return false;
+            for (const trackedAtPos of v2Data.tracked) {
+                for (const token in trackedAtPos) {
+                    const d = trackedAtPos[token] as unknown;
+                    if (d && typeof d === "object" && Array.isArray((d as { rank?: unknown }).rank)) return true;
+                }
+            }
+            return false;
         },
-        unlinkColumns: (other: LogitLensWidgetInterface) => {
-            const idx = state.linkedWidgets.indexOf(other as any);
-            if (idx >= 0) state.linkedWidgets.splice(idx, 1);
+        linkColumnsTo: () => { /* column linking removed in the new design */ },
+        unlinkColumns: () => { /* no-op */ },
+        on: (ev: string, cb: (data: unknown) => void) => { (listeners[ev] ||= []).push(cb); },
+        off: (ev: string, cb: (data: unknown) => void) => {
+            listeners[ev] = (listeners[ev] || []).filter((c) => c !== cb);
         },
-        on: (eventName: string, callback: (data: unknown) => void) => { addEventListener(state, eventName, callback); },
-        off: (eventName: string, callback: (data: unknown) => void) => { removeEventListener(state, eventName, callback); },
         destroy: () => {
-            cleanupDarkModeListener();
-            containerResizeObserver.disconnect();
-            // Remove all document-level event listeners
-            document.removeEventListener("mousemove", handleColResizeMove);
-            document.removeEventListener("mouseup", handleGlobalMouseUp);
-            document.removeEventListener("mousemove", handleXAxisDragMove);
-            document.removeEventListener("mousemove", handleYAxisDragMove);
-            document.removeEventListener("mousemove", handlePlotMinLayerDragMove);
-            document.removeEventListener("mousemove", handleBottomResizeMove);
-            document.removeEventListener("mouseup", handleBottomResizeUp);
-            document.removeEventListener("mousemove", handleRightEdgeResizeMove);
-            if (linePlot) { linePlot.destroy(); linePlot = null; }
-            // Popup and color menu were portaled to document.body — they
-            // won't be cleaned up by clearing container.innerHTML.
-            document.getElementById(uid + "_popup")?.remove();
-            document.getElementById(uid + "_color_menu")?.remove();
+            cleanupTheme();
+            resizeObserver?.disconnect();
             removeOverlay();
+            popupEl.remove();
+            if (linePlot) { linePlot.destroy(); linePlot = null; }
             if (container) container.innerHTML = "";
         },
     };
 
-    return { widget: publicInterface, styleEl };
+    return { widget, styleEl };
 }
+
+// ── Inline SVG icons (lucide-style strokes) ──
+const ICON_RESET_SM = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`;
+const ICON_CHEVL = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>`;
+const ICON_CHEVR = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>`;
+const ICON_PLUS = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>`;
+const ICON_MINUS = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>`;

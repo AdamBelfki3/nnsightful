@@ -43,6 +43,12 @@ export interface LogitLensUIState {
     showHeatmap?: boolean;
     showChart?: boolean;
     trajectoryMetric?: "probability" | "rank";
+
+    // Redesigned-widget options
+    ramp?: "purple" | "blue" | "teal";
+    showGrid?: boolean;
+    dimLowProb?: boolean;
+    selectedRow?: number | null;
 }
 
 /**
