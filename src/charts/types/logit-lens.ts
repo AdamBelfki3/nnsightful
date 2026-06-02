@@ -49,6 +49,13 @@ export interface LogitLensUIState {
     showGrid?: boolean;
     dimLowProb?: boolean;
     selectedRow?: number | null;
+    // Absolute layer index of the cell driving the trajectory line plot.
+    selectedLayer?: number | null;
+    // Layer-navigator window (which layers are shown / zoom level).
+    viewStart?: number;
+    viewSize?: number;
+    // Note: pinned trajectories round-trip through `pinnedGroups` +
+    // `colorIndex` (declared above) — each pin is a single-token group.
 }
 
 /**

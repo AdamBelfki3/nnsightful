@@ -82,33 +82,51 @@ export function generateStyles(uid: string): string {
             color-scheme: dark;
         }
 
-        /* Flex roles for the card's three stacked regions (see #${uid} above). */
-        ${root} .ll-scroll { flex: 1 1 auto; min-height: 0; }
+        /* Flex roles for the card's stacked regions (see #${uid} above).
+           .ll-heatmap (fixed layer header + scrollable rows) takes the
+           growable slot; nav + line plot keep their natural size. */
+        ${root} .ll-heatmap { flex: 1 1 auto; min-height: 0; }
         ${root} .ll-nav,
         ${root} .ll-lineplot-wrap { flex: 0 0 auto; }
-        ${root}.ll-fill { width: 100%; height: 100%; }
+
+        /* Fill mode (workbench): the host panel already frames the widget, so
+           drop our own card chrome (border, rounded corner, shadow, surface
+           background, padding) — it would otherwise be a redundant box inside
+           the panel. The notebook (content mode) keeps the full card since it
+           stands alone in a cell. */
+        ${root}.ll-fill {
+            width: 100%; height: 100%;
+            border: none; border-radius: 0; box-shadow: none;
+            background: transparent; padding: 0;
+        }
 
         /* Leading-space marker, used in cell + row-label token rendering. */
         ${root} .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
 
-        /* ── Heatmap scroll region ── */
+        /* ── Heatmap region: fixed layer header above a scrollable rows area.
+              The header lives OUTSIDE the scroll viewport, so rows can never
+              scroll above it — which is why neither the header nor the axis
+              labels need an opaque background (no scroll bleed to hide). No
+              outer frame here: the rounded corners are applied to the four
+              corner DATA cells (in renderHeatmap), so only the cells area is
+              rounded, not the axis. ── */
+        ${root} .ll-heatmap {
+            display: flex; flex-direction: column;
+            min-width: 0; max-width: 100%;
+        }
+        ${root} .ll-hdr-fixed { flex: 0 0 auto; overflow: hidden; }
         ${root} .ll-scroll {
+            flex: 1 1 auto; min-height: 0;
             overflow: auto;
             min-width: 0; max-width: 100%;
-            border-top: 1px solid var(--ll-line-faint);
-            border-bottom: 1px solid var(--ll-line-faint);
         }
         ${root} .ll-grid-inner { /* width set inline */ }
-        ${root} .ll-hdr-row {
-            align-items: end; padding-bottom: 4px;
-            position: sticky; top: 0; z-index: 5; background: var(--ll-surface);
-        }
+        ${root} .ll-hdr-row { align-items: end; padding-bottom: 4px; }
         ${root} .ll-corner {
             font-size: 10px; color: var(--ll-text-muted);
             text-align: right; padding-right: 8px;
             letter-spacing: 0.04em; text-transform: uppercase;
             overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-            position: sticky; left: 0; z-index: 4; background: var(--ll-surface);
             display: flex; align-items: flex-end; justify-content: flex-end;
         }
         ${root} .ll-hdr-cell {
@@ -132,11 +150,11 @@ export function generateStyles(uid: string): string {
         ${root} .ll-row-label {
             display: flex; align-items: center; justify-content: flex-end;
             gap: 6px; padding: 0 8px; font-size: 12px; color: var(--ll-text-2);
-            position: sticky; left: 0; z-index: 3; background: var(--ll-surface);
-            box-shadow: 1px 0 0 var(--ll-line-faint);
+            /* No background: the token column never has cells scrolling under
+               it (columns fit to width → no horizontal scroll), and rows
+               scroll vertically together with their labels. */
             overflow: hidden;
         }
-        ${root} .ll-row-grid.ll-row-sel .ll-row-label { background: var(--ll-surface-2); }
         ${root} .ll-cell {
             display: flex; align-items: center; justify-content: center;
             min-width: 0; font-size: 11px; font-family: var(--ll-font-mono);
@@ -152,10 +170,6 @@ export function generateStyles(uid: string): string {
             border: 1px solid var(--ll-line-2); border-radius: 3px;
             font-family: var(--ll-font-mono); font-size: 10px; font-weight: 500;
             color: var(--ll-text-muted); background: var(--ll-surface-3); letter-spacing: 0.02em;
-        }
-        ${root} .ll-axis-caption {
-            text-align: center; font-size: 10.5px; color: var(--ll-text-muted);
-            letter-spacing: 0.18em; text-transform: uppercase;
         }
 
         /* ── Layer navigator ── */

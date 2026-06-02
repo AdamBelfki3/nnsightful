@@ -143,18 +143,29 @@ export function createWidget(
 
     const styleEl = injectStyles(uid);
 
+    // Restore pinned trajectories from serialized pinnedGroups (each pin is a
+    // single-token group: { tokens: [token], color }). Tolerant of partials.
+    function pinsFromGroups(
+        groups: LogitLensUIState["pinnedGroups"] | undefined,
+    ): { token: string; color: string }[] {
+        if (!groups) return [];
+        return groups
+            .map((g) => ({ token: g.tokens?.[0] ?? "", color: g.color }))
+            .filter((p) => p.token !== "");
+    }
+
     // ── State ──
     const state: State = {
         ramp: (uiState?.ramp as State["ramp"]) || "purple",
         showGrid: uiState?.showGrid ?? true,
         dimLow: uiState?.dimLowProb ?? true,
         selectedRow: uiState?.selectedRow ?? null,
-        selectedLayerIdx: null,
-        viewStart: 0,
-        viewSize: widgetData.layers.length,
+        selectedLayerIdx: uiState?.selectedLayer ?? null,
+        viewStart: uiState?.viewStart ?? 0,
+        viewSize: uiState?.viewSize ?? widgetData.layers.length,
         darkModeOverride: uiState?.darkMode ?? null,
-        pinned: [],
-        colorIndex: 0,
+        pinned: pinsFromGroups(uiState?.pinnedGroups),
+        colorIndex: uiState?.colorIndex ?? 0,
         openPopup: null,
     };
 
@@ -267,7 +278,10 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     container.innerHTML = `
         <div id="${uid}" tabindex="-1">
-            <div class="ll-scroll" id="${uid}_scroll" tabindex="0"></div>
+            <div class="ll-heatmap" id="${uid}_heatmap">
+                <div class="ll-hdr-fixed" id="${uid}_hdr"></div>
+                <div class="ll-scroll" id="${uid}_scroll" tabindex="0"></div>
+            </div>
             <div class="ll-nav" id="${uid}_nav"></div>
             <div class="ll-lineplot-wrap ll-hidden" id="${uid}_lp_wrap">
                 <div class="ll-lineplot-head">
@@ -287,6 +301,7 @@ export function createWidget(
 
     const widgetEl = document.getElementById(uid)!;
     const scrollEl = document.getElementById(uid + "_scroll")!;
+    const hdrEl = document.getElementById(uid + "_hdr")!;
     const navEl = document.getElementById(uid + "_nav")!;
     const lpWrap = document.getElementById(uid + "_lp_wrap")!;
     const lpTokenEl = document.getElementById(uid + "_lp_token")!;
@@ -303,6 +318,9 @@ export function createWidget(
     let linePlot: LinePlotCore | null = null;
     let overlayEl: HTMLElement | null = null;
     let lpHidden = true; // current line-plot visibility (for fill-mode re-fit)
+    // Set in destroy(); guards deferred (rAF) callbacks so they don't touch
+    // the (now-cleared) DOM after teardown.
+    let destroyed = false;
 
     // Fill mode = the host gives us a definite bounded box and expects the
     // widget to fill it (the workbench panel). Detected by the *absence* of
@@ -346,9 +364,10 @@ export function createWidget(
             ? Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((availW - ROW_LABEL_W) / nCols)))
             : MIN_CELL;
         if (!fillMode) { rowH = ROW_H; return; }
-        const availH = scrollEl.clientHeight;
-        const reserved = HDR_H + 6 + 28; // sticky header + bottom axis caption
-        const hForRows = availH - reserved;
+        // scrollEl.clientHeight is the space available for the rows: the
+        // layer header is OUTSIDE the scroll (in hdrEl) and the old bottom
+        // caption is gone, so nothing else to reserve here.
+        const hForRows = scrollEl.clientHeight;
         const stretchRows = nRows > 0 && nRows * ROW_H < hForRows;
         rowH = stretchRows ? Math.floor(hForRows / nRows) : ROW_H;
     }
@@ -415,15 +434,19 @@ export function createWidget(
         const tableWidth = Math.round(ROW_LABEL_W + cellW * nCols);
         const cols = `${ROW_LABEL_W}px repeat(${nCols}, ${cellW}px)`;
 
-        let html = `<div class="ll-grid-inner" style="width:${tableWidth}px;min-width:${tableWidth}px;">`;
-
-        // Header row
-        html += `<div class="ll-hdr-row" style="display:grid;grid-template-columns:${cols};height:${HDR_H + 6}px;">`;
-        html += `<div class="ll-corner">token</div>`;
+        // Layer axis header — rendered OUTSIDE the scroll viewport (into
+        // hdrEl) so scrolling rows can never bleed above it; it therefore
+        // needs no opaque background. Shares the column template + width
+        // with the grid so columns line up (no horizontal scroll by design).
+        let hdrHtml = `<div class="ll-hdr-row" style="display:grid;grid-template-columns:${cols};height:${HDR_H + 6}px;width:${tableWidth}px;min-width:${tableWidth}px;">`;
+        hdrHtml += `<div class="ll-corner">token</div>`;
         for (const l of shownLayers) {
-            html += `<div class="ll-hdr-cell">${widgetData.layers[l]}</div>`;
+            hdrHtml += `<div class="ll-hdr-cell">${widgetData.layers[l]}</div>`;
         }
-        html += `</div>`;
+        hdrHtml += `</div>`;
+        hdrEl.innerHTML = hdrHtml;
+
+        let html = `<div class="ll-grid-inner" style="width:${tableWidth}px;min-width:${tableWidth}px;">`;
 
         // Rows
         for (let r = 0; r < nRows; r++) {
@@ -443,7 +466,7 @@ export function createWidget(
             html += `</div>`;
 
             // Cells
-            for (const l of shownLayers) {
+            shownLayers.forEach((l, colIdx) => {
                 const c = widgetData.cells[r][l];
                 const prob = c.prob;
                 // Orange ramp for cells predicting the final next token.
@@ -455,19 +478,23 @@ export function createWidget(
                 // Colored contour where a pinned trajectory token is predicted.
                 const pc = pinColorFor(c.token);
                 const contour = pc ? `box-shadow:inset 0 0 0 2px ${pc};` : "";
+                // Round the four outer corners of the DATA-cell block (i.e.
+                // the cells area only, excluding the layer header + token
+                // labels). border-radius clips each corner cell's background.
+                const top = r === 0, bot = r === nRows - 1;
+                const left = colIdx === 0, right = colIdx === nCols - 1;
+                let radius = "";
+                if (top && left) radius = "border-top-left-radius:8px;";
+                else if (top && right) radius = "border-top-right-radius:8px;";
+                else if (bot && left) radius = "border-bottom-left-radius:8px;";
+                else if (bot && right) radius = "border-bottom-right-radius:8px;";
                 html += `<div class="ll-cell${pc ? " ll-cell-pinned" : ""}" data-row="${r}" data-layer="${l}" `
-                    + `style="background:${bg};color:${fg};padding:0 6px;${op}${gridBorder}${contour}">`
+                    + `style="background:${bg};color:${fg};padding:0 6px;${op}${gridBorder}${contour}${radius}">`
                     + `<span class="ll-cell-text">${tokenInnerHTML(c.token)}</span>`
                     + `</div>`;
-            }
+            });
             html += `</div></div>`;
         }
-
-        // Bottom axis caption
-        html += `<div style="display:grid;grid-template-columns:${cols};margin-top:6px;">`
-            + `<div></div>`
-            + `<div class="ll-axis-caption" style="grid-column:2 / span ${nCols};">layer</div>`
-            + `</div>`;
 
         html += `</div>`;
         scrollEl.innerHTML = html;
@@ -570,6 +597,7 @@ export function createWidget(
         rebuildScheduled = true;
         requestAnimationFrame(() => {
             rebuildScheduled = false;
+            if (destroyed) return;
             renderHeatmap();
             updateNavWindow();
         });
@@ -694,6 +722,17 @@ export function createWidget(
         scrollEl.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
     }
 
+    // Default the heatmap to the bottom (the last prompt tokens) since the
+    // final position's predictions are usually what you care about most.
+    // Double rAF so it runs after renderAll's deferred re-render has set the
+    // final content height. No-op (clamped) when the heatmap doesn't scroll.
+    function scrollToBottom() {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (destroyed) return;
+            scrollEl.scrollTop = scrollEl.scrollHeight;
+        }));
+    }
+
     // The trajectory plot shows the pinned tokens' probability curves at the
     // currently selected row's position, plus an optional dashed hover
     // preview. Hidden entirely when nothing is pinned and nothing hovered.
@@ -753,10 +792,12 @@ export function createWidget(
         }
 
         // Showing/hiding the plot changes the heatmap's available height in
-        // fill mode — re-fit the cells once, only when visibility flips.
+        // fill mode — re-fit the cells once, only when visibility flips, and
+        // re-anchor to the bottom so the last tokens stay in view (the plot
+        // appearing would otherwise shrink the viewport and push them off).
         if (fillMode && shouldHide !== lpHidden) {
             lpHidden = shouldHide;
-            requestAnimationFrame(() => renderHeatmap());
+            requestAnimationFrame(() => { if (destroyed) return; renderHeatmap(); scrollToBottom(); });
         } else {
             lpHidden = shouldHide;
         }
@@ -834,6 +875,7 @@ export function createWidget(
         positionPopup(cellRect);
         popupEl.style.visibility = "";
         showOverlay();
+        emitStateChange(); // selection changed → host can persist
     }
 
     function renderPopupBody(row: number, layer: number) {
@@ -967,7 +1009,7 @@ export function createWidget(
         // plot have laid out (and, on first mount, until the host has its
         // width), so re-measure and re-render the heatmap once layout
         // settles — columns/cells then fit the real available box.
-        requestAnimationFrame(() => { renderHeatmap(); renderNavigator(); });
+        requestAnimationFrame(() => { if (destroyed) return; renderHeatmap(); renderNavigator(); });
     }
 
     function syncDark() {
@@ -979,6 +1021,7 @@ export function createWidget(
     }
 
     renderAll();
+    scrollToBottom(); // default view: last prompt tokens
     syncDark();
 
     // Re-fit columns/cells when the host resizes (both modes — Jupyter cell
@@ -992,7 +1035,7 @@ export function createWidget(
         if (w === lastObservedW) return; // ignore height-only changes
         lastObservedW = w;
         if (resizeRaf) return;
-        resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; renderHeatmap(); });
+        resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; if (destroyed) return; renderHeatmap(); });
     });
     if (container) resizeObserver.observe(container);
 
@@ -1010,12 +1053,21 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     // PUBLIC INTERFACE
     // ═══════════════════════════════════════════════════════════════
+    // Full serializable UI state — enough to restore the heatmap exactly
+    // (appearance, layer window, selection, and pinned trajectories) so it
+    // survives a reload when the host saves this and feeds it back as
+    // uiState. Pins map to single-token pinnedGroups for type compatibility.
     function getState(): LogitLensUIState {
         return {
             ramp: state.ramp,
             showGrid: state.showGrid,
             dimLowProb: state.dimLow,
             selectedRow: state.selectedRow,
+            selectedLayer: state.selectedLayerIdx,
+            viewStart: state.viewStart,
+            viewSize: state.viewSize,
+            colorIndex: state.colorIndex,
+            pinnedGroups: state.pinned.map((p) => ({ tokens: [p.token], color: p.color })),
             darkMode: state.darkModeOverride,
         };
     }
@@ -1027,7 +1079,13 @@ export function createWidget(
             if (s.showGrid !== undefined) state.showGrid = s.showGrid;
             if (s.dimLowProb !== undefined) state.dimLow = s.dimLowProb;
             if (s.selectedRow !== undefined) state.selectedRow = s.selectedRow;
+            if (s.selectedLayer !== undefined) state.selectedLayerIdx = s.selectedLayer;
+            if (s.viewStart !== undefined) state.viewStart = s.viewStart;
+            if (s.viewSize !== undefined) state.viewSize = s.viewSize;
+            if (s.colorIndex !== undefined) state.colorIndex = s.colorIndex;
+            if (s.pinnedGroups !== undefined) state.pinned = pinsFromGroups(s.pinnedGroups);
             if (s.darkMode !== undefined) state.darkModeOverride = s.darkMode;
+            recomputeDerived(); // clamp the restored layer window to the data
             syncDark();
             renderAll();
         },
@@ -1039,6 +1097,7 @@ export function createWidget(
             state.selectedRow = null;
             state.selectedLayerIdx = null;
             renderAll();
+            scrollToBottom(); // new data → show the last prompt tokens
         },
         setTitle: () => { /* header is fixed in the new design */ },
         setThemeMode: (enabled: boolean) => {
@@ -1067,6 +1126,7 @@ export function createWidget(
             listeners[ev] = (listeners[ev] || []).filter((c) => c !== cb);
         },
         destroy: () => {
+            destroyed = true; // stop any pending rAF callbacks touching the DOM
             cleanupTheme();
             resizeObserver?.disconnect();
             removeOverlay();
