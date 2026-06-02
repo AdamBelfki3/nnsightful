@@ -133,6 +133,7 @@ export function generateStyles(uid: string): string {
             text-align: center; font-family: var(--ll-font-mono); font-size: 11px;
             color: var(--ll-text-muted); font-variant-numeric: tabular-nums;
             overflow: hidden; white-space: nowrap;
+            -webkit-user-select: text; user-select: text;
         }
         ${root} .ll-row { position: relative; }
         ${root} .ll-row-rail {
@@ -163,6 +164,12 @@ export function generateStyles(uid: string): string {
         ${root} .ll-cell-text {
             display: block; min-width: 0; max-width: 100%;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            /* The widget root is user-select:none (to keep drags clean), but
+               the token labels opt back in so they can be highlighted /
+               copied (drag to select). Cursor stays inherited (pointer) so
+               the cell's click-to-inspect affordance is preserved. Selecting
+               copies the full token even when the cell truncates it. */
+            -webkit-user-select: text; user-select: text;
         }
         ${root} .ll-cell.ll-cell-hover { outline: 2px solid var(--ll-text); outline-offset: -2px; z-index: 3; }
         ${root} .ll-bos-pill {
@@ -326,6 +333,7 @@ export function generateStyles(uid: string): string {
         #${uid}_popup .ll-topk:hover { background: var(--p-hover); }
         #${uid}_popup .ll-topk-tok {
             color: var(--p-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            -webkit-user-select: text; user-select: text;
         }
         #${uid}_popup .ll-topk-prob { color: var(--p-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
     `;

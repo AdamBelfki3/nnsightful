@@ -938,6 +938,9 @@ export function createWidget(
             el.addEventListener("mouseleave", () => updateLinePlot());
             el.addEventListener("click", (e) => {
                 e.stopPropagation();
+                // Don't toggle the pin if the click ended a text selection
+                // (the user was highlighting the token to copy it).
+                if (!(window.getSelection()?.isCollapsed ?? true)) return;
                 togglePin(item.token);
                 renderHeatmap();
                 renderPopupBody(row, layer);
@@ -1002,6 +1005,9 @@ export function createWidget(
         hideTooltip();
     });
     scrollEl.addEventListener("click", (e) => {
+        // If the click ended a text selection (the user dragged to highlight
+        // a label to copy it), don't also open the popup / select the row.
+        if (!(window.getSelection()?.isCollapsed ?? true)) return;
         const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
         if (cellDiv) {
             const row = parseInt(cellDiv.dataset.row!);
