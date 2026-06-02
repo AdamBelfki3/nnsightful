@@ -33,9 +33,9 @@ const ROW_H = 30;
 const HDR_H = 22;
 // Column sizing: the number of visible (strided) columns adapts to the
 // available width so each column keeps at least MIN_CELL px and the grid
-// never needs horizontal scroll; cells then fill the width up to MAX_CELL.
+// never needs horizontal scroll; cells then stretch to fill the width (no
+// upper cap — fewer columns just means wider cells, never whitespace).
 const MIN_CELL = 48;   // smallest readable column → caps the column count
-const MAX_CELL = 150;  // largest column → avoids absurd width for few columns
 const COL_CAP = 18;    // hard ceiling on visible columns regardless of width
 
 const RAMPS: Record<string, string> = {
@@ -263,7 +263,15 @@ export function createWidget(
             for (let i = 0; i < size; i++) shownLayers.push(start + i);
             return { shownLayers, stride: 1, start };
         }
-        const stride = Math.ceil(size / maxCols);
+        // Window wider than the column budget → uniform stride sampling so
+        // the shown layers have COHERENT, even gaps (0, s, 2s, … — "every s
+        // layers"). We budget maxCols-1 strided columns and pin the final
+        // layer, so the total is ≤ maxCols (no overflow) and the model's
+        // actual last-layer prediction is always visible. The cells fill the
+        // width regardless of column count (no MAX_CELL clamp), so a smaller
+        // column count just means wider cells — never whitespace.
+        const budget = Math.max(1, maxCols - 1);
+        const stride = Math.ceil(size / budget);
         const shownLayers: number[] = [];
         for (let l = start; l < start + size; l += stride) shownLayers.push(l);
         const last = start + size - 1;
@@ -350,9 +358,10 @@ export function createWidget(
 
     // Effective cell dimensions, recomputed each render.
     //  - WIDTH (both modes): the visible columns fill the available width
-    //    exactly (clamped to [MIN_CELL, MAX_CELL]). Because the column COUNT
-    //    already adapts to the width (maxColsFit), each column is ≥ MIN_CELL,
-    //    so the grid fits without horizontal scroll.
+    //    exactly. The column COUNT already adapts to width (maxColsFit) so
+    //    each column is ≥ MIN_CELL and the grid never needs horizontal
+    //    scroll; there's no upper cap, so a small column count just yields
+    //    wider cells (the grid always fills the width — no whitespace).
     //  - HEIGHT: fill mode (workbench) stretches rows to use the panel's
     //    spare vertical space; content mode (Jupyter) uses the fixed row
     //    height with a capped scroll region.
@@ -362,7 +371,7 @@ export function createWidget(
         const availW = heatmapAvailW();
         const nCols = computeShownLayers().shownLayers.length;
         cellW = nCols > 0
-            ? Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((availW - ROW_LABEL_W) / nCols)))
+            ? Math.max(MIN_CELL, Math.floor((availW - ROW_LABEL_W) / nCols))
             : MIN_CELL;
         if (!fillMode) { rowH = ROW_H; return; }
         // scrollEl.clientHeight is the space available for the rows: the
@@ -510,6 +519,8 @@ export function createWidget(
         const { stride, start } = computeShownLayers();
         const size = state.viewSize;
         const atFull = size >= nLayers;
+        const steps = zoomSteps();
+        const atMinZoom = size <= steps[0]; // can't zoom in further
 
         // Range label
         let rangeHtml = `<span class="ll-nav-range-key">layers</span>`;
@@ -560,7 +571,7 @@ export function createWidget(
                 <button class="ll-nav-btn" data-nav="panL" title="Pan left" ${start <= 0 ? "disabled" : ""}>${ICON_CHEVL}</button>
                 <button class="ll-nav-btn" data-nav="panR" title="Pan right" ${start + size >= nLayers ? "disabled" : ""}>${ICON_CHEVR}</button>
                 <div class="ll-nav-sep"></div>
-                <button class="ll-nav-btn" data-nav="zoomIn" title="Zoom in">${ICON_PLUS}</button>
+                <button class="ll-nav-btn" data-nav="zoomIn" title="Zoom in" ${atMinZoom ? "disabled" : ""}>${ICON_PLUS}</button>
                 <button class="ll-nav-btn" data-nav="zoomOut" title="Zoom out" ${atFull ? "disabled" : ""}>${ICON_MINUS}</button>
                 <button class="ll-nav-btn" data-nav="reset" title="Reset to overview">${ICON_RESET_SM}</button>
             </div>
