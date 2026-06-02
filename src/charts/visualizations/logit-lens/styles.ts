@@ -239,6 +239,9 @@ export function generateStyles(uid: string): string {
         ${root} .ll-lineplot-token { font-family: var(--ll-font-mono); font-size: 12px; color: var(--ll-text); }
         /* Definite-height box so LinePlotCore's height:100% resolves and the
            plot can't grow unbounded (it sets height:100% on its mount). */
+        /* Height is set inline by applyLinePlotHeight() so the plot's aspect
+           ratio stays proportional to the widget's; 200px is just a fallback
+           before the first sizing pass. */
         ${root} .ll-lineplot-box { height: 200px; overflow: hidden; }
         ${root} .ll-lineplot { width: 100%; height: 100%; }
 

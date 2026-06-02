@@ -288,7 +288,7 @@ export function createWidget(
                     <span class="ll-lineplot-title">trajectory</span>
                     <span class="ll-lineplot-token" id="${uid}_lp_token"></span>
                 </div>
-                <div class="ll-lineplot-box"><div class="ll-lineplot" id="${uid}_lp"></div></div>
+                <div class="ll-lineplot-box" id="${uid}_lp_box"><div class="ll-lineplot" id="${uid}_lp"></div></div>
             </div>
             <div class="ll-tooltip" id="${uid}_tt"></div>
             <div class="ll-popup" id="${uid}_popup">
@@ -305,6 +305,7 @@ export function createWidget(
     const navEl = document.getElementById(uid + "_nav")!;
     const lpWrap = document.getElementById(uid + "_lp_wrap")!;
     const lpTokenEl = document.getElementById(uid + "_lp_token")!;
+    const lpBoxEl = document.getElementById(uid + "_lp_box")!;
     const lpEl = document.getElementById(uid + "_lp")!;
     const ttEl = document.getElementById(uid + "_tt")!;
     const popupEl = document.getElementById(uid + "_popup")!;
@@ -733,6 +734,30 @@ export function createWidget(
         }));
     }
 
+    // Size the line plot so its aspect ratio is proportional to the whole
+    // widget's. The plot spans the widget's width, so making its height a
+    // fixed fraction of the widget's (aspect-ratio-derived) height keeps
+    // plotAR = widgetAR × LP_FRACTION — i.e. a flatter widget gives a
+    // flatter plot, a taller one a taller plot.
+    //   - content (Jupyter): widget height basis = hostWidth × aspectHW
+    //     (the configured ratio), independent of how short the content is.
+    //   - fill (workbench): basis = the widget's measured (panel) height.
+    const LP_FRACTION = 0.45;
+    const LP_MIN_H = 120;
+    const LP_MAX_H = 360;
+    function applyLinePlotHeight() {
+        let basis: number;
+        if (aspectHW) {
+            const hostW = (container as HTMLElement).clientWidth || widgetEl.clientWidth;
+            basis = hostW * aspectHW;
+        } else {
+            const wh = widgetEl.clientHeight;
+            basis = wh > 0 ? wh : (widgetEl.clientWidth || 900) * 0.6;
+        }
+        const h = Math.round(basis * LP_FRACTION);
+        lpBoxEl.style.height = Math.max(LP_MIN_H, Math.min(LP_MAX_H, h)) + "px";
+    }
+
     // The trajectory plot shows the pinned tokens' probability curves at the
     // currently selected row's position, plus an optional dashed hover
     // preview. Hidden entirely when nothing is pinned and nothing hovered.
@@ -756,6 +781,7 @@ export function createWidget(
             lpWrap.classList.add("ll-hidden");
         } else {
             lpWrap.classList.remove("ll-hidden");
+            applyLinePlotHeight(); // keep the plot proportional to the widget
             lpTokenEl.textContent = pos === null
                 ? ""
                 : isBosToken(widgetData.tokens[pos]) ? "position " + pos + " · bos" : "position " + pos + " · " + tokenPlain(widgetData.tokens[pos]);
@@ -1009,7 +1035,12 @@ export function createWidget(
         // plot have laid out (and, on first mount, until the host has its
         // width), so re-measure and re-render the heatmap once layout
         // settles — columns/cells then fit the real available box.
-        requestAnimationFrame(() => { if (destroyed) return; renderHeatmap(); renderNavigator(); });
+        requestAnimationFrame(() => {
+            if (destroyed) return;
+            renderHeatmap();
+            renderNavigator();
+            if (!lpHidden) applyLinePlotHeight();
+        });
     }
 
     function syncDark() {
@@ -1030,12 +1061,22 @@ export function createWidget(
     // observing the card would never see the host's resize.
     let resizeRaf = 0;
     let lastObservedW = (container as HTMLElement)?.clientWidth ?? 0;
+    let lastObservedH = (container as HTMLElement)?.clientHeight ?? 0;
     const resizeObserver = new ResizeObserver(() => {
         const w = (container as HTMLElement)?.clientWidth ?? 0;
-        if (w === lastObservedW) return; // ignore height-only changes
+        const h = (container as HTMLElement)?.clientHeight ?? 0;
+        // React to width (column fit) and height (fill-mode row stretch +
+        // line-plot proportion). Equality guard makes content mode converge.
+        if (w === lastObservedW && h === lastObservedH) return;
         lastObservedW = w;
+        lastObservedH = h;
         if (resizeRaf) return;
-        resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; if (destroyed) return; renderHeatmap(); });
+        resizeRaf = requestAnimationFrame(() => {
+            resizeRaf = 0;
+            if (destroyed) return;
+            renderHeatmap();
+            if (!lpHidden) applyLinePlotHeight();
+        });
     });
     if (container) resizeObserver.observe(container);
 
