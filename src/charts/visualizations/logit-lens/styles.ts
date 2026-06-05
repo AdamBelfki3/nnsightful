@@ -101,7 +101,7 @@ export function generateStyles(uid: string): string {
         }
 
         /* Leading-space marker, used in cell + row-label token rendering. */
-        ${root} .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
+        ${root} .ll-lead-space { color: #3b82f6; }
 
         /* ── Heatmap region: fixed layer header above a scrollable rows area.
               The header lives OUTSIDE the scroll viewport, so rows can never
@@ -172,6 +172,7 @@ export function generateStyles(uid: string): string {
             -webkit-user-select: text; user-select: text;
         }
         ${root} .ll-cell.ll-cell-hover { outline: 2px solid var(--ll-text); outline-offset: -2px; z-index: 3; }
+        ${root} .ll-row-style { flex-shrink: 0; }
         ${root} .ll-bos-pill {
             display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
             border: 1px solid var(--ll-line-2); border-radius: 3px;
@@ -306,7 +307,7 @@ export function generateStyles(uid: string): string {
             --p-text: hsl(0 0% 90%); --p-text-2: hsl(0 0% 70%); --p-muted: hsl(0 0% 60%);
             --p-hover: hsl(0 0% 24%); --p-code: hsl(0 0% 26%); color-scheme: dark;
         }
-        #${uid}_popup .ll-lead-dot { opacity: 0.35; margin-right: 1px; }
+        #${uid}_popup .ll-lead-space { color: #3b82f6; }
         #${uid}_popup .ll-popup-close {
             position: absolute; top: 6px; right: 9px; cursor: pointer;
             color: var(--p-muted); font-size: 17px; line-height: 1;

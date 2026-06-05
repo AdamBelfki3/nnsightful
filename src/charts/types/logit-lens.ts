@@ -36,6 +36,9 @@ export interface LogitLensUIState {
         lineStyle?: { name: string; dash: string };
     }>;
     lastPinnedGroupIndex?: number;
+    // Pinned prompt positions. `line` (the dash-style name) is informational
+    // only — on restore the style is recomputed from array order, so the
+    // order of this array determines each row's style.
     pinnedRows?: Array<{ pos: number; line: string }>;
     heatmapBaseColor?: string | null;
     heatmapNextColor?: string | null;

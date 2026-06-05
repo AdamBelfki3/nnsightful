@@ -18,7 +18,7 @@ import type { LinePlotLine } from "../../types/line-plot";
 import { normalizeData, type NormalizedData } from "./normalize";
 import { generateUid, escapeHtml } from "./utils";
 import { injectStyles, applyDarkMode } from "./styles";
-import { PALETTE } from "./colors";
+import { PALETTE, LINE_STYLES } from "./colors";
 import { LinePlotCore } from "../../core/line-plot";
 import { detectThemeMode, onThemeModeChange } from "../../detect-theme-mode";
 
@@ -84,19 +84,21 @@ function cellFg(value: number, dark: boolean): string {
     return "hsl(0 0% 18%)";
 }
 
-// Inner HTML for a BPE token: leading space → faint "·", body escaped.
+// Inner HTML for a BPE token: a leading space is shown as a blue underscore
+// (matching the activation-patching token UI), body escaped.
 function tokenInnerHTML(raw: string): string {
     if (raw === undefined || raw === null) return "";
     if (raw.startsWith(" ")) {
-        return '<span class="ll-lead-dot">·</span>' + escapeHtml(raw.slice(1));
+        return '<span class="ll-lead-space">_</span>' + escapeHtml(raw.slice(1));
     }
     return escapeHtml(raw);
 }
 
-// Plain-text form for tooltips (· prefix, no markup).
+// Plain-text form for tooltips / chart labels (leading space → "_" prefix,
+// no markup).
 function tokenPlain(raw: string): string {
     if (raw === undefined || raw === null) return "";
-    return raw.startsWith(" ") ? "·" + raw.slice(1) : raw;
+    return raw.startsWith(" ") ? "_" + raw.slice(1) : raw;
 }
 
 function isBosToken(tok: string): boolean {
@@ -117,6 +119,11 @@ interface State {
     // contour on every cell where it's the top-1 prediction, and a line in
     // the trajectory plot.
     pinned: { token: string; color: string }[];
+    // Pinned rows (prompt positions). Each pinned token's trajectory is
+    // drawn at every pinned position (token → color, position → dash style),
+    // letting you compare a token across positions. When empty, the plot
+    // falls back to the single selectedRow.
+    pinnedRows: number[];
     colorIndex: number;
     openPopup: { row: number; layer: number } | null;
 }
@@ -165,6 +172,7 @@ export function createWidget(
         viewSize: uiState?.viewSize ?? widgetData.layers.length,
         darkModeOverride: uiState?.darkMode ?? null,
         pinned: pinsFromGroups(uiState?.pinnedGroups),
+        pinnedRows: (uiState?.pinnedRows ?? []).map((r) => r.pos).filter((p) => typeof p === "number"),
         colorIndex: uiState?.colorIndex ?? 0,
         openPopup: null,
     };
@@ -192,6 +200,9 @@ export function createWidget(
             layerSummary.push(mx);
         }
         finalPredToken = widgetData.cells[nRows - 1]?.[nLayers - 1]?.token ?? "";
+        // Drop any pinned rows / selection that fall outside the new data.
+        state.pinnedRows = state.pinnedRows.filter((p) => p >= 0 && p < nRows);
+        if (state.selectedRow !== null && state.selectedRow >= nRows) state.selectedRow = null;
         // Clamp view to data
         if (state.viewSize > nLayers || state.viewSize < 1) state.viewSize = nLayers;
         const maxStart = Math.max(0, nLayers - state.viewSize);
@@ -223,6 +234,64 @@ export function createWidget(
             if (found) return found.trajectory;
         }
         return null;
+    }
+
+    // ── Pinned-row helpers ──
+    // The line style for a pinned row, derived from its order so each pinned
+    // position is visually distinguishable (solid / dashed / dotted / …).
+    // Callers only pass positions that ARE in pinnedRows; the idx<0 branch is
+    // a defensive fallback (solid). Note: unpinning a row re-indexes the rest,
+    // so their styles shift — callers always re-render the heatmap AND the
+    // plot together, keeping the row markers and lines consistent.
+    function lineStyleForRow(pos: number): { dash: string; name: string } {
+        const idx = state.pinnedRows.indexOf(pos);
+        return LINE_STYLES[(idx < 0 ? 0 : idx) % LINE_STYLES.length];
+    }
+    function isPinnedRow(pos: number): boolean {
+        return state.pinnedRows.indexOf(pos) >= 0;
+    }
+    // Whether any currently-pinned token reaches `threshold` probability at
+    // this position (used to decide if pinning a row should auto-add a token).
+    function anyPinnedTokenRelevantAt(pos: number, threshold: number): boolean {
+        for (const p of state.pinned) {
+            const traj = trajectoryForToken(pos, p.token);
+            if (!traj) continue;
+            // reduce (not Math.max(...spread)) — robust regardless of length.
+            let mx = 0;
+            for (const v of traj) if (v != null && v > mx) mx = v;
+            if (mx >= threshold) return true;
+        }
+        return false;
+    }
+    // The row's most confident top-1 token (across layers), for auto-pinning.
+    function topTokenAtRow(pos: number): string | null {
+        let best: string | null = null, bestP = 0;
+        for (let li = 0; li < nLayers; li++) {
+            const c = widgetData.cells[pos]?.[li];
+            if (c && c.prob > bestP) { bestP = c.prob; best = c.token; }
+        }
+        return bestP >= 0.05 ? best : null;
+    }
+    function togglePinnedRow(pos: number) {
+        const idx = state.pinnedRows.indexOf(pos);
+        if (idx >= 0) {
+            // Unpin the row only. Any token auto-pinned earlier is left in
+            // state.pinned intentionally — it's a global trajectory marker
+            // the user removes separately (via the popup / shift-click), not
+            // something this row "owns". So no auto-unpin / colorIndex rewind.
+            state.pinnedRows.splice(idx, 1);
+            return;
+        }
+        // Auto-pin this row's dominant token if nothing pinned is relevant
+        // here, so pinning a bare row immediately shows a trajectory.
+        if (!anyPinnedTokenRelevantAt(pos, 0.01)) {
+            const best = topTokenAtRow(pos);
+            if (best && !pinColorFor(best)) {
+                state.pinned.push({ token: best, color: PALETTE[state.colorIndex % PALETTE.length] });
+                state.colorIndex++;
+            }
+        }
+        state.pinnedRows.push(pos);
     }
 
     function baseHex(): string { return RAMPS[state.ramp] || RAMPS.purple; }
@@ -382,6 +451,15 @@ export function createWidget(
         rowH = stretchRows ? Math.floor(hForRows / nRows) : ROW_H;
     }
 
+    // A tiny dashed-line swatch shown in a pinned row's label so the row
+    // maps to its (dash-styled) lines in the trajectory plot.
+    function rowStyleMarker(dash: string, dark: boolean): string {
+        const stroke = dark ? "#bbb" : "#555";
+        const da = dash ? ` stroke-dasharray="${escapeHtml(dash)}"` : "";
+        return `<svg class="ll-row-style" width="16" height="8" viewBox="0 0 16 8">`
+            + `<line x1="0" y1="4" x2="16" y2="4" stroke="${stroke}" stroke-width="1.5"${da}/></svg>`;
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // RENDER: HEATMAP
     // ═══════════════════════════════════════════════════════════════
@@ -462,17 +540,20 @@ export function createWidget(
         for (let r = 0; r < nRows; r++) {
             const tok = widgetData.tokens[r];
             const bos = isBosToken(tok);
-            const sel = r === state.selectedRow;
+            const pinnedRow = isPinnedRow(r);
+            const active = r === state.selectedRow || pinnedRow;
             html += `<div class="ll-row" data-rowwrap="${r}">`;
-            if (sel) html += `<div class="ll-row-rail"></div>`;
-            html += `<div class="ll-row-grid${sel ? " ll-row-sel" : ""}" data-row="${r}" `
+            if (active) html += `<div class="ll-row-rail"></div>`;
+            html += `<div class="ll-row-grid${active ? " ll-row-sel" : ""}" data-row="${r}" `
                 + `style="display:grid;grid-template-columns:${cols};height:${rowH}px;">`;
 
-            // Row label
-            html += `<div class="ll-row-label">`;
+            // Row label (click toggles row pinning). Pinned rows show a small
+            // dash marker matching their trajectory line style.
+            html += `<div class="ll-row-label" title="click to pin this position's trajectories">`;
+            if (pinnedRow) html += rowStyleMarker(lineStyleForRow(r).dash, dark);
             html += bos
                 ? `<span class="ll-bos-pill">bos</span>`
-                : `<span class="ll-cell-text" style="${sel ? "font-weight:600;" : ""}">${tokenInnerHTML(tok)}</span>`;
+                : `<span class="ll-cell-text" style="${active ? "font-weight:600;" : ""}">${tokenInnerHTML(tok)}</span>`;
             html += `</div>`;
 
             // Cells
@@ -769,20 +850,35 @@ export function createWidget(
         lpBoxEl.style.height = Math.max(LP_MIN_H, Math.min(LP_MAX_H, h)) + "px";
     }
 
-    // The trajectory plot shows the pinned tokens' probability curves at the
-    // currently selected row's position, plus an optional dashed hover
-    // preview. Hidden entirely when nothing is pinned and nothing hovered.
+    // Short label for a position, e.g. "8·Paris" / "0·bos".
+    function posLabel(pos: number): string {
+        return pos + "·" + (isBosToken(widgetData.tokens[pos]) ? "bos" : tokenPlain(widgetData.tokens[pos]));
+    }
+
+    // The trajectory plot draws every (pinned token × shown position): the
+    // shown positions are the pinned rows, or the single selected row when
+    // none are pinned. Token → line color, position → dash style. When more
+    // than one position is shown, labels include the position so you can tell
+    // a token's curves apart across rows. Plus an optional dashed hover
+    // preview. Hidden when nothing is pinned and nothing hovered.
     function updateLinePlot(overlay?: { values: (number | null)[]; label: string; color: string } | null) {
-        const pos = state.selectedRow;
+        const positions = state.pinnedRows.length > 0
+            ? state.pinnedRows
+            : (state.selectedRow !== null ? [state.selectedRow] : []);
+        const multi = positions.length > 1;
         const richLines: LinePlotLine[] = [];
-        if (pos !== null) {
+        for (const pos of positions) {
+            const style = lineStyleForRow(pos);
             for (const p of state.pinned) {
                 const traj = trajectoryForToken(pos, p.token);
                 if (!traj) continue;
+                let label = tokenPlain(p.token);
+                if (multi) label += " (" + posLabel(pos) + ")";
                 richLines.push({
                     values: traj.map((v) => (v === null || v === undefined ? null : v)) as (number | null)[],
-                    label: tokenPlain(p.token),
+                    label,
                     color: p.color,
+                    dashPattern: style.dash || undefined,
                     removable: false,
                 });
             }
@@ -793,9 +889,11 @@ export function createWidget(
         } else {
             lpWrap.classList.remove("ll-hidden");
             applyLinePlotHeight(); // keep the plot proportional to the widget
-            lpTokenEl.textContent = pos === null
-                ? ""
-                : isBosToken(widgetData.tokens[pos]) ? "position " + pos + " · bos" : "position " + pos + " · " + tokenPlain(widgetData.tokens[pos]);
+            lpTokenEl.textContent = state.pinnedRows.length > 1
+                ? state.pinnedRows.length + " positions"
+                : positions.length === 1
+                    ? "position " + posLabel(positions[0])
+                    : "";
 
             const plotData = { lines: [] as number[][], richLines, xLabels: widgetData.layers };
             const plotOptions: Record<string, unknown> = {
@@ -1006,18 +1104,39 @@ export function createWidget(
     });
     scrollEl.addEventListener("click", (e) => {
         // If the click ended a text selection (the user dragged to highlight
-        // a label to copy it), don't also open the popup / select the row.
+        // a label to copy it), don't also pin / open the popup.
         if (!(window.getSelection()?.isCollapsed ?? true)) return;
-        const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
-        if (cellDiv) {
-            const row = parseInt(cellDiv.dataset.row!);
-            const layer = parseInt(cellDiv.dataset.layer!);
-            hideTooltip();
-            showPopup(row, layer, cellDiv);
+        const target = e.target as HTMLElement;
+        const rowGrid = target.closest(".ll-row-grid") as HTMLElement | null;
+        if (!rowGrid) return;
+        const row = parseInt(rowGrid.dataset.row!);
+
+        // Click on the left token label → pin/unpin this row (position).
+        if (target.closest(".ll-row-label")) {
+            togglePinnedRow(row);
+            renderHeatmap();
+            updateLinePlot();
+            emitStateChange();
             return;
         }
-        const rowGrid = (e.target as HTMLElement).closest(".ll-row-grid") as HTMLElement | null;
-        if (rowGrid) selectRow(parseInt(rowGrid.dataset.row!));
+        // Click on a prediction cell.
+        const cellDiv = target.closest(".ll-cell") as HTMLElement | null;
+        if (cellDiv) {
+            const layer = parseInt(cellDiv.dataset.layer!);
+            // Shift-click → pin this cell's token trajectory directly.
+            if (e.shiftKey) {
+                const cellTok = widgetData.cells[row]?.[layer]?.token;
+                if (cellTok) {
+                    togglePin(cellTok);
+                    renderHeatmap();
+                    updateLinePlot();
+                    emitStateChange();
+                }
+                return;
+            }
+            hideTooltip();
+            showPopup(row, layer, cellDiv);
+        }
     });
 
     // Keyboard nav when heatmap focused
@@ -1126,6 +1245,7 @@ export function createWidget(
             viewSize: state.viewSize,
             colorIndex: state.colorIndex,
             pinnedGroups: state.pinned.map((p) => ({ tokens: [p.token], color: p.color })),
+            pinnedRows: state.pinnedRows.map((pos) => ({ pos, line: lineStyleForRow(pos).name })),
             darkMode: state.darkModeOverride,
         };
     }
@@ -1142,6 +1262,9 @@ export function createWidget(
             if (s.viewSize !== undefined) state.viewSize = s.viewSize;
             if (s.colorIndex !== undefined) state.colorIndex = s.colorIndex;
             if (s.pinnedGroups !== undefined) state.pinned = pinsFromGroups(s.pinnedGroups);
+            if (s.pinnedRows !== undefined) {
+                state.pinnedRows = s.pinnedRows.map((r) => r.pos).filter((p) => typeof p === "number");
+            }
             if (s.darkMode !== undefined) state.darkModeOverride = s.darkMode;
             recomputeDerived(); // clamp the restored layer window to the data
             syncDark();
@@ -1151,9 +1274,14 @@ export function createWidget(
             dataResult = normalizeData(data);
             widgetData = dataResult.normalized;
             v2Data = dataResult.v2Data;
-            recomputeDerived();
+            // New data → drop selection, pinned tokens and pinned rows (they
+            // reference the old prompt's positions/tokens).
             state.selectedRow = null;
             state.selectedLayerIdx = null;
+            state.pinned = [];
+            state.pinnedRows = [];
+            state.colorIndex = 0;
+            recomputeDerived();
             renderAll();
             scrollToBottom(); // new data → show the last prompt tokens
         },
