@@ -294,14 +294,16 @@ export function generateStyles(uid: string): string {
             --p-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
             box-sizing: border-box;
             display: none; position: fixed; z-index: 100;
-            min-width: 180px; max-width: 280px;
+            flex-direction: column; min-height: 0;
+            min-width: 0; max-width: 280px;
             background: var(--p-surface); border: 1px solid var(--p-border);
             border-radius: 6px;
             box-shadow: 0 6px 20px -4px rgba(0,0,0,0.18), 0 2px 6px -2px rgba(0,0,0,0.10);
             padding: 12px; font-family: var(--p-sans); color: var(--p-text);
+            overflow: hidden;
             -webkit-user-select: none; user-select: none;
         }
-        #${uid}_popup.ll-visible { display: block; }
+        #${uid}_popup.ll-visible { display: flex; }
         #${uid}_popup.ll-dark {
             --p-surface: hsl(0 0% 18%); --p-border: hsl(0 0% 30%); --p-line: hsl(0 0% 28%);
             --p-text: hsl(0 0% 90%); --p-text-2: hsl(0 0% 70%); --p-muted: hsl(0 0% 60%);
@@ -314,6 +316,7 @@ export function generateStyles(uid: string): string {
         }
         #${uid}_popup .ll-popup-close:hover { color: var(--p-text); }
         #${uid}_popup .ll-popup-header {
+            flex: 0 0 auto;
             font-weight: 600; font-size: 13px; padding-right: 16px;
             margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--p-line);
         }
@@ -324,7 +327,7 @@ export function generateStyles(uid: string): string {
             font-family: var(--p-mono); background: var(--p-code);
             padding: 1px 5px; border-radius: 3px;
         }
-        #${uid}_popup .ll-popup-body { display: flex; flex-direction: column; gap: 1px; }
+        #${uid}_popup .ll-popup-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
         #${uid}_popup .ll-topk {
             display: flex; justify-content: space-between; align-items: center; gap: 10px;
             padding: 3px 6px; border-radius: 3px; cursor: pointer;

@@ -1049,11 +1049,19 @@ export function createWidget(
     }
 
     function positionPopup(cellRect: DOMRect) {
-        const margin = 6, gap = 6;
+        const margin = 8, gap = 6;
+        // Keep the popup fully inside the heatmap widget. Cap its width/height
+        // to the space the widget offers (shrinking it if the widget is small),
+        // so it can never spill outside the card or off-screen.
+        const host = widgetEl.getBoundingClientRect();
+        const maxW = Math.max(140, host.width - 2 * margin);
+        const maxH = Math.max(120, host.height - 2 * margin);
+        popupEl.style.maxWidth = maxW + "px";
+        popupEl.style.maxHeight = maxH + "px";
         const w = popupEl.offsetWidth || 220;
         const h = popupEl.offsetHeight || 160;
-        const minLeft = margin, maxLeft = window.innerWidth - w - margin;
-        const minTop = margin, maxTop = window.innerHeight - h - margin;
+        const minLeft = host.left + margin, maxLeft = host.right - margin - w;
+        const minTop = host.top + margin, maxTop = host.bottom - margin - h;
         const anchors = [
             { left: cellRect.right + gap, top: cellRect.top },
             { left: cellRect.left - gap - w, top: cellRect.top },
@@ -1064,8 +1072,10 @@ export function createWidget(
         for (const a of anchors) {
             if (a.left >= minLeft && a.left <= maxLeft && a.top >= minTop && a.top <= maxTop) { chosen = a; break; }
         }
-        popupEl.style.left = Math.max(minLeft, Math.min(chosen.left, maxLeft)) + "px";
-        popupEl.style.top = Math.max(minTop, Math.min(chosen.top, maxTop)) + "px";
+        // maxLeft/maxTop can fall below their min when the widget is very small;
+        // clamp against the min in that degenerate case so we pin to the edge.
+        popupEl.style.left = Math.max(minLeft, Math.min(chosen.left, Math.max(minLeft, maxLeft))) + "px";
+        popupEl.style.top = Math.max(minTop, Math.min(chosen.top, Math.max(minTop, maxTop))) + "px";
     }
 
     function closePopup() {
