@@ -1029,11 +1029,16 @@ export function createWidget(
         popupBodyEl.querySelectorAll<HTMLElement>(".ll-topk").forEach((el) => {
             const ki = parseInt(el.dataset.ki!);
             const item = cellData.topk[ki];
+            // Preview the token's trajectory on hover, but ONLY when the line
+            // plot is already open (something is pinned). With the plot closed,
+            // a hover preview would pop the whole panel in and out as the
+            // cursor crossed rows — so previewing is gated on its visibility.
             el.addEventListener("mouseenter", () => {
+                if (lpHidden) return;
                 const traj = trajectoryForToken(row, item.token);
                 if (traj) updateLinePlot({ values: traj.map((v) => v ?? null), label: tokenPlain(item.token), color: "#999" });
             });
-            el.addEventListener("mouseleave", () => updateLinePlot());
+            el.addEventListener("mouseleave", () => { if (!lpHidden) updateLinePlot(); });
             el.addEventListener("click", (e) => {
                 e.stopPropagation();
                 // Don't toggle the pin if the click ended a text selection
@@ -1096,20 +1101,42 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     let hoverCell: HTMLElement | null = null;
 
+    // Preview the hovered cell's token trajectory, but ONLY when the plot is
+    // already open (something pinned) — same gating as the popup hover, so a
+    // bare hover never pops the panel in/out. Done on cell *change* (not every
+    // mousemove) to avoid redundant plot redraws.
+    function previewCellTrajectory(cellDiv: HTMLElement) {
+        if (lpHidden) return;
+        const row = parseInt(cellDiv.dataset.row!);
+        const layer = parseInt(cellDiv.dataset.layer!);
+        const token = widgetData.cells[row]?.[layer]?.token;
+        const traj = token != null ? trajectoryForToken(row, token) : null;
+        if (traj) updateLinePlot({ values: traj.map((v) => v ?? null), label: tokenPlain(token!), color: "#999" });
+        else updateLinePlot(); // no trajectory for this token → just the pinned lines
+    }
+    function clearCellPreview() {
+        if (!lpHidden) updateLinePlot();
+    }
+
     scrollEl.addEventListener("mousemove", (e) => {
         const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
-        if (!cellDiv) { if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; } hideTooltip(); return; }
+        if (!cellDiv) {
+            if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; clearCellPreview(); }
+            hideTooltip();
+            return;
+        }
         if (hoverCell !== cellDiv) {
             if (hoverCell) hoverCell.classList.remove("ll-cell-hover");
             hoverCell = cellDiv;
             hoverCell.classList.add("ll-cell-hover");
+            previewCellTrajectory(cellDiv);
         }
         const row = parseInt(cellDiv.dataset.row!);
         const layer = parseInt(cellDiv.dataset.layer!);
         showTooltip(row, layer, e.clientX, e.clientY);
     });
     scrollEl.addEventListener("mouseleave", () => {
-        if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; }
+        if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; clearCellPreview(); }
         hideTooltip();
     });
     scrollEl.addEventListener("click", (e) => {
