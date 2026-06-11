@@ -893,14 +893,20 @@ export function createWidget(
         ttEl.classList.add("ll-visible");
 
         const wrapRect = widgetEl.getBoundingClientRect();
-        const ttW = ttEl.offsetWidth || 220;
-        const ttH = ttEl.offsetHeight || 90;
-        let x = clientX - wrapRect.left + 16;
-        // Flip to the left of the cursor if near the right edge.
-        if (clientX + ttW + 24 > window.innerWidth - 8) x = clientX - wrapRect.left - ttW - 12;
-        let y = clientY - wrapRect.top - 50;
-        x = Math.max(6, Math.min(x, wrapRect.width - ttW - 6));
-        y = Math.max(6, Math.min(y, wrapRect.height - ttH - 6));
+        const ttW = ttEl.offsetWidth || 200;
+        const ttH = ttEl.offsetHeight || 80;
+        const margin = 8, gap = 14;
+        const cx = clientX - wrapRect.left; // cursor, widget-relative
+        const cy = clientY - wrapRect.top;
+        // Prefer the right of the cursor; flip to the left if it would overflow
+        // the WIDGET's right edge (the tooltip is clamped to the widget, so the
+        // flip must be judged against the widget — not the viewport — or the
+        // rightmost column's tooltip gets clamped back on top of the cell).
+        let x = cx + gap;
+        if (x + ttW > wrapRect.width - margin) x = cx - gap - ttW;
+        x = Math.max(margin, Math.min(x, wrapRect.width - ttW - margin));
+        let y = cy - 50;
+        y = Math.max(margin, Math.min(y, wrapRect.height - ttH - margin));
         ttEl.style.left = x + "px";
         ttEl.style.top = y + "px";
     }
