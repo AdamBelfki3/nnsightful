@@ -1059,11 +1059,14 @@ export function createWidget(
 
     // The core fires onCellHover only on cell change; reposition the tooltip on
     // every move so it tracks the cursor within a cell (and hide it off-cell).
-    hmCore.getScrollElement().addEventListener("mousemove", (e) => {
+    // Named + on a captured element so destroy() can detach it cleanly.
+    const hmScrollEl = hmCore.getScrollElement();
+    const onScrollMove = (e: MouseEvent) => {
         const cell = (e.target as HTMLElement).closest(".hmx-cell") as HTMLElement | null;
         if (!cell) { hideTooltip(); return; }
         showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY);
-    });
+    };
+    hmScrollEl.addEventListener("mousemove", onScrollMove);
 
     // Keyboard nav when the heatmap is focused.
     heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -1246,6 +1249,7 @@ export function createWidget(
             removeOverlay();
             popupEl.remove();
             if (linePlot) { linePlot.destroy(); linePlot = null; }
+            hmScrollEl.removeEventListener("mousemove", onScrollMove);
             hmCore?.destroy();
             if (container) container.innerHTML = "";
         },

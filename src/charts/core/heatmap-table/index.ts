@@ -117,6 +117,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
 
     private resolveWindow(): HeatmapColumnWindow {
         const n = this.data.columns.length;
+        if (n === 0) return { start: 0, size: 0 };
         const w = this.options.columnWindow;
         if (!w) return { start: 0, size: n };
         const size = Math.max(1, Math.min(w.size, n));
@@ -307,6 +308,10 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
 
     setData(data: HeatmapTableData): void {
         this.data = data;
+        // Force the next onVisibleColumnsChange even if the new data resolves
+        // to the same visible set as the old (e.g. same column count) — a host
+        // that reset its own derived column state needs the notification.
+        this.lastVisibleCols = [];
         this.render();
     }
 

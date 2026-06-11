@@ -11,9 +11,9 @@ interface HeatmapTableWidgetProps {
     showGrid?: boolean;
     cornerLabel?: string;
     maxRows?: number | null;
-    onCellHover?: (row: number, col: number) => void;
-    onCellClick?: (row: number, col: number) => void;
-    onRowHeaderClick?: (row: number) => void;
+    onCellHover?: (row: number, col: number, ev: MouseEvent) => void;
+    onCellClick?: (row: number, col: number, ev: MouseEvent) => void;
+    onRowHeaderClick?: (row: number, ev: MouseEvent) => void;
     onCellLeave?: () => void;
 }
 
@@ -36,9 +36,9 @@ export function HeatmapTableWidget({
     const callbacksRef = useRef({ onCellHover, onCellClick, onRowHeaderClick, onCellLeave });
     callbacksRef.current = { onCellHover, onCellClick, onRowHeaderClick, onCellLeave };
 
-    const stableCellHover = useCallback((row: number, col: number) => callbacksRef.current.onCellHover?.(row, col), []);
-    const stableCellClick = useCallback((row: number, col: number) => callbacksRef.current.onCellClick?.(row, col), []);
-    const stableRowHeaderClick = useCallback((row: number) => callbacksRef.current.onRowHeaderClick?.(row), []);
+    const stableCellHover = useCallback((row: number, col: number, ev: MouseEvent) => callbacksRef.current.onCellHover?.(row, col, ev), []);
+    const stableCellClick = useCallback((row: number, col: number, ev: MouseEvent) => callbacksRef.current.onCellClick?.(row, col, ev), []);
+    const stableRowHeaderClick = useCallback((row: number, ev: MouseEvent) => callbacksRef.current.onRowHeaderClick?.(row, ev), []);
     const stableCellLeave = useCallback(() => callbacksRef.current.onCellLeave?.(), []);
 
     useEffect(() => {
