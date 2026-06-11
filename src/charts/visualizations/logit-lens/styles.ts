@@ -213,26 +213,29 @@ export function generateStyles(uid: string): string {
         ${root} .ll-lineplot-box { height: 200px; overflow: hidden; }
         ${root} .ll-lineplot { width: 100%; height: 100%; }
 
-        /* ── Tooltip ── */
+        /* ── Tooltip ──
+           Sized in em so its root font-size (set inline, proportional to the
+           hovered cell's width and capped) scales the whole box uniformly. */
         ${root} .ll-tooltip {
-            position: absolute; width: 220px; padding: 12px 14px;
+            position: absolute; font-size: 12.5px;
+            width: 17.6em; padding: 0.95em 1.12em;
             background: var(--ll-surface); border: 1px solid var(--ll-line-2);
-            border-radius: 6px;
+            border-radius: 0.48em;
             box-shadow: 0 6px 20px -4px rgba(0,0,0,0.12), 0 2px 6px -2px rgba(0,0,0,0.08);
             pointer-events: none; z-index: 50; font-family: var(--ll-font-sans);
             display: none;
         }
         ${root} .ll-tooltip.ll-visible { display: block; }
-        ${root} .ll-tt-head { display: flex; align-items: center; gap: 8px; }
-        ${root} .ll-tt-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--ll-line-2); flex-shrink: 0; }
+        ${root} .ll-tt-head { display: flex; align-items: center; gap: 0.64em; }
+        ${root} .ll-tt-swatch { width: 0.96em; height: 0.96em; border-radius: 0.16em; border: 1px solid var(--ll-line-2); flex-shrink: 0; }
         ${root} .ll-tt-token {
-            font-family: var(--ll-font-mono); font-size: 13px; font-weight: 500;
-            color: var(--ll-text); max-width: 160px;
+            font-family: var(--ll-font-mono); font-size: 1.04em; font-weight: 500;
+            color: var(--ll-text); max-width: 12.8em;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         ${root} .ll-tt-grid {
-            margin-top: 8px; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
-            font-size: 11.5px; color: var(--ll-text-muted);
+            margin-top: 0.64em; display: grid; grid-template-columns: auto 1fr; gap: 0.24em 0.96em;
+            font-size: 0.92em; color: var(--ll-text-muted);
         }
         ${root} .ll-tt-grid .ll-tt-val {
             font-family: var(--ll-font-mono); color: var(--ll-text); text-align: right;

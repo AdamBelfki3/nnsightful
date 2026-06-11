@@ -861,7 +861,19 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     // TOOLTIP
     // ═══════════════════════════════════════════════════════════════
-    function showTooltip(row: number, layerIdx: number, clientX: number, clientY: number) {
+    // The tooltip scales with the cell it describes: its root font-size (which
+    // all of its em-based internals key off) is proportional to the cell width,
+    // clamped so it never gets unreadably small or unwieldy on very wide cells.
+    const TT_REF_CELL = 56;   // cell width at which the tooltip is its base size
+    const TT_BASE_FONT = 12.5;
+    const TT_MIN_FONT = 10.5;
+    const TT_MAX_FONT = 18;   // the "max size" cap
+    function tooltipFontPx(cellWidth: number): number {
+        const f = TT_BASE_FONT * (cellWidth > 0 ? cellWidth / TT_REF_CELL : 1);
+        return Math.max(TT_MIN_FONT, Math.min(TT_MAX_FONT, f));
+    }
+
+    function showTooltip(row: number, layerIdx: number, clientX: number, clientY: number, cellWidth = 0) {
         const cell = widgetData.cells[row]?.[layerIdx];
         if (!cell) return;
         const hex = baseHex();
@@ -876,6 +888,8 @@ export function createWidget(
             + `<span>layer</span><span class="ll-tt-val">${widgetData.layers[layerIdx]} / ${widgetData.layers[nLayers - 1]}</span>`
             + `<span>position</span><span class="ll-tt-val">${row} · ${escapeHtml(truthRow)}</span>`
             + `</div>`;
+        // Set the scaled font BEFORE measuring offsetWidth/Height for placement.
+        ttEl.style.fontSize = tooltipFontPx(cellWidth) + "px";
         ttEl.classList.add("ll-visible");
 
         const wrapRect = widgetEl.getBoundingClientRect();
@@ -1060,7 +1074,7 @@ export function createWidget(
     const onScrollMove = (e: MouseEvent) => {
         const cell = (e.target as HTMLElement).closest(".hmx-cell") as HTMLElement | null;
         if (!cell) { hideTooltip(); return; }
-        showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY);
+        showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY, cell.offsetWidth);
     };
     hmScrollEl.addEventListener("mousemove", onScrollMove);
 
