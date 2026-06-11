@@ -865,9 +865,9 @@ export function createWidget(
     // all of its em-based internals key off) is proportional to the cell width,
     // clamped so it never gets unreadably small or unwieldy on very wide cells.
     const TT_REF_CELL = 56;   // cell width at which the tooltip is its base size
-    const TT_BASE_FONT = 12.5;
-    const TT_MIN_FONT = 10.5;
-    const TT_MAX_FONT = 18;   // the "max size" cap
+    const TT_BASE_FONT = 11;
+    const TT_MIN_FONT = 9.5;
+    const TT_MAX_FONT = 15;   // the "max size" cap
     function tooltipFontPx(cellWidth: number): number {
         const f = TT_BASE_FONT * (cellWidth > 0 ? cellWidth / TT_REF_CELL : 1);
         return Math.max(TT_MIN_FONT, Math.min(TT_MAX_FONT, f));
