@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LogitLens (HeatmapTableCore migration) — test</title>
+<style>
+  body { margin: 0; padding: 24px; background: hsl(0 0% 95%); font-family: system-ui, sans-serif; }
+  body.dark { background: hsl(0 0% 8%); color: #ddd; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; align-items: center; }
+  .bar button { font: 500 13px system-ui; padding: 6px 12px; border: 1px solid #bbb; background:#fff; border-radius:6px; cursor:pointer; }
+  body.dark .bar button { background:#222; color:#ddd; border-color:#444; }
+  .bar .grp { font: 600 11px system-ui; text-transform: uppercase; letter-spacing: .05em; color:#888; margin-left: 10px; }
+  #status { font: 12px ui-monospace, monospace; color:#777; margin-left:auto; }
+  /* Content mode host: a width cap + aspect-ratio var (Jupyter-like). */
+  #host.content { --ll-aspect-ratio: 5 / 3; max-width: 760px; }
+  /* Fill mode host: a definite bounded box, NO aspect-ratio var (workbench-like). */
+  #host.fill { width: 720px; height: 460px; border: 1px dashed #bbb; }
+  body.dark #host.fill { border-color:#555; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="grp">layers</span>
+    <button data-layers="12">12</button>
+    <button data-layers="36">36 (stride)</button>
+    <button data-layers="80">80 (heavy stride)</button>
+    <span class="grp">mode</span>
+    <button data-mode="content">content (Jupyter)</button>
+    <button data-mode="fill">fill (workbench)</button>
+    <span class="grp"></span>
+    <button id="dark">toggle dark</button>
+    <span id="status"></span>
+  </div>
+  <div id="host" class="content"></div>
+
+  <script src="../src/nnsightful/viz/charts.js"></script>
+  <script>
+    let nLayers = 36, mode = "content", dark = false;
+    const host = document.getElementById("host");
+    const statusEl = document.getElementById("status");
+    const vocab = [" the", " cat", " sat", " Paris", " France", " London", " is", " of", " a", " mat"];
+
+    function makeData(nLayers, nPos) {
+      const layers = Array.from({ length: nLayers }, (_, i) => i);
+      const input = Array.from({ length: nPos }, (_, p) => p === 0 ? "<bos>" : vocab[p % vocab.length]);
+      const tracked = [];
+      const topk = Array.from({ length: nLayers }, () => []);
+      for (let p = 0; p < nPos; p++) {
+        tracked[p] = {};
+        const finalTok = vocab[(p * 3) % vocab.length];
+        const cands = [finalTok, vocab[(p + 2) % vocab.length], vocab[(p + 5) % vocab.length], " a", " of"];
+        for (const t of cands) {
+          const traj = [];
+          for (let l = 0; l < nLayers; l++) {
+            const x = l / Math.max(1, nLayers - 1);
+            const v = t === finalTok
+              ? Math.min(0.96, Math.pow(x, 1.6) * 0.92 + 0.02)
+              : Math.max(0, 0.45 * Math.abs(Math.sin(l * 0.5 + t.length)) * (1 - x));
+            traj.push(v);
+          }
+          tracked[p][t] = traj;
+        }
+        for (let l = 0; l < nLayers; l++) {
+          topk[l][p] = [...cands].sort((a, b) => tracked[p][b][l] - tracked[p][a][l]);
+        }
+      }
+      return { meta: {}, layers, input, tracked, topk };
+    }
+
+    function render() {
+      host.className = mode;
+      host.innerHTML = "";
+      try {
+        const data = makeData(nLayers, 9);
+        InterpTools.LogitLensWidget(host, data, { darkMode: dark });
+        statusEl.textContent = `${nLayers} layers · ${mode} mode · ${dark ? "dark" : "light"}`;
+      } catch (e) {
+        statusEl.textContent = "ERR: " + e.message; console.error(e);
+      }
+    }
+
+    document.querySelectorAll("[data-layers]").forEach(b =>
+      b.onclick = () => { nLayers = +b.dataset.layers; render(); });
+    document.querySelectorAll("[data-mode]").forEach(b =>
+      b.onclick = () => { mode = b.dataset.mode; render(); });
+    document.getElementById("dark").onclick = () => {
+      dark = !dark; document.body.classList.toggle("dark", dark); render();
+    };
+
+    if (typeof InterpTools === "undefined" || !InterpTools.LogitLensWidget) {
+      statusEl.textContent = "ERROR: InterpTools.LogitLensWidget not found";
+    } else { render(); }
+  </script>
+</body>
+</html>

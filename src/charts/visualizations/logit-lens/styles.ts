@@ -350,6 +350,40 @@ export function injectStyles(uid: string): HTMLStyleElement {
     return style;
 }
 
+// The LogitLens heatmap is now rendered by HeatmapTableCore, whose DOM lives
+// under its OWN #hmx_* root — so the widget's #uid-scoped rules can't reach the
+// few domain visuals we inject into it via renderRowLabel / rowClassName (bos
+// pill, row-style marker, active-row rail + tint, row cursor). Those rules are
+// therefore GLOBAL (class-only) and target the core's hmx-* structure. They use
+// the core's --hmx-* tokens (defined on its root) so they track light/dark.
+// Injected once per document.
+let llHeatmapGlobalsInjected = false;
+export function injectLogitLensHeatmapGlobals(): void {
+    if (llHeatmapGlobalsInjected || typeof document === "undefined") return;
+    llHeatmapGlobalsInjected = true;
+    const style = document.createElement("style");
+    style.textContent = `
+        .ll-hmx-row .hmx-row-grid, .ll-hmx-row .hmx-rowlabel { cursor: pointer; }
+        .ll-row-style { flex-shrink: 0; }
+        .ll-hmx-bos {
+            display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
+            border: 1px solid var(--hmx-card-border); border-radius: 3px;
+            font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 10px; font-weight: 500; letter-spacing: 0.02em;
+            color: var(--hmx-text-muted); background: var(--hmx-surface-2);
+        }
+        .hmx-row.ll-hmx-active::before {
+            content: ""; position: absolute; left: -1px; top: 0; bottom: 0;
+            width: 3px; background: #3b82f6; border-radius: 2px; z-index: 2;
+        }
+        .hmx-row.ll-hmx-active .hmx-row-grid {
+            background: var(--hmx-surface-2);
+            box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.22); border-radius: 4px;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
 export function applyDarkMode(
     widgetEl: HTMLElement,
     enabled: boolean,

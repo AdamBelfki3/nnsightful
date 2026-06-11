@@ -15,11 +15,13 @@
 
 import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
+import type { HeatmapTableData, HeatmapTableOptions } from "../../types/heatmap-table";
 import { normalizeData, type NormalizedData } from "./normalize";
 import { generateUid, escapeHtml } from "./utils";
-import { injectStyles, applyDarkMode } from "./styles";
+import { injectStyles, applyDarkMode, injectLogitLensHeatmapGlobals } from "./styles";
 import { PALETTE, LINE_STYLES } from "./colors";
 import { LinePlotCore } from "../../core/line-plot";
+import { HeatmapTableCore } from "../../core/heatmap-table";
 import { detectThemeMode, onThemeModeChange } from "../../detect-theme-mode";
 
 interface CreateWidgetResult {
@@ -301,53 +303,15 @@ export function createWidget(
         return detectThemeMode(container);
     }
 
-    // Width available for the grid, in px. Measured from the scroll
-    // region's true inner width (excludes the card border/padding and any
-    // vertical scrollbar). The card is width-bounded before this is read
-    // (see renderHeatmap), so it's reliable. Falls back to a container
-    // estimate before first layout.
-    function heatmapAvailW(): number {
-        const sw = scrollEl.clientWidth;
-        if (sw > 0) return sw;
-        const cw = (container as HTMLElement)?.clientWidth ?? 0;
-        return cw > 0 ? cw - 42 : 900;
-    }
-
-    // How many columns fit at the minimum readable cell width — this is what
-    // makes the heatmap fit any panel: narrow panels show fewer (more
-    // heavily strided) columns rather than scrolling.
-    function maxColsFit(): number {
-        const fitCols = Math.floor((heatmapAvailW() - ROW_LABEL_W) / MIN_CELL);
-        return Math.max(1, Math.min(COL_CAP, fitCols));
-    }
-
-    // ── Layer window → shown layers (stride sampling) ──
-    function computeShownLayers(): { shownLayers: number[]; stride: number; start: number } {
-        const maxStart = Math.max(0, nLayers - state.viewSize);
-        const start = Math.max(0, Math.min(maxStart, state.viewStart));
-        const size = state.viewSize;
-        const maxCols = maxColsFit();
-        if (size <= maxCols) {
-            const shownLayers: number[] = [];
-            for (let i = 0; i < size; i++) shownLayers.push(start + i);
-            return { shownLayers, stride: 1, start };
-        }
-        // Window wider than the column budget → uniform stride sampling so
-        // the shown layers have COHERENT, even gaps (0, s, 2s, … — "every s
-        // layers"). We budget maxCols-1 strided columns and pin the final
-        // layer, so the total is ≤ maxCols (no overflow) and the model's
-        // actual last-layer prediction is always visible. The cells fill the
-        // width regardless of column count (no MAX_CELL clamp), so a smaller
-        // column count just means wider cells — never whitespace.
-        const budget = Math.max(1, maxCols - 1);
-        const stride = Math.ceil(size / budget);
-        const shownLayers: number[] = [];
-        for (let l = start; l < start + size; l += stride) shownLayers.push(l);
-        const last = start + size - 1;
-        if (shownLayers[shownLayers.length - 1] !== last) {
-            shownLayers.push(Math.min(nLayers - 1, last));
-        }
-        return { shownLayers, stride, start };
+    // ── Shown layers / stride ──
+    // Column down-sampling now lives in HeatmapTableCore (columnSizing 'fit' +
+    // sampleColumns 'uniform'); it reports the visible ABSOLUTE layer indices
+    // via onVisibleColumnsChange. The navigator reads this for its stride/range
+    // label. Seeded so the first navigator render before the core reports is
+    // sane.
+    let shownLayers: number[] = [];
+    function navStride(): number {
+        return shownLayers.length > 1 ? Math.max(1, shownLayers[1] - shownLayers[0]) : 1;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -355,10 +319,7 @@ export function createWidget(
     // ═══════════════════════════════════════════════════════════════
     container.innerHTML = `
         <div id="${uid}" tabindex="-1">
-            <div class="ll-heatmap" id="${uid}_heatmap">
-                <div class="ll-hdr-fixed" id="${uid}_hdr"></div>
-                <div class="ll-scroll" id="${uid}_scroll" tabindex="0"></div>
-            </div>
+            <div class="ll-heatmap" id="${uid}_heatmap" tabindex="0"></div>
             <div class="ll-nav" id="${uid}_nav"></div>
             <div class="ll-lineplot-wrap ll-hidden" id="${uid}_lp_wrap">
                 <div class="ll-lineplot-head">
@@ -377,9 +338,16 @@ export function createWidget(
     `;
 
     const widgetEl = document.getElementById(uid)!;
-    const scrollEl = document.getElementById(uid + "_scroll")!;
-    const hdrEl = document.getElementById(uid + "_hdr")!;
+    const heatmapEl = document.getElementById(uid + "_heatmap")!;
     const navEl = document.getElementById(uid + "_nav")!;
+    // The heatmap grid is rendered by a shared HeatmapTableCore (assigned just
+    // before the first render). Its scroll element stands in for the old
+    // scrollEl where we need to drive scrolling.
+    let hmCore!: HeatmapTableCore;
+    // Global (unscoped) CSS for the few domain visuals we render INSIDE the
+    // core's DOM (bos pill, row-style marker, active-row rail/tint) — the
+    // widget's own #uid-scoped rules can't reach the core's element subtree.
+    injectLogitLensHeatmapGlobals();
     const lpWrap = document.getElementById(uid + "_lp_wrap")!;
     const lpTokenEl = document.getElementById(uid + "_lp_token")!;
     const lpBoxEl = document.getElementById(uid + "_lp_box")!;
@@ -425,32 +393,6 @@ export function createWidget(
         return parts[1] / parts[0]; // h / w
     })();
 
-    // Effective cell dimensions, recomputed each render.
-    //  - WIDTH (both modes): the visible columns fill the available width
-    //    exactly. The column COUNT already adapts to width (maxColsFit) so
-    //    each column is ≥ MIN_CELL and the grid never needs horizontal
-    //    scroll; there's no upper cap, so a small column count just yields
-    //    wider cells (the grid always fills the width — no whitespace).
-    //  - HEIGHT: fill mode (workbench) stretches rows to use the panel's
-    //    spare vertical space; content mode (Jupyter) uses the fixed row
-    //    height with a capped scroll region.
-    let cellW = MIN_CELL;
-    let rowH = ROW_H;
-    function computeFillSizes() {
-        const availW = heatmapAvailW();
-        const nCols = computeShownLayers().shownLayers.length;
-        cellW = nCols > 0
-            ? Math.max(MIN_CELL, Math.floor((availW - ROW_LABEL_W) / nCols))
-            : MIN_CELL;
-        if (!fillMode) { rowH = ROW_H; return; }
-        // scrollEl.clientHeight is the space available for the rows: the
-        // layer header is OUTSIDE the scroll (in hdrEl) and the old bottom
-        // caption is gone, so nothing else to reserve here.
-        const hForRows = scrollEl.clientHeight;
-        const stretchRows = nRows > 0 && nRows * ROW_H < hForRows;
-        rowH = stretchRows ? Math.floor(hForRows / nRows) : ROW_H;
-    }
-
     // A tiny dashed-line swatch shown in a pinned row's label so the row
     // maps to its (dash-styled) lines in the trajectory plot.
     function rowStyleMarker(dash: string, dark: boolean): string {
@@ -461,138 +403,118 @@ export function createWidget(
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // RENDER: HEATMAP
+    // RENDER: HEATMAP (delegated to HeatmapTableCore)
     // ═══════════════════════════════════════════════════════════════
-    function renderHeatmap() {
-        // This rebuilds scrollEl below, detaching the hovered cell; drop the
-        // stale reference so the next mousemove re-enters cleanly (no spurious
-        // clearCellPreview / leftover hover class).
-        hoverCell = null;
-        const hex = baseHex();
-        const dark = isDarkMode();
-        // Grid separators: light "breathing room" lines on the light field,
-        // subtle dark lines in dark mode (so they read on the colored cells
-        // and vanish on the faint ones — mirroring the light behavior).
-        const gridBorder = state.showGrid
-            ? (dark
-                ? "border-right:1px solid rgba(0,0,0,0.28);border-bottom:1px solid rgba(0,0,0,0.22);"
-                : "border-right:1px solid rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.45);")
-            : "";
+    // The grid — magnitude coloring, the final-prediction orange tint, low-prob
+    // dimming and the pinned-token contour — is expressed as HeatmapTableData;
+    // the core paints it. getCellValue closes over live state so colors / pins
+    // / dimming update on every (re-)render without rebuilding the data.
+    function buildHeatmapData(): HeatmapTableData {
+        return {
+            rows: widgetData.tokens.map((label) => ({ label })),
+            columns: widgetData.layers.map((lab) => ({ label: String(lab), value: 0 })),
+            getCellValue: (r, l) => {
+                const c = widgetData.cells[r][l];
+                const prob = c.prob;
+                const dark = isDarkMode();
+                const isFinal = finalPredToken !== "" && c.token === finalPredToken;
+                const pc = pinColorFor(c.token);
+                const low = prob < 0.18;
+                return {
+                    text: c.token,
+                    value: prob,
+                    color: cellBg(prob, isFinal ? FINAL_PRED_HEX : baseHex(), dark),
+                    textColor: cellFg(prob, dark),
+                    highlighted: !!pc,
+                    highlightColor: pc ?? undefined,
+                    opacity: state.dimLow && low ? 0.55 : undefined,
+                };
+            },
+        };
+    }
 
-        // Bound the card width FIRST so computeFillSizes() reads a reliable
-        // scroll inner width (the card can't be stretched by the wide grid).
-        //  - fill (workbench): pin to the measured host px — the host is
-        //    bounded by the display panel (overflow:hidden), a hard cap
-        //    against any ancestor flex quirk. Height comes from CSS (100%).
-        //  - content (Jupyter): width:100% of the (bounded) output
-        //    container, and the card's HEIGHT is capped from the aspect
-        //    ratio (width × h/w). The card is a flex column with overflow
-        //    hidden, so the heatmap (.ll-scroll, flex:1) absorbs that cap
-        //    and scrolls to keep content inside the ratio box — restoring
-        //    the previous widget's applyOuterCap behavior.
+    // Row label: bos pill / blue-underscore token, bold when active, with a
+    // dash marker on pinned rows. The host owns this markup (renderRowLabel).
+    function renderRowLabel(r: number): string {
+        const tok = widgetData.tokens[r];
+        const active = r === state.selectedRow || isPinnedRow(r);
+        let html = "";
+        if (isPinnedRow(r)) html += rowStyleMarker(lineStyleForRow(r).dash, isDarkMode());
+        html += isBosToken(tok)
+            ? `<span class="ll-hmx-bos">bos</span>`
+            : `<span class="hmx-cell-text"${active ? ' style="font-weight:600"' : ""}>${tokenInnerHTML(tok)}</span>`;
+        return html;
+    }
+    // Mark every row (cursor affordance) and the active one (rail + tint).
+    function rowClassName(r: number): string {
+        return "ll-hmx-row" + (r === state.selectedRow || isPinnedRow(r) ? " ll-hmx-active" : "");
+    }
+
+    // The options that drive the core each render. Striding/fit-to-width and
+    // fill-vs-content are now core policies configured from widget state.
+    function heatmapOptions(): Partial<HeatmapTableOptions> {
+        return {
+            columnSizing: "fit",
+            minColumnWidth: MIN_CELL,
+            maxVisibleColumns: COL_CAP,
+            sampleColumns: "uniform",
+            alwaysShowLastColumn: true,
+            columnWindow: { start: clampStart(state.viewStart), size: state.viewSize },
+            rowSizing: fillMode ? "fill" : "fixed",
+            cellHeight: ROW_H,
+            rowHeaderWidth: ROW_LABEL_W,
+            headerHeight: HDR_H + 6,
+            // Fill the bounded heatmap region (fill mode, or content mode with
+            // an aspect-ratio cap). With no cap (the opt-out) there's no
+            // bounded parent, so size to content and let the rows define height.
+            height: fillMode || aspectHW != null ? "fill" : "content",
+            chrome: "none",
+            cornerLabel: "token",
+            showGrid: state.showGrid,
+            darkMode: isDarkMode(),
+            renderRowLabel,
+            rowClassName,
+            onVisibleColumnsChange: (visible) => { shownLayers = visible; },
+            onCellHover: onHeatmapCellHover,
+            onCellClick: onHeatmapCellClick,
+            onRowHeaderClick: (row) => {
+                togglePinnedRow(row);
+                renderHeatmap();
+                updateLinePlot();
+                emitStateChange();
+            },
+            onCellLeave: () => { hideTooltip(); clearCellPreview(); },
+        };
+    }
+
+    // Size the widget card (fill the panel, or cap to the aspect ratio in
+    // content mode), then let the core re-fit/-sample the grid for the box.
+    function applyCardSizing() {
         if (fillMode) {
             const hostW = (container as HTMLElement).clientWidth;
             widgetEl.style.width = hostW > 0 ? hostW + "px" : "100%";
             widgetEl.style.maxWidth = "100%";
             widgetEl.style.maxHeight = "";
-            scrollEl.style.maxHeight = "";
+            return;
+        }
+        widgetEl.style.width = "";
+        widgetEl.style.maxWidth = "";
+        const hostW = (container as HTMLElement).clientWidth || widgetEl.clientWidth;
+        if (aspectHW && hostW > 0) {
+            // Card height = width × (h/w), floored at chrome + a min heatmap so
+            // a tall ratio in a narrow cell can't clip the nav / line plot.
+            const MIN_SCROLL = 90;
+            const chromeH = widgetEl.offsetHeight - hmCore.getScrollElement().offsetHeight;
+            const floor = (chromeH > 0 ? chromeH : 140) + MIN_SCROLL;
+            widgetEl.style.maxHeight = Math.max(floor, Math.round(hostW * aspectHW)) + "px";
         } else {
-            widgetEl.style.width = "";
-            widgetEl.style.maxWidth = "";
-            scrollEl.style.maxHeight = "";
-            const hostW = (container as HTMLElement).clientWidth || widgetEl.clientWidth;
-            if (aspectHW && hostW > 0) {
-                // Target card height = width × (h/w). Floor it at
-                // chrome + a minimum heatmap so a tall ratio in a narrow
-                // cell can't shrink the (overflow:hidden) card below the
-                // fixed chrome — which would clip the navigator / line plot.
-                // chromeHeight = everything except .ll-scroll (nav, line
-                // plot, header row, axis caption, card padding), measured
-                // live so it tracks whether the line plot is open.
-                const MIN_SCROLL = 90;
-                const chromeH = widgetEl.offsetHeight - scrollEl.offsetHeight;
-                const floor = (chromeH > 0 ? chromeH : 140) + MIN_SCROLL;
-                widgetEl.style.maxHeight = Math.max(floor, Math.round(hostW * aspectHW)) + "px";
-            } else {
-                // unbounded / malformed → content-driven (no cap), matching
-                // the old opt-out path.
-                widgetEl.style.maxHeight = "";
-            }
+            widgetEl.style.maxHeight = "";
         }
+    }
 
-        computeFillSizes();
-        const { shownLayers } = computeShownLayers();
-        const nCols = shownLayers.length;
-        const tableWidth = Math.round(ROW_LABEL_W + cellW * nCols);
-        const cols = `${ROW_LABEL_W}px repeat(${nCols}, ${cellW}px)`;
-
-        // Layer axis header — rendered OUTSIDE the scroll viewport (into
-        // hdrEl) so scrolling rows can never bleed above it; it therefore
-        // needs no opaque background. Shares the column template + width
-        // with the grid so columns line up (no horizontal scroll by design).
-        let hdrHtml = `<div class="ll-hdr-row" style="display:grid;grid-template-columns:${cols};height:${HDR_H + 6}px;width:${tableWidth}px;min-width:${tableWidth}px;">`;
-        hdrHtml += `<div class="ll-corner">token</div>`;
-        for (const l of shownLayers) {
-            hdrHtml += `<div class="ll-hdr-cell">${widgetData.layers[l]}</div>`;
-        }
-        hdrHtml += `</div>`;
-        hdrEl.innerHTML = hdrHtml;
-
-        let html = `<div class="ll-grid-inner" style="width:${tableWidth}px;min-width:${tableWidth}px;">`;
-
-        // Rows
-        for (let r = 0; r < nRows; r++) {
-            const tok = widgetData.tokens[r];
-            const bos = isBosToken(tok);
-            const pinnedRow = isPinnedRow(r);
-            const active = r === state.selectedRow || pinnedRow;
-            html += `<div class="ll-row" data-rowwrap="${r}">`;
-            if (active) html += `<div class="ll-row-rail"></div>`;
-            html += `<div class="ll-row-grid${active ? " ll-row-sel" : ""}" data-row="${r}" `
-                + `style="display:grid;grid-template-columns:${cols};height:${rowH}px;">`;
-
-            // Row label (click toggles row pinning). Pinned rows show a small
-            // dash marker matching their trajectory line style.
-            html += `<div class="ll-row-label" title="click to pin this position's trajectories">`;
-            if (pinnedRow) html += rowStyleMarker(lineStyleForRow(r).dash, dark);
-            html += bos
-                ? `<span class="ll-bos-pill">bos</span>`
-                : `<span class="ll-cell-text" style="${active ? "font-weight:600;" : ""}">${tokenInnerHTML(tok)}</span>`;
-            html += `</div>`;
-
-            // Cells
-            shownLayers.forEach((l, colIdx) => {
-                const c = widgetData.cells[r][l];
-                const prob = c.prob;
-                // Orange ramp for cells predicting the final next token.
-                const isFinal = finalPredToken !== "" && c.token === finalPredToken;
-                const bg = cellBg(prob, isFinal ? FINAL_PRED_HEX : hex, dark);
-                const fg = cellFg(prob, dark);
-                const low = prob < 0.18;
-                const op = state.dimLow && low ? "opacity:0.55;" : "";
-                // Colored contour where a pinned trajectory token is predicted.
-                const pc = pinColorFor(c.token);
-                const contour = pc ? `box-shadow:inset 0 0 0 2px ${pc};` : "";
-                // Round the four outer corners of the DATA-cell block (i.e.
-                // the cells area only, excluding the layer header + token
-                // labels). border-radius clips each corner cell's background.
-                const top = r === 0, bot = r === nRows - 1;
-                const left = colIdx === 0, right = colIdx === nCols - 1;
-                let radius = "";
-                if (top && left) radius = "border-top-left-radius:8px;";
-                else if (top && right) radius = "border-top-right-radius:8px;";
-                else if (bot && left) radius = "border-bottom-left-radius:8px;";
-                else if (bot && right) radius = "border-bottom-right-radius:8px;";
-                html += `<div class="ll-cell${pc ? " ll-cell-pinned" : ""}" data-row="${r}" data-layer="${l}" `
-                    + `style="background:${bg};color:${fg};padding:0 6px;${op}${gridBorder}${contour}${radius}">`
-                    + `<span class="ll-cell-text">${tokenInnerHTML(c.token)}</span>`
-                    + `</div>`;
-            });
-            html += `</div></div>`;
-        }
-
-        html += `</div>`;
-        scrollEl.innerHTML = html;
+    function renderHeatmap() {
+        applyCardSizing();
+        hmCore.setOptions(heatmapOptions());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -601,7 +523,8 @@ export function createWidget(
     function renderNavigator() {
         const hex = baseHex();
         const dark = isDarkMode();
-        const { stride, start } = computeShownLayers();
+        const start = clampStart(state.viewStart);
+        const stride = navStride();
         const size = state.viewSize;
         const atFull = size >= nLayers;
         const steps = zoomSteps();
@@ -813,10 +736,7 @@ export function createWidget(
     }
 
     function scrollToRow(idx: number) {
-        const el = scrollEl.querySelector(`[data-rowwrap="${idx}"]`) as HTMLElement | null;
-        if (!el) return;
-        const target = el.offsetTop - scrollEl.clientHeight / 2 + el.offsetHeight / 2;
-        scrollEl.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+        hmCore.scrollToRow(idx);
     }
 
     // Default the heatmap to the bottom (the last prompt tokens) since the
@@ -826,7 +746,7 @@ export function createWidget(
     function scrollToBottom() {
         requestAnimationFrame(() => requestAnimationFrame(() => {
             if (destroyed) return;
-            scrollEl.scrollTop = scrollEl.scrollHeight;
+            hmCore.scrollToBottom();
         }));
     }
 
@@ -1101,18 +1021,14 @@ export function createWidget(
     });
 
     // ═══════════════════════════════════════════════════════════════
-    // EVENT WIRING (delegation)
+    // EVENT WIRING (via HeatmapTableCore callbacks)
     // ═══════════════════════════════════════════════════════════════
-    let hoverCell: HTMLElement | null = null;
-
     // Preview the hovered cell's token trajectory, but ONLY when the plot is
-    // already open (something pinned) — same gating as the popup hover, so a
-    // bare hover never pops the panel in/out. Done on cell *change* (not every
-    // mousemove) to avoid redundant plot redraws.
-    function previewCellTrajectory(cellDiv: HTMLElement) {
+    // already open (something pinned) — so a bare hover never pops the panel
+    // in/out. The core fires onCellHover on cell *change*, so this is naturally
+    // throttled to one preview per cell.
+    function previewCellTrajectory(row: number, layer: number) {
         if (lpHidden) return;
-        const row = parseInt(cellDiv.dataset.row!);
-        const layer = parseInt(cellDiv.dataset.layer!);
         const token = widgetData.cells[row]?.[layer]?.token;
         const traj = token != null ? trajectoryForToken(row, token) : null;
         if (traj) updateLinePlot({ values: traj.map((v) => v ?? null), label: tokenPlain(token!), color: "#999" });
@@ -1122,66 +1038,35 @@ export function createWidget(
         if (!lpHidden) updateLinePlot();
     }
 
-    scrollEl.addEventListener("mousemove", (e) => {
-        const cellDiv = (e.target as HTMLElement).closest(".ll-cell") as HTMLElement | null;
-        if (!cellDiv) {
-            if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; clearCellPreview(); }
-            hideTooltip();
+    function onHeatmapCellHover(row: number, layer: number) {
+        previewCellTrajectory(row, layer);
+    }
+    function onHeatmapCellClick(row: number, layer: number, ev: MouseEvent) {
+        // Shift-click → pin this cell's token trajectory directly.
+        if (ev.shiftKey) {
+            const tok = widgetData.cells[row]?.[layer]?.token;
+            if (tok) { togglePin(tok); renderHeatmap(); updateLinePlot(); emitStateChange(); }
             return;
         }
-        if (hoverCell !== cellDiv) {
-            if (hoverCell) hoverCell.classList.remove("ll-cell-hover");
-            hoverCell = cellDiv;
-            hoverCell.classList.add("ll-cell-hover");
-            previewCellTrajectory(cellDiv);
-        }
-        const row = parseInt(cellDiv.dataset.row!);
-        const layer = parseInt(cellDiv.dataset.layer!);
-        showTooltip(row, layer, e.clientX, e.clientY);
-    });
-    scrollEl.addEventListener("mouseleave", () => {
-        if (hoverCell) { hoverCell.classList.remove("ll-cell-hover"); hoverCell = null; clearCellPreview(); }
         hideTooltip();
-    });
-    scrollEl.addEventListener("click", (e) => {
-        // If the click ended a text selection (the user dragged to highlight
-        // a label to copy it), don't also pin / open the popup.
-        if (!(window.getSelection()?.isCollapsed ?? true)) return;
-        const target = e.target as HTMLElement;
-        const rowGrid = target.closest(".ll-row-grid") as HTMLElement | null;
-        if (!rowGrid) return;
-        const row = parseInt(rowGrid.dataset.row!);
+        const cellEl = (ev.target as HTMLElement).closest(".hmx-cell") as HTMLElement | null;
+        if (cellEl) showPopup(row, layer, cellEl);
+    }
 
-        // Click on the left token label → pin/unpin this row (position).
-        if (target.closest(".ll-row-label")) {
-            togglePinnedRow(row);
-            renderHeatmap();
-            updateLinePlot();
-            emitStateChange();
-            return;
-        }
-        // Click on a prediction cell.
-        const cellDiv = target.closest(".ll-cell") as HTMLElement | null;
-        if (cellDiv) {
-            const layer = parseInt(cellDiv.dataset.layer!);
-            // Shift-click → pin this cell's token trajectory directly.
-            if (e.shiftKey) {
-                const cellTok = widgetData.cells[row]?.[layer]?.token;
-                if (cellTok) {
-                    togglePin(cellTok);
-                    renderHeatmap();
-                    updateLinePlot();
-                    emitStateChange();
-                }
-                return;
-            }
-            hideTooltip();
-            showPopup(row, layer, cellDiv);
-        }
+    // Build the core now that all its callbacks exist. It renders immediately;
+    // renderAll() re-renders once the card is sized so fit/fill measure right.
+    hmCore = new HeatmapTableCore(heatmapEl, buildHeatmapData(), heatmapOptions());
+
+    // The core fires onCellHover only on cell change; reposition the tooltip on
+    // every move so it tracks the cursor within a cell (and hide it off-cell).
+    hmCore.getScrollElement().addEventListener("mousemove", (e) => {
+        const cell = (e.target as HTMLElement).closest(".hmx-cell") as HTMLElement | null;
+        if (!cell) { hideTooltip(); return; }
+        showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY);
     });
 
-    // Keyboard nav when heatmap focused
-    scrollEl.addEventListener("keydown", (e: KeyboardEvent) => {
+    // Keyboard nav when the heatmap is focused.
+    heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
         if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
         e.preventDefault();
         const cur = state.selectedRow ?? -1;
@@ -1323,6 +1208,8 @@ export function createWidget(
             state.pinnedRows = [];
             state.colorIndex = 0;
             recomputeDerived();
+            shownLayers = [];
+            hmCore.setData(buildHeatmapData()); // new prompt → new rows/columns
             renderAll();
             scrollToBottom(); // new data → show the last prompt tokens
         },
@@ -1359,6 +1246,7 @@ export function createWidget(
             removeOverlay();
             popupEl.remove();
             if (linePlot) { linePlot.destroy(); linePlot = null; }
+            hmCore?.destroy();
             if (container) container.innerHTML = "";
         },
     };
