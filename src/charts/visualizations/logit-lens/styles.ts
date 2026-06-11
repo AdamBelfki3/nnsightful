@@ -47,17 +47,18 @@ export function generateStyles(uid: string): string {
             box-shadow: var(--ll-shadow-xs);
             padding: 20px;
             /* width:100% + max-width:100% + min-width:0 keep the card bounded
-               to its container (never grown by the wide heatmap inside,
-               which is clipped/scrolled by .ll-scroll). */
+               to its container (never grown by the wide heatmap inside, which
+               fits its columns to width and scrolls within .ll-heatmap). */
             width: 100%;
             max-width: 100%;
             min-width: 0;
             overflow: hidden;
             -webkit-user-select: none; user-select: none;
-            /* Flex column in BOTH modes: the heatmap (.ll-scroll) flex-grows
-               to absorb available height and scrolls; the navigator and line
-               plot keep their natural size below it.
-                - Content (Jupyter): renderHeatmap sets an inline max-height
+            /* Flex column in BOTH modes: the heatmap (.ll-heatmap, hosting the
+               HeatmapTableCore) flex-grows to absorb available height and the
+               core scrolls inside it; the navigator and line plot keep their
+               natural size below.
+                - Content (Jupyter): applyCardSizing sets an inline max-height
                   on the root from --ll-aspect-ratio, so the card caps at the
                   width×ratio box and the heatmap scrolls inside it (faithful
                   to the old applyOuterCap).
@@ -103,75 +104,34 @@ export function generateStyles(uid: string): string {
         /* Leading-space marker, used in cell + row-label token rendering. */
         ${root} .ll-lead-space { color: #3b82f6; }
 
-        /* ── Heatmap region: fixed layer header above a scrollable rows area.
-              The header lives OUTSIDE the scroll viewport, so rows can never
-              scroll above it — which is why neither the header nor the axis
-              labels need an opaque background (no scroll bleed to hide). No
-              outer frame here: the rounded corners are applied to the four
-              corner DATA cells (in renderHeatmap), so only the cells area is
-              rounded, not the axis. ── */
+        /* ── Heatmap region: rendered by HeatmapTableCore, mounted into
+              .ll-heatmap. The core owns the grid (fixed header, scroll, cells,
+              corner rounding, hover outline) under its OWN #hmx_* root — which
+              is nested inside this widget root, so the #uid-scoped rules below
+              reach the few domain visuals we inject into the core's labels /
+              rows via renderRowLabel + rowClassName (bos pill, dash marker,
+              active-row rail + tint, row cursor). ── */
         ${root} .ll-heatmap {
             display: flex; flex-direction: column;
             min-width: 0; max-width: 100%;
         }
-        ${root} .ll-hdr-fixed { flex: 0 0 auto; overflow: hidden; }
-        ${root} .ll-scroll {
-            flex: 1 1 auto; min-height: 0;
-            overflow: auto;
-            min-width: 0; max-width: 100%;
-        }
-        ${root} .ll-grid-inner { /* width set inline */ }
-        ${root} .ll-hdr-row { align-items: end; padding-bottom: 4px; }
-        ${root} .ll-corner {
-            font-size: 10px; color: var(--ll-text-muted);
-            text-align: right; padding-right: 8px;
-            letter-spacing: 0.04em; text-transform: uppercase;
-            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-            display: flex; align-items: flex-end; justify-content: flex-end;
-        }
-        ${root} .ll-hdr-cell {
-            text-align: center; font-family: var(--ll-font-mono); font-size: 11px;
-            color: var(--ll-text-muted); font-variant-numeric: tabular-nums;
-            overflow: hidden; white-space: nowrap;
-            -webkit-user-select: text; user-select: text;
-        }
-        ${root} .ll-row { position: relative; }
-        ${root} .ll-row-rail {
-            position: absolute; left: -1px; top: 0; bottom: 0;
+        /* Every logit-lens row is clickable (pin position / open popup). */
+        ${root} .ll-hmx-row .hmx-row-grid,
+        ${root} .ll-hmx-row .hmx-rowlabel { cursor: pointer; }
+        /* Active row (selected or pinned): a left accent rail + a subtle tint.
+           The cells are opaque, so the tint reads in the label gutter — the old
+           .ll-row-sel look. .hmx-row is position:relative (core), so ::before
+           anchors to it. */
+        ${root} .hmx-row.ll-hmx-active::before {
+            content: ""; position: absolute; left: -1px; top: 0; bottom: 0;
             width: 3px; background: var(--ll-primary); border-radius: 2px; z-index: 2;
         }
-        ${root} .ll-row-grid {
-            cursor: pointer; position: relative; z-index: 1;
-        }
-        ${root} .ll-row-grid.ll-row-sel {
+        ${root} .hmx-row.ll-hmx-active .hmx-row-grid {
             background: var(--ll-surface-2);
             box-shadow: 0 0 0 1px var(--ll-primary-018);
             border-radius: 4px;
         }
-        ${root} .ll-row-label {
-            display: flex; align-items: center; justify-content: flex-end;
-            gap: 6px; padding: 0 8px; font-size: 12px; color: var(--ll-text-2);
-            /* No background: the token column never has cells scrolling under
-               it (columns fit to width → no horizontal scroll), and rows
-               scroll vertically together with their labels. */
-            overflow: hidden;
-        }
-        ${root} .ll-cell {
-            display: flex; align-items: center; justify-content: center;
-            min-width: 0; font-size: 11px; font-family: var(--ll-font-mono);
-            position: relative; color: hsl(0 0% 18%);
-        }
-        ${root} .ll-cell-text {
-            display: block; min-width: 0; max-width: 100%;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            /* The widget root is user-select:none (to keep drags clean), but
-               the token labels opt back in so they can be highlighted /
-               copied (drag to select). Cursor stays inherited (pointer) so
-               the cell's click-to-inspect affordance is preserved. Selecting
-               copies the full token even when the cell truncates it. */
-            -webkit-user-select: text; user-select: text;
-        }
-        ${root} .ll-cell.ll-cell-hover { outline: 2px solid var(--ll-text); outline-offset: -2px; z-index: 3; }
+        /* Pinned-row line-style marker + bos pill, emitted by renderRowLabel. */
         ${root} .ll-row-style { flex-shrink: 0; }
         ${root} .ll-bos-pill {
             display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
@@ -348,40 +308,6 @@ export function injectStyles(uid: string): HTMLStyleElement {
     style.textContent = generateStyles(uid);
     document.head.appendChild(style);
     return style;
-}
-
-// The LogitLens heatmap is now rendered by HeatmapTableCore, whose DOM lives
-// under its OWN #hmx_* root — so the widget's #uid-scoped rules can't reach the
-// few domain visuals we inject into it via renderRowLabel / rowClassName (bos
-// pill, row-style marker, active-row rail + tint, row cursor). Those rules are
-// therefore GLOBAL (class-only) and target the core's hmx-* structure. They use
-// the core's --hmx-* tokens (defined on its root) so they track light/dark.
-// Injected once per document.
-let llHeatmapGlobalsInjected = false;
-export function injectLogitLensHeatmapGlobals(): void {
-    if (llHeatmapGlobalsInjected || typeof document === "undefined") return;
-    llHeatmapGlobalsInjected = true;
-    const style = document.createElement("style");
-    style.textContent = `
-        .ll-hmx-row .hmx-row-grid, .ll-hmx-row .hmx-rowlabel { cursor: pointer; }
-        .ll-row-style { flex-shrink: 0; }
-        .ll-hmx-bos {
-            display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
-            border: 1px solid var(--hmx-card-border); border-radius: 3px;
-            font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 10px; font-weight: 500; letter-spacing: 0.02em;
-            color: var(--hmx-text-muted); background: var(--hmx-surface-2);
-        }
-        .hmx-row.ll-hmx-active::before {
-            content: ""; position: absolute; left: -1px; top: 0; bottom: 0;
-            width: 3px; background: #3b82f6; border-radius: 2px; z-index: 2;
-        }
-        .hmx-row.ll-hmx-active .hmx-row-grid {
-            background: var(--hmx-surface-2);
-            box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.22); border-radius: 4px;
-        }
-    `;
-    document.head.appendChild(style);
 }
 
 export function applyDarkMode(

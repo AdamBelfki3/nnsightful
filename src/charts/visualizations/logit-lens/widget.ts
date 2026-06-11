@@ -18,7 +18,7 @@ import type { LinePlotLine } from "../../types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions } from "../../types/heatmap-table";
 import { normalizeData, type NormalizedData } from "./normalize";
 import { generateUid, escapeHtml } from "./utils";
-import { injectStyles, applyDarkMode, injectLogitLensHeatmapGlobals } from "./styles";
+import { injectStyles, applyDarkMode } from "./styles";
 import { PALETTE, LINE_STYLES } from "./colors";
 import { LinePlotCore } from "../../core/line-plot";
 import { HeatmapTableCore } from "../../core/heatmap-table";
@@ -344,10 +344,6 @@ export function createWidget(
     // before the first render). Its scroll element stands in for the old
     // scrollEl where we need to drive scrolling.
     let hmCore!: HeatmapTableCore;
-    // Global (unscoped) CSS for the few domain visuals we render INSIDE the
-    // core's DOM (bos pill, row-style marker, active-row rail/tint) — the
-    // widget's own #uid-scoped rules can't reach the core's element subtree.
-    injectLogitLensHeatmapGlobals();
     const lpWrap = document.getElementById(uid + "_lp_wrap")!;
     const lpTokenEl = document.getElementById(uid + "_lp_token")!;
     const lpBoxEl = document.getElementById(uid + "_lp_box")!;
@@ -441,7 +437,7 @@ export function createWidget(
         let html = "";
         if (isPinnedRow(r)) html += rowStyleMarker(lineStyleForRow(r).dash, isDarkMode());
         html += isBosToken(tok)
-            ? `<span class="ll-hmx-bos">bos</span>`
+            ? `<span class="ll-bos-pill">bos</span>`
             : `<span class="hmx-cell-text"${active ? ' style="font-weight:600"' : ""}>${tokenInnerHTML(tok)}</span>`;
         return html;
     }
