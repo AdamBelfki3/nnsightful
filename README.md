@@ -4,8 +4,10 @@ A higher-level extension of [NNsight](https://github.com/ndif-team/nnsight) prov
 
 ## Installation
 
+Install the latest version directly from GitHub:
+
 ```bash
-pip install nnsightful
+pip install git+https://github.com/AdamBelfki3/nnsightful.git
 ```
 
 ## Usage
