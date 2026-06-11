@@ -228,11 +228,15 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         for (let r = 0; r < rowCount; r++) {
             const rowLabel = rows[r].label;
             const extraCls = o.rowClassName?.(r);
-            const labelInner = o.renderRowLabel ? o.renderRowLabel(r) : tokenInnerHTML(rowLabel);
+            // When a host supplies renderRowLabel it owns the label's full
+            // inner markup (so multi-element labels — a pill, a marker + text —
+            // sit as direct flex children); otherwise wrap the plain token.
+            const labelInner = o.renderRowLabel
+                ? o.renderRowLabel(r)
+                : `<span class="hmx-cell-text">${tokenInnerHTML(rowLabel)}</span>`;
             html += `<div class="hmx-row${extraCls ? " " + extraCls : ""}" data-rowwrap="${r}">`;
             html += `<div class="hmx-row-grid" style="display:grid;grid-template-columns:${tpl};height:${rowH}px;">`;
-            html += `<div class="hmx-rowlabel" data-row="${r}" title="${escapeHtml(rowLabel)}">`
-                + `<span class="hmx-cell-text">${labelInner}</span></div>`;
+            html += `<div class="hmx-rowlabel" data-row="${r}" title="${escapeHtml(rowLabel)}">${labelInner}</div>`;
             for (let di = 0; di < nCols; di++) {
                 const c = visibleCols[di];
                 const cell = this.data.getCellValue(r, c);
