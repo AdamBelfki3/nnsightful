@@ -9,3 +9,4 @@ build/
 tests/benchmark/*.json
 !tests/benchmark/results.json
 .docs/
+send/
