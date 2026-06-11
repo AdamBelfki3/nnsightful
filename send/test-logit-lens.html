@@ -13,6 +13,9 @@
   #status { font: 12px ui-monospace, monospace; color:#777; margin-left:auto; }
   /* Content mode host: a width cap + aspect-ratio var (Jupyter-like). */
   #host.content { --ll-aspect-ratio: 5 / 3; max-width: 760px; }
+  /* Full-height (full_height=True / aspect_ratio="none"): content mode with the
+     cap opted out — the widget grows to show every row, no inner scroll. */
+  #host.fullheight { --ll-aspect-ratio: unbounded; max-width: 760px; }
   /* Fill mode host: a definite bounded box, NO aspect-ratio var (workbench-like). */
   #host.fill { width: 720px; height: 460px; border: 1px dashed #bbb; }
   body.dark #host.fill { border-color:#555; }
@@ -25,7 +28,8 @@
     <button data-layers="36">36 (stride)</button>
     <button data-layers="80">80 (heavy stride)</button>
     <span class="grp">mode</span>
-    <button data-mode="content">content (Jupyter)</button>
+    <button data-mode="content">content (capped)</button>
+    <button data-mode="fullheight">full height (no cap)</button>
     <button data-mode="fill">fill (workbench)</button>
     <span class="grp"></span>
     <button id="dark">toggle dark</button>

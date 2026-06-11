@@ -320,6 +320,7 @@ def display_logit_lens(
     width: str | None = None,
     aspect_ratio: str | None = None,
     dark_mode: bool | None = None,
+    full_height: bool = False,
     return_html: bool = False,
 ) -> HTML | None:
     """
@@ -342,12 +343,21 @@ def display_logit_lens(
             uses the package default ("5 / 3"), not opt-out.
         dark_mode: Force dark (True) or light (False) mode. When None,
             uses the global setting, or auto-detects from the notebook theme.
+        full_height: If True, disable the vertical height cap so the heatmap
+            grows to show every token row without an internal scrollbar
+            (handy in notebooks). Equivalent to aspect_ratio="none", and
+            takes precedence over any aspect_ratio passed.
         return_html: If True, return the HTML object instead of displaying it.
     """
     data = _to_dict(data)
     _validate_logit_lens_data(data)
     data = _densify_logit_lens_data(data)
     data_json = json.dumps(data)
+
+    # full_height wins over aspect_ratio: opt out of the height cap so the
+    # widget is content-driven (grows to fit all rows, no inner scroll).
+    if full_height:
+        aspect_ratio = "none"
 
     ui_state_dict = _resolve_options(ui_state, dark_mode)
     ui_state_json = json.dumps(ui_state_dict)
