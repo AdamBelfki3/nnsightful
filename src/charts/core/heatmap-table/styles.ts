@@ -47,6 +47,21 @@ export function generateHeatmapStyles(uid: string): string {
             color-scheme: dark;
         }
 
+        /* fill: fill the host's bounded box (flex column) instead of
+           shrink-wrapping content; the scroll region absorbs the overflow. */
+        ${root}.hmx-fill {
+            display: flex; width: 100%; height: 100%;
+            min-height: 0; max-width: none;
+        }
+        ${root}.hmx-fill .hmx-frame { flex: 1 1 auto; min-height: 0; }
+
+        /* bare: drop the card chrome so the grid can be embedded as a plain
+           region inside another widget (no double border/padding/shadow). */
+        ${root}.hmx-bare {
+            border: 0; box-shadow: none; padding: 0;
+            border-radius: 0; background: transparent;
+        }
+
         /* Heatmap region: fixed column header above a scrollable rows area.
            No frame outline — the rounding lives on the corner data cells
            (set inline by the renderer), so only the cells area is rounded,
