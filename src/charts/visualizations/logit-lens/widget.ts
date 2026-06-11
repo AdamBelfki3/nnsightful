@@ -464,6 +464,10 @@ export function createWidget(
     // RENDER: HEATMAP
     // ═══════════════════════════════════════════════════════════════
     function renderHeatmap() {
+        // This rebuilds scrollEl below, detaching the hovered cell; drop the
+        // stale reference so the next mousemove re-enters cleanly (no spurious
+        // clearCellPreview / leftover hover class).
+        hoverCell = null;
         const hex = baseHex();
         const dark = isDarkMode();
         // Grid separators: light "breathing room" lines on the light field,
