@@ -10,7 +10,12 @@ from nnsightful.types import (
     LogitLensMeta,
     ToolData,
 )
-from nnsightful.viz import display_activation_patching, display_line_plot, display_logit_lens
+from nnsightful.viz import (
+    display_activation_patching,
+    display_heatmap_table,
+    display_line_plot,
+    display_logit_lens,
+)
 
 __all__ = [
     "activation_patching",
@@ -23,6 +28,7 @@ __all__ = [
     "LogitLensData",
     "LogitLensMeta",
     "display_activation_patching",
+    "display_heatmap_table",
     "display_line_plot",
     "display_logit_lens",
 ]

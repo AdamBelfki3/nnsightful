@@ -1,85 +1,104 @@
+/**
+ * Styles for the generic HeatmapTable — abstracts the polished heatmap look
+ * used by the LogitLens widget: a card with a rounded, outlined cells area, a
+ * layer-style fixed column header above a scrollable rows region, sticky row
+ * labels, rounded outer corner cells, white→/dark→ramp colored cells (colors
+ * come from the data), and a foreground hover outline. Light + dark aware.
+ */
 export function generateHeatmapStyles(uid: string): string {
+    const root = `#${uid}`;
     return `
-        .heatmap-${uid} {
-            border-collapse: collapse;
-            font-size: 14px;
-            table-layout: fixed;
-        }
-        .heatmap-${uid} td, .heatmap-${uid} th {
-            border: 1px solid #ddd;
+        ${root} {
+            /* Local tokens (light) */
+            --hmx-surface: hsl(0 0% 100%);
+            --hmx-surface-2: hsl(0 0% 98%);
+            --hmx-card-border: hsl(0 0% 82%);
+            --hmx-line-faint: hsl(0 0% 93%);
+            --hmx-text: hsl(0 0% 9%);
+            --hmx-text-2: hsl(0 0% 20%);
+            --hmx-text-muted: hsl(0 0% 40%);
+            --hmx-shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+            --hmx-font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+            --hmx-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
             box-sizing: border-box;
-        }
-        .heatmap-${uid} .hm-cell {
-            height: 22px;
+            display: inline-flex; flex-direction: column;
+            max-width: 100%; min-width: 0;
+            font-family: var(--hmx-font-sans);
+            color: var(--hmx-text);
+            -webkit-font-smoothing: antialiased;
+            background: var(--hmx-surface);
+            border: 1px solid var(--hmx-card-border);
+            border-radius: 0.75rem;
+            box-shadow: var(--hmx-shadow-xs);
+            padding: 16px;
             overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            padding: 2px 4px;
-            font-family: monospace;
-            font-size: 0.9em;
-            cursor: pointer;
-            position: relative;
+            -webkit-user-select: none; user-select: none;
         }
-        .heatmap-${uid} .hm-cell:hover {
-            outline: 2px solid #e91e63;
-            outline-offset: -1px;
+        ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
+        ${root}.hmx-dark {
+            --hmx-surface: hsl(0 0% 16%);
+            --hmx-surface-2: hsl(0 0% 13%);
+            --hmx-card-border: hsl(0 0% 26%);
+            --hmx-line-faint: hsl(0 0% 24%);
+            --hmx-text: hsl(0 0% 90%);
+            --hmx-text-2: hsl(0 0% 80%);
+            --hmx-text-muted: hsl(0 0% 64%);
+            color-scheme: dark;
         }
-        .heatmap-${uid} .hm-row-header {
-            padding: 2px 8px;
-            text-align: right;
-            font-weight: 500;
-            color: #333;
-            background: #f5f5f5;
-            white-space: nowrap;
+
+        /* Heatmap region: fixed column header above a scrollable rows area.
+           No frame outline — the rounding lives on the corner data cells
+           (set inline by the renderer), so only the cells area is rounded,
+           not the axis. */
+        ${root} .hmx-frame {
+            display: flex; flex-direction: column;
+            min-width: 0; max-width: 100%;
+        }
+        ${root} .hmx-hdr-fixed { flex: 0 0 auto; overflow: hidden; }
+        ${root} .hmx-scroll {
+            flex: 1 1 auto; min-height: 0;
+            overflow: auto; min-width: 0; max-width: 100%;
+        }
+
+        ${root} .hmx-hdr-row { align-items: end; padding-bottom: 4px; }
+        ${root} .hmx-corner {
+            font-size: 10px; color: var(--hmx-text-muted);
+            text-align: right; padding-right: 8px;
+            letter-spacing: 0.04em; text-transform: uppercase;
+            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+            display: flex; align-items: flex-end; justify-content: flex-end;
+        }
+        ${root} .hmx-col {
+            text-align: center; font-family: var(--hmx-font-mono); font-size: 11px;
+            color: var(--hmx-text-muted); font-variant-numeric: tabular-nums;
+            overflow: hidden; white-space: nowrap;
+        }
+        ${root} .hmx-row { position: relative; }
+        ${root} .hmx-row-grid { cursor: default; position: relative; }
+        ${root} .hmx-rowlabel {
+            display: flex; align-items: center; justify-content: flex-end;
+            gap: 6px; padding: 0 8px; font-size: 12px; color: var(--hmx-text-2);
             overflow: hidden;
-            text-overflow: ellipsis;
-            font-family: monospace;
-            cursor: pointer;
-            position: relative;
+            -webkit-user-select: text; user-select: text;
         }
-        .heatmap-${uid} .hm-row-header:hover {
-            background: #e8e8e8;
+        ${root} .hmx-cell {
+            display: flex; align-items: center; justify-content: center;
+            min-width: 0; font-size: 11px; font-family: var(--hmx-font-mono);
+            position: relative; color: hsl(0 0% 18%);
         }
-        .heatmap-${uid} .hm-col-header {
-            padding: 4px 2px;
-            text-align: center;
-            font-weight: 500;
-            color: #666;
-            background: #f5f5f5;
-            position: relative;
+        ${root} .hmx-cell-text {
+            display: block; min-width: 0; max-width: 100%;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            -webkit-user-select: text; user-select: text;
         }
-        .heatmap-${uid} .hm-corner {
-            padding: 4px 8px;
-            text-align: right;
-            font-weight: 500;
-            color: #666;
-            background: white;
-            position: relative;
-        }
-        /* Dark mode */
-        .heatmap-${uid}.hm-dark td, .heatmap-${uid}.hm-dark th {
-            border-color: #444;
-        }
-        .heatmap-${uid}.hm-dark .hm-row-header {
-            background: #2d2d2d;
-            color: #e0e0e0;
-        }
-        .heatmap-${uid}.hm-dark .hm-row-header:hover {
-            background: #3d3d3d;
-        }
-        .heatmap-${uid}.hm-dark .hm-col-header {
-            background: #2d2d2d;
-            color: #aaa;
-        }
-        .heatmap-${uid}.hm-dark .hm-corner {
-            background: #1e1e1e;
-            color: #aaa;
-        }
+        ${root} .hmx-cell.hmx-hover { outline: 2px solid var(--hmx-text); outline-offset: -2px; z-index: 3; }
+        ${root} .hmx-lead-space { color: #3b82f6; }
     `;
 }
 
 export function injectHeatmapStyles(uid: string): HTMLStyleElement {
-    if (typeof document === 'undefined') {
+    if (typeof document === "undefined") {
         return {} as HTMLStyleElement;
     }
     const style = document.createElement("style");

@@ -5,8 +5,11 @@ import { HeatmapTableCore } from "../core/heatmap-table";
 interface HeatmapTableWidgetProps {
     data: HeatmapTableData;
     cellWidth?: number;
+    cellHeight?: number;
     rowHeaderWidth?: number;
     darkMode?: boolean;
+    showGrid?: boolean;
+    cornerLabel?: string;
     maxRows?: number | null;
     onCellHover?: (row: number, col: number) => void;
     onCellClick?: (row: number, col: number) => void;
@@ -17,8 +20,11 @@ interface HeatmapTableWidgetProps {
 export function HeatmapTableWidget({
     data,
     cellWidth = 44,
+    cellHeight,
     rowHeaderWidth = 100,
     darkMode = false,
+    showGrid,
+    cornerLabel,
     maxRows,
     onCellHover,
     onCellClick,
@@ -40,8 +46,11 @@ export function HeatmapTableWidget({
         containerRef.current.innerHTML = "";
         const options: HeatmapTableOptions = {
             cellWidth,
+            cellHeight,
             rowHeaderWidth,
             darkMode,
+            showGrid,
+            cornerLabel,
             maxRows,
             onCellHover: stableCellHover,
             onCellClick: stableCellClick,
@@ -57,9 +66,9 @@ export function HeatmapTableWidget({
     }, [data]);
 
     useEffect(() => {
-        coreRef.current?.setOptions({ cellWidth, rowHeaderWidth, darkMode, maxRows });
+        coreRef.current?.setOptions({ cellWidth, cellHeight, rowHeaderWidth, darkMode, showGrid, cornerLabel, maxRows });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [cellWidth, rowHeaderWidth, darkMode, maxRows]);
+    }, [cellWidth, cellHeight, rowHeaderWidth, darkMode, showGrid, cornerLabel, maxRows]);
 
     if (!data.rows || data.rows.length === 0) {
         return (

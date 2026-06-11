@@ -42,6 +42,9 @@ _WIDGET_ASPECT_RATIOS = {
     "logit_lens": "5 / 3",
     "activation_patching": "21 / 9",
     "line_plot": "21 / 9",
+    # heatmap_table is content-sized (its own cell/row dimensions); no outer
+    # aspect-ratio.
+    "heatmap_table": None,
 }
 
 _SENTINEL = object()
@@ -130,7 +133,14 @@ def _resolve_sizing(
 ) -> tuple[str, str | None]:
     """Resolve width and aspect-ratio against global defaults."""
     w = width or _default_width
-    ar = aspect_ratio or _default_aspect_ratio or _WIDGET_ASPECT_RATIOS[widget_key]
+    # A per-widget default of None means "content-sized": opt out of
+    # aspect-ratio boxing entirely, even when the user has set a global
+    # default. Only an explicit per-call aspect_ratio can override that.
+    widget_ar = _WIDGET_ASPECT_RATIOS.get(widget_key)
+    if widget_ar is None:
+        ar = aspect_ratio
+    else:
+        ar = aspect_ratio or _default_aspect_ratio or widget_ar
     return w, ar
 
 
@@ -191,9 +201,13 @@ def _widget_html(
         outer_style = f"width:{width};aspect-ratio:{aspect_ratio};"
         inner_style = "width:100%;height:100%;"
     else:
-        # Fallback for any widget without an aspect-ratio.
-        outer_style = f"width:{width};"
-        inner_style = "width:100%;"
+        # Fallback for any widget without an aspect-ratio (e.g. the generic
+        # heatmap table). The widget (an inline-flex card with max-width:100%)
+        # shrink-wraps to its content and scrolls a wide grid internally, so
+        # the outer just provides a definite width cap for that 100% to
+        # resolve against.
+        outer_style = f"max-width:{width};"
+        inner_style = ""
     return f"""
     <div style="{outer_style}"><div id="{cid}" style="{inner_style}"></div></div>
     <script>
@@ -429,4 +443,88 @@ def display_line_plot(
     w, ar = _resolve_sizing(width, aspect_ratio, "line_plot")
 
     html = _widget_html("LinePlotWidget", "lp", data_json, options_json, w, ar)
+    return _display_or_return(html, return_html)
+
+
+def _to_2d_list(values, cast=None) -> list[list]:
+    """Coerce a 2D array-like (numpy array, list of lists, etc.) to a plain
+    list of lists, optionally casting each element."""
+    # numpy / anything with .tolist()
+    tolist = getattr(values, "tolist", None)
+    rows = tolist() if callable(tolist) else values
+    out = []
+    for row in rows:
+        row = list(row)
+        out.append([cast(v) for v in row] if cast else row)
+    return out
+
+
+def display_heatmap_table(
+    values,
+    row_labels: list[str] | None = None,
+    col_labels: list[str] | None = None,
+    *,
+    texts=None,
+    ramp: str = "purple",
+    value_domain: tuple[float, float] | None = None,
+    cell_width: int | None = None,
+    row_header_width: int | None = None,
+    corner_label: str | None = None,
+    width: str | None = None,
+    dark_mode: bool | None = None,
+    return_html: bool = False,
+) -> HTML | None:
+    """
+    Display a generic heatmap table in a Jupyter notebook.
+
+    Args:
+        values: 2D array-like (numpy array or list of lists) of numbers that
+            drive each cell's color. Normalized to [0, 1] over `value_domain`.
+        row_labels: Labels for each row (left header). Defaults to row indices.
+        col_labels: Labels for each column (bottom header). Defaults to indices.
+        texts: Optional 2D array-like of strings shown inside the cells.
+            Defaults to the formatted numeric value.
+        ramp: Color ramp — "purple", "blue", "teal", or a "#rrggbb" hex.
+            Cells blend from the surface toward this color by value.
+        value_domain: (min, max) used to normalize `values`. Defaults to
+            (0, 1).
+        cell_width: Pixel width of each data column (default 48).
+        row_header_width: Pixel width of the row-label column (default 100).
+        corner_label: Text in the corner cell where the column header meets
+            the row labels (blank if omitted).
+        width: CSS width of the container. Defaults to global setting.
+        dark_mode: Force dark (True) or light (False) mode. When None,
+            uses the global setting, or auto-detects from the notebook theme.
+        return_html: If True, return the HTML object instead of displaying it.
+    """
+    values = _to_2d_list(values)
+    n_rows = len(values)
+    n_cols = len(values[0]) if n_rows else 0
+
+    data: dict = {
+        "values": values,
+        "rowLabels": list(row_labels) if row_labels is not None
+        else [str(i) for i in range(n_rows)],
+        "colLabels": list(col_labels) if col_labels is not None
+        else [str(j) for j in range(n_cols)],
+        "ramp": ramp,
+    }
+    if texts is not None:
+        data["texts"] = _to_2d_list(texts, str)
+    if value_domain is not None:
+        data["valueDomain"] = list(value_domain)
+    data_json = json.dumps(data)
+
+    options: dict = {}
+    if cell_width is not None:
+        options["cellWidth"] = cell_width
+    if row_header_width is not None:
+        options["rowHeaderWidth"] = row_header_width
+    if corner_label is not None:
+        options["cornerLabel"] = corner_label
+    options = _resolve_options(options, dark_mode)
+    options_json = json.dumps(options)
+
+    w, ar = _resolve_sizing(width, None, "heatmap_table")
+    html = _widget_html("HeatmapTableWidget", "hm", data_json, options_json, w, ar)
     return _display_or_return(html, return_html)

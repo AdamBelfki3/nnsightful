@@ -33,9 +33,11 @@ export interface HeatmapTableData {
 
 export interface HeatmapTableOptions {
     cellWidth?: number;
+    cellHeight?: number;
     rowHeaderWidth?: number;
     darkMode?: boolean;
     cornerLabel?: string;
+    showGrid?: boolean;
     maxRows?: number | null;
     onCellHover?: (row: number, col: number) => void;
     onCellClick?: (row: number, col: number) => void;
@@ -47,6 +49,6 @@ export interface HeatmapTableWidgetInterface extends BaseWidgetInterface<Heatmap
     setOptions: (opts: Partial<HeatmapTableOptions>) => void;
     setCellWidth: (width: number) => void;
     setRowHeaderWidth: (width: number) => void;
-    getTableElement: () => HTMLTableElement;
+    getTableElement: () => HTMLElement;
     getTableWidth: () => number;
 }
