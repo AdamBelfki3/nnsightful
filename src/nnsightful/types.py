@@ -33,6 +33,27 @@ class LogitLensData(ToolData):
         return display_logit_lens(self, **kwargs)
 
 
+class JLensMeta(BaseModel):
+    version: int = 2
+    timestamp: str
+    model: str
+
+
+class JLensData(ToolData):
+    meta: JLensMeta
+    layers: list[int]
+    input: list[str]  # Input tokens as strings (always dense, all tokens)
+    positions: list[int] | None = None  # Computed position indices; None = all
+    tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
+    topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
+    entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
+
+    def display(self, **kwargs):
+        from nnsightful.viz import display_j_lens
+
+        return display_j_lens(self, **kwargs)
+
+
 class ActivationPatchingData(ToolData):
     lines: list[list[float]]  # [token][layer] probabilities
     ranks: list[list[int]]  # [token][layer] ranks

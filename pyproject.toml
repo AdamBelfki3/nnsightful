@@ -12,6 +12,7 @@ dependencies = [
     "nnterp>=1.3.0",
     "nnsight>=0.7.0",
     "ipython",
+    "hf_xet",  # Xet client: the Jacobian lenses on the Hub are Xet-backed.
 ]
 
 [dependency-groups]
