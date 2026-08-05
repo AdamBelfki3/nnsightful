@@ -40,6 +40,8 @@ _WIDGET_ASPECT_RATIOS = {
     # exceeds the cap. Not the outer-wrapper aspect-ratio used by the other
     # widgets — see _widget_html for the dispatch.
     "logit_lens": "5 / 3",
+    # j_lens mirrors logit_lens: same widget, same height-cap behavior.
+    "j_lens": "5 / 3",
     "activation_patching": "21 / 9",
     "line_plot": "21 / 9",
     # heatmap_table is content-sized (its own cell/row dimensions); no outer
@@ -250,6 +252,21 @@ def _validate_logit_lens_data(data: dict) -> None:
         )
 
 
+_J_LENS_REQUIRED_KEYS = {"meta", "layers", "input", "tracked", "topk"}
+
+
+def _validate_j_lens_data(data: dict) -> None:
+    """Validate that data has the required JLensData keys."""
+    missing = _J_LENS_REQUIRED_KEYS - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"JLensData is missing required keys: {sorted(missing)}. "
+            f"Expected keys: {sorted(_J_LENS_REQUIRED_KEYS)}. "
+            f"Got keys: {sorted(data.keys())}. "
+            "See nnsightful.types.JLensData for the expected schema."
+        )
+
+
 _LINE_PLOT_REQUIRED_KEYS = {"lines"}
 
 
@@ -392,6 +409,85 @@ def display_logit_lens(
                 .observe(container, { childList: true, subtree: true });"""
 
     html = _widget_html("LogitLensWidget", "ll", data_json, ui_state_json, w, ar,
+                         extra_js=disable_js, use_css_vars=True)
+    return _display_or_return(html, return_html)
+
+
+def display_j_lens(
+    data: dict | BaseModel,
+    ui_state: dict | None = None,
+    width: str | None = None,
+    aspect_ratio: str | None = None,
+    dark_mode: bool | None = None,
+    full_height: bool = False,
+    return_html: bool = False,
+) -> HTML | None:
+    """
+    Display a J-lens visualization in a Jupyter notebook.
+
+    J-lens is a parallel of the logit-lens tool and shares its data format,
+    so it renders through the same widget. See ``display_logit_lens`` for the
+    full argument reference.
+
+    Args:
+        data: JLensData dict (V2 format with meta, layers, input, tracked, topk).
+        ui_state: Optional UI state dict for initial widget configuration.
+        width: CSS width applied to the heatmap viewport. Defaults to global setting.
+        aspect_ratio: CSS aspect-ratio applied to the widget root (e.g. "5 / 3").
+            Pass "none" / "auto" to opt out of the height cap. None uses the
+            package default ("5 / 3").
+        dark_mode: Force dark (True) or light (False) mode. When None, uses the
+            global setting, or auto-detects from the notebook theme.
+        full_height: If True, disable the vertical height cap so the heatmap
+            grows to show every token row without an internal scrollbar.
+        return_html: If True, return the HTML object instead of displaying it.
+    """
+    data = _to_dict(data)
+    _validate_j_lens_data(data)
+    # J-lens shares the logit-lens data format, so reuse its densifier.
+    data = _densify_logit_lens_data(data)
+    data_json = json.dumps(data)
+
+    # full_height wins over aspect_ratio: opt out of the height cap so the
+    # widget is content-driven (grows to fit all rows, no inner scroll).
+    if full_height:
+        aspect_ratio = "none"
+
+    ui_state_dict = _resolve_options(ui_state, dark_mode)
+    ui_state_json = json.dumps(ui_state_dict)
+    w, ar = _resolve_sizing(width, aspect_ratio, "j_lens")
+
+    # Gray out rows where all .pred-cell elements are empty (uncomputed positions).
+    disable_js = """
+            function disableEmptyRows(ct) {
+                var rows = ct.querySelectorAll("tr");
+                for (var i = 0; i < rows.length; i++) {
+                    var cells = rows[i].querySelectorAll(".pred-cell");
+                    if (cells.length === 0) continue;
+                    var empty = true;
+                    for (var c = 0; c < cells.length; c++) {
+                        if (cells[c].textContent.trim() !== "") { empty = false; break; }
+                    }
+                    if (empty) {
+                        rows[i].style.pointerEvents = "none";
+                        for (var c = 0; c < cells.length; c++) {
+                            cells[c].style.opacity = "0.5";
+                        }
+                    } else {
+                        rows[i].style.pointerEvents = "";
+                        for (var c = 0; c < cells.length; c++) {
+                            cells[c].style.opacity = "";
+                        }
+                    }
+                }
+            }
+            disableEmptyRows(container);
+            new MutationObserver(function() { disableEmptyRows(container); })
+                .observe(container, { childList: true, subtree: true });"""
+
+    # J-lens reuses the logit-lens widget (identical data format) until it
+    # gets its own JS widget.
+    html = _widget_html("LogitLensWidget", "jl", data_json, ui_state_json, w, ar,
                          extra_js=disable_js, use_css_vars=True)
     return _display_or_return(html, return_html)
 

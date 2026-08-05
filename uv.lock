@@ -1338,6 +1338,7 @@ name = "nnsightful"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "hf-xet" },
     { name = "ipython", version = "8.38.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "ipython", version = "9.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "ipython", version = "9.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1361,6 +1362,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "hf-xet" },
     { name = "ipython" },
     { name = "matplotlib", marker = "extra == 'plots'", specifier = ">=3.7" },
     { name = "nnsight", specifier = ">=0.7.0" },
