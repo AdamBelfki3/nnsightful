@@ -130,6 +130,70 @@ def _resolve_options(options: dict | None, dark_mode: bool | None) -> dict:
     return result
 
 
+def _expand_row_spec(spec) -> set[int]:
+    """Expand a row spec into a set of row indices.
+
+    Accepts a single int / (start, end) inclusive tuple / range, or a list
+    mixing those. Normalizing to a set makes equivalent specifications (any
+    order, overlaps, ranges vs explicit indices) collapse to the same result.
+    """
+    if spec is None:
+        return set()
+    if isinstance(spec, (int, tuple, range)):
+        spec = [spec]
+    rows: set[int] = set()
+    for item in spec:
+        if isinstance(item, bool):  # guard: bool is an int subclass
+            raise ValueError(f"Invalid row spec item: {item!r}")
+        if isinstance(item, int):
+            rows.add(item)
+        elif isinstance(item, range):
+            rows.update(item)
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            start, end = int(item[0]), int(item[1])
+            rows.update(range(start, end + 1))  # inclusive
+        else:
+            raise ValueError(
+                f"Invalid row spec item {item!r}; use ints, (start, end) "
+                "tuples, ranges, or a list of those."
+            )
+    return {r for r in rows if r >= 0}
+
+
+def _rows_to_ranges(rows: set[int]) -> list[dict]:
+    """Group a set of row indices into contiguous inclusive ranges (sorted)."""
+    out: list[dict] = []
+    for r in sorted(rows):
+        if out and r == out[-1]["end"] + 1:
+            out[-1]["end"] = r
+        else:
+            out.append({"start": r, "end": r})
+    return out
+
+
+def _apply_row_options(
+    ui_state: dict, highlight_rows=None, collapse_rows=None
+) -> None:
+    """Fold caller row options into the widget ui_state (in place).
+
+    - highlight_rows -> a single `rowHighlights` group (Design A). The widget
+      groups contiguous indices into blocks, so non-contiguous rows render as
+      separate blocks automatically.
+    - collapse_rows  -> `collapsedSections` (one section per contiguous run),
+      each initially collapsed.
+    Row indices refer to original data rows. An explicit value already present
+    in ui_state is left untouched.
+    """
+    hl = _expand_row_spec(highlight_rows)
+    if hl and "rowHighlights" not in ui_state:
+        ui_state["rowHighlights"] = [{"rows": sorted(hl)}]
+    cr = _expand_row_spec(collapse_rows)
+    if cr and "collapsedSections" not in ui_state:
+        ui_state["collapsedSections"] = [
+            {**rng, "collapsed": True} for rng in _rows_to_ranges(cr)
+        ]
+
+
 def _resolve_sizing(
     width: str | None, aspect_ratio: str | None, widget_key: str
 ) -> tuple[str, str | None]:
@@ -338,6 +402,8 @@ def display_logit_lens(
     aspect_ratio: str | None = None,
     dark_mode: bool | None = None,
     full_height: bool = False,
+    highlight_rows=None,
+    collapse_rows=None,
     return_html: bool = False,
 ) -> HTML | None:
     """
@@ -364,6 +430,14 @@ def display_logit_lens(
             grows to show every token row without an internal scrollbar
             (handy in notebooks). Equivalent to aspect_ratio="none", and
             takes precedence over any aspect_ratio passed.
+        highlight_rows: Rows to highlight (Design A band). Accepts ints,
+            (start, end) inclusive tuples, ranges, or a list mixing them.
+            Contiguous indices render as one block, gaps as separate blocks;
+            e.g. [2, 3, 4, 8, 10, 11] -> blocks 2-4, 8, 10-11. Indices are
+            original data rows.
+        collapse_rows: Rows initially hidden behind a "… N rows hidden" band
+            (click to expand). Same spec format as highlight_rows; contiguous
+            runs become one collapsible section.
         return_html: If True, return the HTML object instead of displaying it.
     """
     data = _to_dict(data)
@@ -377,6 +451,7 @@ def display_logit_lens(
         aspect_ratio = "none"
 
     ui_state_dict = _resolve_options(ui_state, dark_mode)
+    _apply_row_options(ui_state_dict, highlight_rows, collapse_rows)
     ui_state_json = json.dumps(ui_state_dict)
     w, ar = _resolve_sizing(width, aspect_ratio, "logit_lens")
 
@@ -420,6 +495,8 @@ def display_j_lens(
     aspect_ratio: str | None = None,
     dark_mode: bool | None = None,
     full_height: bool = False,
+    highlight_rows=None,
+    collapse_rows=None,
     return_html: bool = False,
 ) -> HTML | None:
     """
@@ -440,6 +517,14 @@ def display_j_lens(
             global setting, or auto-detects from the notebook theme.
         full_height: If True, disable the vertical height cap so the heatmap
             grows to show every token row without an internal scrollbar.
+        highlight_rows: Rows to highlight (Design A band). Accepts ints,
+            (start, end) inclusive tuples, ranges, or a list mixing them.
+            Contiguous indices render as one block, gaps as separate blocks;
+            e.g. [2, 3, 4, 8, 10, 11] -> blocks 2-4, 8, 10-11. Indices are
+            original data rows (prompt + generated).
+        collapse_rows: Rows initially hidden behind a "… N rows hidden" band
+            (click to expand). Same spec format as highlight_rows; contiguous
+            runs become one collapsible section.
         return_html: If True, return the HTML object instead of displaying it.
     """
     data = _to_dict(data)
@@ -453,7 +538,11 @@ def display_j_lens(
     if full_height:
         aspect_ratio = "none"
 
+    # Generated rows are styled by the widget itself (Option E, derived from the
+    # data's input/completion split). Caller row highlights/collapses are folded
+    # in here.
     ui_state_dict = _resolve_options(ui_state, dark_mode)
+    _apply_row_options(ui_state_dict, highlight_rows, collapse_rows)
     ui_state_json = json.dumps(ui_state_dict)
     w, ar = _resolve_sizing(width, aspect_ratio, "j_lens")
 

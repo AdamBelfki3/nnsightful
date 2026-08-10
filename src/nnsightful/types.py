@@ -43,6 +43,7 @@ class JLensData(ToolData):
     meta: JLensMeta
     layers: list[int]
     input: list[str]  # Input tokens as strings (always dense, all tokens)
+    completion: list[str] | None = None
     positions: list[int] | None = None  # Computed position indices; None = all
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
     topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
