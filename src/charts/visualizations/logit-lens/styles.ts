@@ -140,6 +140,29 @@ export function generateStyles(uid: string): string {
             color: var(--ll-text-muted); background: var(--ll-surface-3); letter-spacing: 0.02em;
         }
 
+        /* Generation phase (keyed by original row index, so it survives
+           collapse): generated token labels are italic only — same color as
+           every other token label. */
+        ${root} .ll-gen-row .hmx-rowlabel .hmx-cell-text { font-style: italic; }
+
+        /* On-demand fold handle (⊟) in the row-label gutter: revealed on row
+           hover, lit while it's the fold anchor. margin-right:auto pushes it to
+           the outer (left) edge so it reads as a side control and doesn't shift
+           the right-aligned token. */
+        ${root} .ll-fold-handle {
+            margin-right: auto; flex: 0 0 auto;
+            display: none; align-items: center; justify-content: center;
+            width: 15px; height: 15px; border-radius: 4px;
+            border: 1px solid var(--ll-line-2); background: var(--ll-surface);
+            color: var(--ll-text-muted); font-size: 11px; line-height: 1; cursor: pointer;
+        }
+        ${root} .hmx-row:hover .ll-fold-handle { display: inline-flex; }
+        ${root} .ll-fold-handle:hover { border-color: var(--ll-primary); color: var(--ll-primary); }
+        ${root} .ll-fold-handle.ll-armed {
+            display: inline-flex; border-color: var(--ll-primary);
+            color: var(--ll-primary); background: var(--ll-primary-061);
+        }
+
         /* ── Layer navigator ── */
         ${root} .ll-nav { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
         ${root} .ll-nav-range {

@@ -15,7 +15,7 @@
 
 import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
-import type { HeatmapTableData, HeatmapTableOptions } from "../../types/heatmap-table";
+import type { HeatmapTableData, HeatmapTableOptions, HeatmapRowHighlight, HeatmapCollapsedSection } from "../../types/heatmap-table";
 import { normalizeData, type NormalizedData } from "./normalize";
 import { generateUid, escapeHtml } from "./utils";
 import { injectStyles, applyDarkMode } from "./styles";
@@ -128,6 +128,13 @@ interface State {
     pinnedRows: number[];
     colorIndex: number;
     openPopup: { row: number; layer: number } | null;
+    // Declarative row highlights forwarded verbatim to the heatmap core — the
+    // widget stays agnostic to what they mean. Rendered by HeatmapTableCore as
+    // bands / rails / block dividers (Design A).
+    rowHighlights: HeatmapRowHighlight[];
+    // Collapsible row sections (original ranges). The widget owns the
+    // collapsed/expanded flags and flips them on the core's toggle callback.
+    collapsedSections: HeatmapCollapsedSection[];
 }
 
 export function createWidget(
@@ -177,7 +184,15 @@ export function createWidget(
         pinnedRows: (uiState?.pinnedRows ?? []).map((r) => r.pos).filter((p) => typeof p === "number"),
         colorIndex: uiState?.colorIndex ?? 0,
         openPopup: null,
+        rowHighlights: uiState?.rowHighlights ?? [],
+        // Clone so we can flip `collapsed` in place without mutating the
+        // caller's (possibly frozen) ui_state object.
+        collapsedSections: (uiState?.collapsedSections ?? []).map((s) => ({ ...s })),
     };
+
+    // Transient anchor for on-demand range folding (shift-click a row or click
+    // its ⊟ handle to set it, then again to fold the range). Not persisted.
+    let foldAnchor: number | null = null;
 
     // ── Event bus (minimal, for on/off) ──
     const listeners: Record<string, ((data: unknown) => void)[]> = {};
@@ -434,16 +449,58 @@ export function createWidget(
     function renderRowLabel(r: number): string {
         const tok = widgetData.tokens[r];
         const active = r === state.selectedRow || isPinnedRow(r);
-        let html = "";
+        // Fold affordance (shown on row hover; stays lit while it's the anchor).
+        // margin-right:auto in CSS pushes it to the outer (left) edge of the gutter.
+        let html = `<span class="ll-fold-handle${foldAnchor === r ? " ll-armed" : ""}" `
+            + `title="Fold rows: click / shift-click, then pick another row">⊟</span>`;
         if (isPinnedRow(r)) html += rowStyleMarker(lineStyleForRow(r).dash, isDarkMode());
         html += isBosToken(tok)
             ? `<span class="ll-bos-pill">bos</span>`
             : `<span class="hmx-cell-text"${active ? ' style="font-weight:600"' : ""}>${tokenInnerHTML(tok)}</span>`;
         return html;
     }
-    // Mark every row (cursor affordance) and the active one (rail + tint).
+    // Mark every row (cursor affordance), the active one (rail + tint), and
+    // generated rows (which CSS then renders with an italic token label).
     function rowClassName(r: number): string {
-        return "ll-hmx-row" + (r === state.selectedRow || isPinnedRow(r) ? " ll-hmx-active" : "");
+        return "ll-hmx-row"
+            + (r === state.selectedRow || isPinnedRow(r) ? " ll-hmx-active" : "")
+            + (isGenRow(r) ? " ll-gen-row" : "");
+    }
+
+    // First generated row = start of the data's `completion` tokens. Generated
+    // rows get an italic token label (keyed by original index, so it survives
+    // collapse/expand and coexists with highlight blocks).
+    function genStart(): number {
+        const completion = (v2Data as unknown as { completion?: string[] } | null)?.completion;
+        return completion && completion.length
+            ? widgetData.tokens.length - completion.length
+            : widgetData.tokens.length;
+    }
+    function isGenRow(r: number): boolean { return r >= genStart(); }
+
+    // On-demand row folding. Collapse an inclusive range into a new section
+    // (dropping any it overlaps); the base core renders the band + expand.
+    function addCollapsedSection(a: number, b: number) {
+        const start = Math.min(a, b), end = Math.max(a, b);
+        state.collapsedSections = state.collapsedSections
+            .filter((s) => s.end < start || s.start > end)
+            .concat({ start, end, collapsed: true })
+            .sort((x, y) => x.start - y.start);
+    }
+    // First click sets the anchor; the next folds the range (same row cancels).
+    function foldClick(row: number) {
+        if (foldAnchor === null) {
+            foldAnchor = row;
+            renderHeatmap();
+        } else if (foldAnchor === row) {
+            foldAnchor = null;
+            renderHeatmap();
+        } else {
+            addCollapsedSection(foldAnchor, row);
+            foldAnchor = null;
+            renderHeatmap();
+            emitStateChange();
+        }
     }
 
     // The options that drive the core each render. Striding/fit-to-width and
@@ -470,10 +527,29 @@ export function createWidget(
             darkMode: isDarkMode(),
             renderRowLabel,
             rowClassName,
+            rowHighlights: state.rowHighlights,
+            collapsedSections: state.collapsedSections,
+            onToggleCollapse: (idx) => {
+                const sec = state.collapsedSections[idx];
+                if (!sec) return;
+                // undefined/true → collapsed; flip to expanded and back.
+                sec.collapsed = sec.collapsed === false;
+                renderHeatmap();
+                emitStateChange();
+            },
+            onRemoveCollapse: (idx) => {
+                state.collapsedSections.splice(idx, 1);
+                renderHeatmap();
+                emitStateChange();
+            },
             onVisibleColumnsChange: (visible) => { shownLayers = visible; },
             onCellHover: onHeatmapCellHover,
             onCellClick: onHeatmapCellClick,
-            onRowHeaderClick: (row) => {
+            onRowHeaderClick: (row, ev) => {
+                // Fold gesture: the ⊟ handle, or shift-click anywhere on the row
+                // label. Plain click keeps its existing meaning (pin position).
+                const onHandle = !!(ev.target as HTMLElement).closest(".ll-fold-handle");
+                if (onHandle || ev.shiftKey) { foldClick(row); return; }
                 togglePinnedRow(row);
                 renderHeatmap();
                 updateLinePlot();
@@ -1083,6 +1159,12 @@ export function createWidget(
         showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY, cell.offsetWidth);
     };
     hmScrollEl.addEventListener("mousemove", onScrollMove);
+    // Shift-click a row label to fold — suppress the text selection it would
+    // otherwise make (which the core's click guard treats as "don't act").
+    const onScrollMouseDown = (e: MouseEvent) => {
+        if (e.shiftKey && (e.target as HTMLElement).closest(".hmx-rowlabel")) e.preventDefault();
+    };
+    hmScrollEl.addEventListener("mousedown", onScrollMouseDown);
 
     // Keyboard nav when the heatmap is focused.
     heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -1192,6 +1274,8 @@ export function createWidget(
             pinnedGroups: state.pinned.map((p) => ({ tokens: [p.token], color: p.color })),
             pinnedRows: state.pinnedRows.map((pos) => ({ pos, line: lineStyleForRow(pos).name })),
             darkMode: state.darkModeOverride,
+            rowHighlights: state.rowHighlights,
+            collapsedSections: state.collapsedSections,
         };
     }
 
@@ -1211,6 +1295,10 @@ export function createWidget(
                 state.pinnedRows = s.pinnedRows.map((r) => r.pos).filter((p) => typeof p === "number");
             }
             if (s.darkMode !== undefined) state.darkModeOverride = s.darkMode;
+            if (s.rowHighlights !== undefined) state.rowHighlights = s.rowHighlights;
+            if (s.collapsedSections !== undefined) {
+                state.collapsedSections = s.collapsedSections.map((x) => ({ ...x }));
+            }
             recomputeDerived(); // clamp the restored layer window to the data
             syncDark();
             renderAll();
@@ -1219,13 +1307,17 @@ export function createWidget(
             dataResult = normalizeData(data);
             widgetData = dataResult.normalized;
             v2Data = dataResult.v2Data;
-            // New data → drop selection, pinned tokens and pinned rows (they
-            // reference the old prompt's positions/tokens).
+            // New data → drop everything keyed to the old prompt's row indices
+            // (selection, pins, highlights, collapsed sections, and any
+            // in-progress fold), or stale ranges would land on unrelated rows.
             state.selectedRow = null;
             state.selectedLayerIdx = null;
             state.pinned = [];
             state.pinnedRows = [];
             state.colorIndex = 0;
+            state.rowHighlights = [];
+            state.collapsedSections = [];
+            foldAnchor = null;
             recomputeDerived();
             shownLayers = [];
             hmCore.setData(buildHeatmapData()); // new prompt → new rows/columns
@@ -1266,6 +1358,7 @@ export function createWidget(
             popupEl.remove();
             if (linePlot) { linePlot.destroy(); linePlot = null; }
             hmScrollEl.removeEventListener("mousemove", onScrollMove);
+            hmScrollEl.removeEventListener("mousedown", onScrollMouseDown);
             hmCore?.destroy();
             if (container) container.innerHTML = "";
         },

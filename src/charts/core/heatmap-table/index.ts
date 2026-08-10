@@ -9,6 +9,14 @@ import { injectHeatmapStyles } from "./styles";
 
 let heatmapIdCounter = 0;
 
+// Height of a collapsed-section band, px (thin — just a seam).
+const COLLAPSED_BAND_H = 16;
+// Height of an expanded section's re-collapse handle, px (matches CSS).
+const EXPANDED_TOGGLE_H = 20;
+// Vertical inset on each region tracker so adjacent regions read as separate
+// bars (a gap at every boundary) rather than one continuous rail.
+const REGION_PAD = 7;
+
 /**
  * HeatmapTableCore — a generic, reusable heatmap table abstracted from the
  * LogitLens widget's heatmap: a card with a rounded, outlined cells area, a
@@ -40,6 +48,10 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
     private resizeObserver: ResizeObserver | null = null;
     private reflowRaf = 0;
     private lastVisibleCols: number[] = [];
+    private lastRowH = 0;
+    // Set on a collapse/expand click; consumed by the next render() to keep the
+    // viewport content stable across the height change.
+    private pendingScroll: { scrollBefore: number; bandTop: number; delta: number } | null = null;
 
     constructor(container: HTMLElement, data: HeatmapTableData, options: HeatmapTableOptions = {}) {
         this.container = container;
@@ -177,12 +189,15 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         return o.cellWidth ?? 48;
     }
 
-    private resolveRowHeight(rowCount: number): number {
+    private resolveRowHeight(visibleRows: number, collapseExtraH = 0): number {
         const o = this.options;
         const base = o.cellHeight ?? 28;
-        if (o.rowSizing !== "fill" || rowCount <= 0) return base;
-        const avail = this.scrollEl.clientHeight;
-        return rowCount * base < avail ? Math.floor(avail / rowCount) : base;
+        if (o.rowSizing !== "fill" || visibleRows <= 0) return base;
+        // Only the VISIBLE rows stretch, and only into the height left after the
+        // collapse bands/handles — otherwise folding many rows leaves a gap
+        // below the grid (the few visible rows never grow to fill the space).
+        const avail = this.scrollEl.clientHeight - collapseExtraH;
+        return visibleRows * base < avail ? Math.floor(avail / visibleRows) : base;
     }
 
     private render(): void {
@@ -205,7 +220,36 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         const cellW = this.resolveCellWidth(nCols);
         const rows = this.data.rows;
         const rowCount = o.maxRows != null ? Math.min(rows.length, o.maxRows) : rows.length;
-        const rowH = this.resolveRowHeight(rowCount);
+
+        // Collapse plan: sections (inclusive ORIGINAL ranges) hidden behind a
+        // thin band unless expanded. Rows keep their original indices; a
+        // collapsed section becomes one band, an expanded one gets a re-collapse
+        // handle. `index` is the section's position in the option array (what
+        // onToggleCollapse reports). Assumed non-overlapping. Computed here (not
+        // just in the render loop) so fill sizing can account for hidden rows.
+        const sections = (o.collapsedSections ?? [])
+            .map((s, i) => ({
+                start: Math.max(0, s.start),
+                end: Math.min(rowCount - 1, s.end),
+                collapsed: s.collapsed !== false,
+                index: i,
+            }))
+            .filter((s) => s.start <= s.end)
+            .sort((a, b) => a.start - b.start);
+        const sectionAt = (r: number) => sections.find((s) => s.start === r);
+
+        // Count visible rows and the height taken by collapse bands/handles, so
+        // fill-mode stretches only the visible rows into the remaining space.
+        let visibleRowCount = 0;
+        let collapseExtraH = 0;
+        for (let r = 0; r < rowCount; ) {
+            const sec = sectionAt(r);
+            if (sec && sec.collapsed) { collapseExtraH += COLLAPSED_BAND_H; r = sec.end + 1; continue; }
+            if (sec && !sec.collapsed) collapseExtraH += EXPANDED_TOGGLE_H;
+            visibleRowCount++;
+            r++;
+        }
+        const rowH = this.resolveRowHeight(visibleRowCount, collapseExtraH);
         const tableW = rowHdrW + cellW * nCols;
         const tpl = `${rowHdrW}px repeat(${nCols}, ${cellW}px)`;
 
@@ -224,20 +268,49 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         hdr += `</div>`;
         this.hdrEl.innerHTML = hdr;
 
-        // Rows.
-        let html = `<div class="hmx-grid-inner" style="width:${tableW}px;min-width:${tableW}px;">`;
-        for (let r = 0; r < rowCount; r++) {
+        // Row highlights: map each highlighted row to its accent + run-edge
+        // flags so a contiguous set renders as one block (band + top/bottom
+        // divider) and isolated rows as single accents. The label rides the
+        // first row of each run.
+        const rowHl: Record<number, { color?: string; className?: string; top: boolean; bottom: boolean; label?: string }> = {};
+        for (const hl of o.rowHighlights ?? []) {
+            const set = new Set(hl.rows);
+            for (const r of hl.rows) {
+                const runStart = !set.has(r - 1);
+                rowHl[r] = {
+                    color: hl.color,
+                    className: hl.className,
+                    top: runStart,
+                    bottom: !set.has(r + 1),
+                    label: runStart ? hl.label : undefined,
+                };
+            }
+        }
+
+        this.lastRowH = rowH;
+
+        // One data row's markup (original index r).
+        const rowHtml = (r: number): string => {
             const rowLabel = rows[r].label;
             const extraCls = o.rowClassName?.(r);
+            const hl = rowHl[r];
+            const hlCls = hl
+                ? " hmx-row-hl" + (hl.top ? " hmx-hl-top" : "") + (hl.bottom ? " hmx-hl-bottom" : "")
+                    + (hl.className ? " " + hl.className : "")
+                : "";
+            const hlAttrs = hl
+                ? (hl.color ? ` style="--hmx-hl:${escapeHtml(hl.color)}"` : "")
+                    + (hl.label ? ` data-hl-label="${escapeHtml(hl.label)}"` : "")
+                : "";
             // When a host supplies renderRowLabel it owns the label's full
             // inner markup (so multi-element labels — a pill, a marker + text —
             // sit as direct flex children); otherwise wrap the plain token.
             const labelInner = o.renderRowLabel
                 ? o.renderRowLabel(r)
                 : `<span class="hmx-cell-text">${tokenInnerHTML(rowLabel)}</span>`;
-            html += `<div class="hmx-row${extraCls ? " " + extraCls : ""}" data-rowwrap="${r}">`;
-            html += `<div class="hmx-row-grid" style="display:grid;grid-template-columns:${tpl};height:${rowH}px;">`;
-            html += `<div class="hmx-rowlabel" data-row="${r}" title="${escapeHtml(rowLabel)}">${labelInner}</div>`;
+            let s = `<div class="hmx-row${extraCls ? " " + extraCls : ""}${hlCls}" data-rowwrap="${r}"${hlAttrs}>`;
+            s += `<div class="hmx-row-grid" style="display:grid;grid-template-columns:${tpl};height:${rowH}px;">`;
+            s += `<div class="hmx-rowlabel" data-row="${r}" title="${escapeHtml(rowLabel)}">${labelInner}</div>`;
             for (let di = 0; di < nCols; di++) {
                 const c = visibleCols[di];
                 const cell = this.data.getCellValue(r, c);
@@ -252,15 +325,95 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 else if (top && right) radius = "border-top-right-radius:8px;";
                 else if (bot && left) radius = "border-bottom-left-radius:8px;";
                 else if (bot && right) radius = "border-bottom-right-radius:8px;";
-                html += `<div class="hmx-cell${cell.className ? " " + cell.className : ""}" data-row="${r}" data-col="${c}" `
+                s += `<div class="hmx-cell${cell.className ? " " + cell.className : ""}" data-row="${r}" data-col="${c}" `
                     + `style="background:${cell.color};color:${cell.textColor};padding:0 6px;${op}${grid}${ring}${bold}${radius}">`
                     + `<span class="hmx-cell-text">${tokenInnerHTML(cell.text)}</span>`
                     + `</div>`;
             }
-            html += `</div></div>`;
+            s += `</div></div>`;
+            return s;
+        };
+
+        // Region trackers (e.g. prompt / generation): a rail + rotated label in
+        // the left gutter spanning each row range. Extents are measured from the
+        // rendered layout below, so they follow rows as they collapse/expand.
+        const regions = (o.rowRegions ?? []).filter((reg) => reg.start <= reg.end);
+        const regionExt = regions.map(() => ({ top: -1, bottom: -1 }));
+        const coverY = (lo: number, hi: number, yStart: number, yEnd: number) => {
+            for (let i = 0; i < regions.length; i++) {
+                if (hi >= regions[i].start && lo <= regions[i].end) {
+                    if (regionExt[i].top < 0) regionExt[i].top = yStart;
+                    regionExt[i].bottom = yEnd;
+                }
+            }
+        };
+
+        // Rows interleaved with collapse bands, in original-index order.
+        let html = `<div class="hmx-grid-inner" style="width:${tableW}px;min-width:${tableW}px;">`;
+        let y = 0;
+        for (let r = 0; r < rowCount; ) {
+            const sec = sectionAt(r);
+            if (sec && sec.collapsed) {
+                const count = sec.end - sec.start + 1;
+                // Accent the band if it hides highlighted rows, so that cue
+                // isn't lost while collapsed.
+                let hlColor: string | undefined;
+                let hidesHl = false;
+                for (let hr = sec.start; hr <= sec.end; hr++) {
+                    if (rowHl[hr]) { hidesHl = true; hlColor = rowHl[hr].color; break; }
+                }
+                const plural = count === 1 ? "" : "s";
+                html += `<div class="hmx-collapsed${hidesHl ? " hmx-collapsed-hl" : ""}" data-cs="${sec.index}" data-count="${count}" `
+                    + `style="width:${tableW}px;min-width:${tableW}px;height:${COLLAPSED_BAND_H}px;${hlColor ? `--hmx-hl:${escapeHtml(hlColor)};` : ""}" `
+                    + `title="Click to show ${count} hidden row${plural}">`
+                    + `<span class="hmx-collapsed-inner">… ${count} row${plural} hidden</span>`
+                    + `</div>`;
+                coverY(sec.start, sec.end, y, y + COLLAPSED_BAND_H);
+                y += COLLAPSED_BAND_H;
+                r = sec.end + 1;
+                continue;
+            }
+            if (sec && !sec.collapsed) {
+                const count = sec.end - sec.start + 1;
+                html += `<div class="hmx-expanded-toggle" data-cs="${sec.index}" data-count="${count}" `
+                    + `style="width:${tableW}px;min-width:${tableW}px;" title="Collapse these ${count} rows">`
+                    + `<span>⌃ collapse ${count} row${count === 1 ? "" : "s"}</span>`
+                    + `<span class="hmx-toggle-x" title="Remove — keep these rows expanded">×</span>`
+                    + `</div>`;
+                y += EXPANDED_TOGGLE_H;
+            }
+            html += rowHtml(r);
+            coverY(r, r, y, y + rowH);
+            y += rowH;
+            r++;
+        }
+        // Region rails + labels — absolute within the (scrolling) grid-inner.
+        for (let i = 0; i < regions.length; i++) {
+            const ext = regionExt[i];
+            if (ext.top < 0 || ext.bottom <= ext.top) continue;
+            const reg = regions[i];
+            const colorVar = reg.color ? `--hmx-region:${escapeHtml(reg.color)};` : "";
+            // Inset so adjacent regions have a clear gap (not one continuous bar).
+            const rt = ext.top + REGION_PAD;
+            const rh = Math.max(0, ext.bottom - ext.top - 2 * REGION_PAD);
+            if (rh <= 0) continue;
+            html += `<div class="hmx-region-rail" style="top:${rt}px;height:${rh}px;${colorVar}"></div>`;
+            if (reg.label) {
+                html += `<div class="hmx-region-label" style="top:${rt}px;height:${rh}px;${colorVar}">`
+                    + `${escapeHtml(reg.label)}</div>`;
+            }
         }
         html += `</div>`;
         this.scrollEl.innerHTML = html;
+
+        // Apply a pending scroll adjustment from a collapse/expand toggle so the
+        // content the user was looking at stays put (shift only when the toggled
+        // band sat above the viewport top; otherwise keep the offset).
+        if (this.pendingScroll) {
+            const { scrollBefore, bandTop, delta } = this.pendingScroll;
+            this.pendingScroll = null;
+            this.scrollEl.scrollTop = Math.max(0, bandTop < scrollBefore ? scrollBefore + delta : scrollBefore);
+        }
 
         // Notify the host when the visible column set changes (navigator sync).
         if (o.onVisibleColumnsChange && !sameArray(visibleCols, this.lastVisibleCols)) {
@@ -291,6 +444,35 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             // Don't fire actions if the click ended a text selection (copy).
             if (!(window.getSelection()?.isCollapsed ?? true)) return;
             const target = e.target as HTMLElement;
+            // Collapse band (expand) or expanded-section handle (collapse).
+            const band = target.closest(".hmx-collapsed, .hmx-expanded-toggle") as HTMLElement | null;
+            if (band) {
+                const idx = parseInt(band.dataset.cs!);
+                // The × on an expanded handle removes the section entirely
+                // (rows stay expanded, no band/handle).
+                if (target.closest(".hmx-toggle-x")) {
+                    this.pendingScroll = {
+                        scrollBefore: this.scrollEl.scrollTop,
+                        bandTop: band.offsetTop,
+                        delta: -band.offsetHeight,
+                    };
+                    this.options.onRemoveCollapse?.(idx);
+                    return;
+                }
+                const count = parseInt(band.dataset.count || "0");
+                const expanding = band.classList.contains("hmx-collapsed");
+                const rowH = this.lastRowH || 28;
+                // Record scroll bookkeeping; the widget's re-render (setOptions)
+                // consumes it in render(). Approximate the height delta by the
+                // rows' height (the small band height is negligible).
+                this.pendingScroll = {
+                    scrollBefore: this.scrollEl.scrollTop,
+                    bandTop: band.offsetTop,
+                    delta: expanding ? count * rowH : -count * rowH,
+                };
+                this.options.onToggleCollapse?.(idx);
+                return;
+            }
             const label = target.closest(".hmx-rowlabel") as HTMLElement | null;
             if (label) { this.options.onRowHeaderClick?.(parseInt(label.dataset.row!), e); return; }
             const cell = target.closest(".hmx-cell") as HTMLElement | null;

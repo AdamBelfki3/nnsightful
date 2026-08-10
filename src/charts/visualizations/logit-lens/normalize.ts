@@ -40,7 +40,12 @@ export function normalizeData(data: LogitLensData): NormalizeResult {
     }
 
     const nLayers = data.layers.length;
-    const nPositions = data.input.length;
+    // Rows span the prompt (`input`) plus any generated tokens (`completion`);
+    // the lens data (tracked/topk/entropy) is indexed over this full sequence.
+    const tokens = data.completion && data.completion.length
+        ? [...data.input, ...data.completion]
+        : data.input;
+    const nPositions = tokens.length;
     const cells: CellData[][] = [];
 
     for (let pos = 0; pos < nPositions; pos++) {
@@ -71,7 +76,7 @@ export function normalizeData(data: LogitLensData): NormalizeResult {
 
     const normalized: NormalizedData = {
         layers: data.layers,
-        tokens: data.input,
+        tokens,
         cells,
         meta: (data.meta as Record<string, unknown>) || {},
     };

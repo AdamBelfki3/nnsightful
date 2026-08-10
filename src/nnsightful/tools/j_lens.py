@@ -120,18 +120,17 @@ class JLensTool(Tool):
     # ----- JLENS IMPLEMENTATION ---------------------------------------------
 
     def _format(
-        self, 
+        self,
         logits: torch.Tensor,
         model: StandardizedTransformer,
-        prompt,
+        input_ids,
         top_k: int = 5,
-        include_entropy: bool=True
+        include_entropy: bool=True,
+        results: Optional[dict[Any, Any]]=None,
     ) -> dict[Any, Any]:
-
-        # AXIS LABELS + TICKS
         input_tokens = [
-            str(model.tokenizer.decode(token)) # TOKENIZE THE INPUT PROMPT
-            for token in model.tokenizer.encode(prompt)
+            str(model.tokenizer.decode(token))
+            for token in input_ids
         ]
         layers = list(range(model.num_layers))
         positions = list(range(len(input_tokens)))
@@ -146,8 +145,6 @@ class JLensTool(Tool):
 
         probs = torch.nn.functional.softmax(logits, dim=-1)
 
-        logits.to('cpu') # free memory
-
         _, top_indices = torch.topk(probs, k=top_k, dim=-1)
 
         # TOP-K
@@ -161,24 +158,37 @@ class JLensTool(Tool):
         probs = probs.permute(1, 2, 0)
         trajectories = [{model.tokenizer.decode(token): torch.round(probs[pos_idx][token], decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
 
-        return (
-            {
-                "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
-                "layers": layers,
-                "input": input_tokens,
-                "tracked": trajectories,
-                "topk": topks,
-                "entropy": entropy,
-                "positions": positions
-            }
-        )
+        step = {
+            "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
+            "layers": layers,
+            "input": input_tokens,
+            "tracked": trajectories,
+            "topk": topks,
+            "entropy": entropy,
+            "positions": positions,
+        }
+
+        if results is None:
+            return step
+
+        results["input"].extend(step["input"])
+        results["tracked"].extend(step["tracked"])
+        for l_idx in range(len(results["topk"])):
+            results["topk"][l_idx].extend(step["topk"][l_idx])
+        if results["entropy"] is not None and step["entropy"] is not None:
+            for l_idx in range(len(results["entropy"])):
+                results["entropy"][l_idx].extend(step["entropy"][l_idx])
+        results["positions"] = list(range(len(results["input"])))
+        return results
 
     def _run(
         self,
         model: StandardizedTransformer,
         prompt: str,
         *args,
-        jacobians: dict[int, torch.Tensor]={},
+        jacobians: Optional[dict[int, torch.Tensor]]=None,
+        max_new_tokens: int=1,
+        generate_kwargs: Optional[dict]=None,
         remote: bool=False,
         backend: Optional=None,
         non_blocking=False,
@@ -186,40 +196,69 @@ class JLensTool(Tool):
         post_transform: Optional[Callable]=None,
         **kwargs
     ) -> torch.Tensor|dict[Any, Any]|Any:
-        """Run j-lens: project each layer's output through its Jacobian lens.
+        """Run j-lens over ``max_new_tokens`` generation steps.
+
+        The lens is applied at every forward pass of ``model.generate``: the
+        prefill pass covers all prompt positions, and each subsequent decode
+        pass contributes the one newly generated position. Their per-position
+        logits are concatenated so the result spans the whole prompt + generated
+        sequence — i.e. ``max_new_tokens=1`` reproduces the old single-pass
+        behavior over the prompt.
 
         When ``jacobians`` is not supplied, the lens for ``model.repo_id`` is
         resolved and loaded automatically (raising ``ValueError`` if the model
         has none). Callers may pass a preloaded ``{layer_index: tensor}`` mapping
-        to skip that lookup. Returns the formatted j-lens payload, or — when
-        ``remote and non_blocking`` — the NDIF job id to poll.
+        to skip that lookup, extra ``generate_kwargs`` (e.g. sampling options)
+        for the generation, and get back the formatted j-lens payload — or, when
+        ``remote and non_blocking``, the NDIF job id to poll.
         """
-        if jacobians == {}:
+        # Fresh dict per call — never a shared mutable default, or a previous
+        # model's Jacobians would leak into the next call on this singleton.
+        if jacobians is None:
+            jacobians = {}
+        if not jacobians:
             lens_config = JLensTool.get_lens_config(model.repo_id)
 
+        gen_kwargs = {"max_new_tokens": max_new_tokens, **(generate_kwargs or {})}
+
         with torch.no_grad():
-            with model.trace(prompt, remote=remote, backend=backend) as tracer:
-                if jacobians == {}:
+            with model.generate(prompt, **gen_kwargs, remote=remote, backend=backend) as tracer:
+                if not jacobians:
                     repo_id, filename = lens_config
                     jacobians.update(JLensTool.load_jacobians(filename, repo_id))
 
-                all_logits = list()
-                for l_idx in range(model.num_layers - 1):
-                    res = model.layers_output[l_idx]
-                    jac = jacobians[l_idx].to(device=res.device)
-                    inter = res @ jac.T.to(res.dtype)
-                    all_logits.append(model.project_on_vocab(inter))
+                gen_logits = list() #[num_layers, seq, vocab]
+                for _ in tracer.all():
+                    step_logits = list()
+                    for l_idx in range(model.num_layers - 1):
+                        res = model.layers_output[l_idx]
+                        jac = jacobians[l_idx].to(device=res.device)
+                        inter = res @ jac.T.to(res.dtype)
+                        step_logits.append(model.project_on_vocab(inter))
+                    step_logits.append(model.project_on_vocab(model.layers_output[-1]))
+                    gen_logits.append(torch.cat(step_logits, dim=0))
 
-                all_logits.append(model.project_on_vocab(model.layers_output[-1]))
-
-                all_logits = torch.cat(all_logits, dim=0)
+                # Full token sequence (prompt + generated) for position labels.
+                output_ids = model.generator.output
 
                 if raw:
-                    results = all_logits.to('cpu').save()
+                    results =  torch.cat([step for step in gen_logits], dim=1).cpu().save() # [layer, pos, vocab]
                 else:
-                    results = self._format(all_logits, model, prompt, **kwargs)
+                    input_ids = output_ids[0].tolist()
+                    results = None
+                    offset = 0
+                    for step in gen_logits:
+                        seq = step.shape[1]
+                        step_ids = input_ids[offset : offset + seq]
+                        offset += seq
+                        results = self._format(step, model, step_ids, results=results, **kwargs)
 
-                results.save()
+                    prompt_len = int(gen_logits[0].shape[1])
+                    results["completion"] = results["input"][prompt_len:]
+                    results["input"] = results["input"][:prompt_len]
+                    results["positions"] = None
+
+                    results = results.save()
 
         if remote and non_blocking:
             return backend.job_id

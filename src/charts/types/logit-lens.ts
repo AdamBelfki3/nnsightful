@@ -11,6 +11,10 @@ export interface LogitLensData {
     };
     layers: number[];
     input: string[];
+    /** Generated token strings (parallel to `input`). When present, the full
+     *  row sequence is `input + completion`; the widget derives the
+     *  prompt/generation split — and a highlight — from the two lengths. */
+    completion?: string[];
     tracked: Record<string, number[]>[];
     topk: string[][][];
     entropy?: number[][];
@@ -59,6 +63,12 @@ export interface LogitLensUIState {
     viewSize?: number;
     // Note: pinned trajectories round-trip through `pinnedGroups` +
     // `colorIndex` (declared above) — each pin is a single-token group.
+    // Declarative row highlights, forwarded verbatim to the heatmap core (bands
+    // / rails / block dividers, "Design A"). Generic — a host marks any rows.
+    rowHighlights?: import("./heatmap-table").HeatmapRowHighlight[];
+    // Collapsible row sections (original ranges). The widget owns the
+    // collapsed/expanded flags; this persists the current state.
+    collapsedSections?: import("./heatmap-table").HeatmapCollapsedSection[];
 }
 
 /**

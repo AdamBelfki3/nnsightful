@@ -89,6 +89,23 @@ export function generateHeatmapStyles(uid: string): string {
             color: var(--hmx-text-muted); font-variant-numeric: tabular-nums;
             overflow: hidden; white-space: nowrap;
         }
+        ${root} .hmx-grid-inner { position: relative; }
+        /* Region trackers (rail + rotated label) — sit in the left gutter and
+           scroll with the rows (children of grid-inner). Position/height are
+           set inline from the measured layout. */
+        ${root} .hmx-region-rail {
+            position: absolute; left: 6px; width: 3px; border-radius: 3px;
+            background: var(--hmx-region, var(--hmx-text-faint)); pointer-events: none;
+        }
+        ${root} .hmx-region-label {
+            position: absolute; left: 12px; width: 13px;
+            display: flex; align-items: center; justify-content: center;
+            writing-mode: vertical-rl; transform: rotate(180deg);
+            font-family: var(--hmx-font-sans); font-size: 9px; font-weight: 600;
+            letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap;
+            color: var(--hmx-region, var(--hmx-text-faint)); pointer-events: none;
+            overflow: hidden;
+        }
         ${root} .hmx-row { position: relative; }
         ${root} .hmx-row-grid { cursor: default; position: relative; }
         ${root} .hmx-rowlabel {
@@ -109,6 +126,62 @@ export function generateHeatmapStyles(uid: string): string {
         }
         ${root} .hmx-cell.hmx-hover { outline: 2px solid var(--hmx-text); outline-offset: -2px; z-index: 3; }
         ${root} .hmx-lead-space { color: #3b82f6; }
+
+        /* ── Row highlights (declarative rowHighlights) ──
+           Just a faint accent band on each highlighted row, plus an optional
+           caption chip on the block's first row — no rail, no block-edge
+           dividers. --hmx-hl carries the per-highlight accent (falls back to
+           amber). Agnostic to meaning. (The hmx-hl-top/bottom run-edge flags
+           are still emitted so the label can ride the block's first row.) */
+        ${root} .hmx-row-hl { --hmx-hl: #f59e0b; }
+        ${root}.hmx-dark .hmx-row-hl { --hmx-hl: #fbbf24; }
+        ${root} .hmx-row-hl .hmx-row-grid {
+            background: color-mix(in srgb, var(--hmx-hl) 12%, transparent);
+        }
+        ${root} .hmx-row-hl[data-hl-label]::after {
+            content: attr(data-hl-label);
+            position: absolute; left: 6px; top: 0; transform: translateY(-50%);
+            font-family: var(--hmx-font-sans); font-size: 9px; font-weight: 600;
+            letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;
+            color: #fff; background: var(--hmx-hl);
+            padding: 1px 5px; border-radius: 999px; z-index: 4; pointer-events: none;
+        }
+
+        /* ── Collapsed-row band + expanded-section handle ──
+           A thin clickable band that stands in for a hidden row range, and a
+           smaller handle above an expanded section to re-collapse it. Both keep
+           original row indices intact — they're purely a rendering stand-in. */
+        ${root} .hmx-collapsed {
+            display: flex; align-items: center; position: relative; cursor: pointer;
+            background: var(--hmx-surface-2); color: var(--hmx-text-muted);
+            border-top: 1px solid var(--hmx-card-border);
+            border-bottom: 1px solid var(--hmx-card-border);
+            font-family: var(--hmx-font-sans); font-size: 9.5px; letter-spacing: 0.02em;
+            -webkit-user-select: none; user-select: none;
+        }
+        ${root} .hmx-collapsed:hover { background: var(--hmx-surface); color: var(--hmx-text); }
+        ${root} .hmx-collapsed-inner { padding: 0 12px; letter-spacing: 0.02em; }
+        /* Accent rail when the collapsed rows include a highlight. */
+        ${root} .hmx-collapsed-hl::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+            width: 3px; background: var(--hmx-hl, #f59e0b);
+        }
+        /* Match the collapsed band (.hmx-collapsed / COLLAPSED_BAND_H) exactly —
+           same 16px height, 9.5px sans, and sentence case (no uppercase). */
+        ${root} .hmx-expanded-toggle {
+            display: flex; align-items: center; height: 16px; cursor: pointer;
+            padding: 0 12px; color: var(--hmx-text-muted);
+            font-family: var(--hmx-font-sans); font-size: 9.5px;
+            letter-spacing: 0.02em;
+            -webkit-user-select: none; user-select: none;
+        }
+        ${root} .hmx-expanded-toggle:hover { color: var(--hmx-text); }
+        /* × on the right removes the section entirely. */
+        ${root} .hmx-toggle-x {
+            margin-left: auto; padding: 0 4px; font-size: 14px; line-height: 1;
+            color: var(--hmx-text-muted); cursor: pointer;
+        }
+        ${root} .hmx-toggle-x:hover { color: var(--hmx-text); }
     `;
 }
 
