@@ -15,6 +15,20 @@ export interface HeatmapColumn {
     value: number;
 }
 
+/** A declarative highlight over a set of rows. Contiguous indices render as a
+ *  single block (band + top/bottom divider); isolated indices as single-row
+ *  accents. Domain-agnostic — the host says which rows and how they look. */
+export interface HeatmapRowHighlight {
+    /** Row indices to highlight (any set; the core groups contiguous runs). */
+    rows: number[];
+    /** Accent color for the band tint, left rail, and block dividers. */
+    color?: string;
+    /** Optional caption shown at each contiguous run's first row. */
+    label?: string;
+    /** Extra class on each highlighted row wrapper (host styling escape hatch). */
+    className?: string;
+}
+
 export interface HeatmapCellData {
     text: string;
     value: number;
@@ -43,6 +57,29 @@ export interface HeatmapTableData {
 export interface HeatmapColumnWindow {
     start: number;
     size: number;
+}
+
+/** A contiguous range of rows (inclusive, ORIGINAL indices) that can be hidden
+ *  behind a thin "… N rows hidden" band. `collapsed` defaults true; false shows
+ *  the rows with a re-collapse handle. The host owns the collapsed/expanded
+ *  state (the core renders it and fires onToggleCollapse when a band/handle is
+ *  clicked). Row indices always refer to original data rows, never visible
+ *  positions. */
+export interface HeatmapCollapsedSection {
+    start: number;
+    end: number;
+    collapsed?: boolean;
+}
+
+/** A labelled tracker for a contiguous run of rows (inclusive, ORIGINAL
+ *  indices) — a thin rail + rotated label in the left gutter spanning the
+ *  region. The core measures its extent from the rendered layout, so it stays
+ *  correct as rows within it collapse/expand. */
+export interface HeatmapRowRegion {
+    start: number;
+    end: number;
+    label?: string;
+    color?: string;
 }
 
 export interface HeatmapTableOptions {
@@ -100,12 +137,33 @@ export interface HeatmapTableOptions {
     /** Extra class(es) on a row's wrapper — host CSS can then draw an active
      *  rail, selection tint, etc. without the core knowing the semantics. */
     rowClassName?: (row: number) => string;
+    /** Declarative highlights over rows — the core renders a band, left rail,
+     *  block-edge dividers, and an optional label for each (see
+     *  HeatmapRowHighlight). Agnostic to what the rows mean. */
+    rowHighlights?: HeatmapRowHighlight[];
+    /** Row ranges (original indices) hidden behind a collapsed band unless
+     *  expanded. The host owns collapsed/expanded state; array index identifies
+     *  a section in onToggleCollapse. */
+    collapsedSections?: HeatmapCollapsedSection[];
+    /** Labelled trackers over row ranges (rail + rotated label in the left
+     *  gutter). Collapse-responsive; the host should widen rowHeaderWidth to
+     *  leave gutter space. */
+    rowRegions?: HeatmapRowRegion[];
 
     // ── Interaction ────────────────────────────────────────────────
     onCellHover?: (row: number, col: number, ev: MouseEvent) => void;
     onCellClick?: (row: number, col: number, ev: MouseEvent) => void;
     onRowHeaderClick?: (row: number, ev: MouseEvent) => void;
     onCellLeave?: () => void;
+    /** Fired when a collapsed band (expand) or an expanded section's handle
+     *  (collapse) is clicked — argument is the section's index in
+     *  collapsedSections. The host flips that section's `collapsed` and
+     *  re-renders; the core preserves scroll across the toggle. */
+    onToggleCollapse?: (sectionIndex: number) => void;
+    /** Fired when the × on an expanded section's handle is clicked — the host
+     *  should drop that section (index into collapsedSections) so the rows stay
+     *  expanded with no band/handle. */
+    onRemoveCollapse?: (sectionIndex: number) => void;
 }
 
 export interface HeatmapTableWidgetInterface extends BaseWidgetInterface<HeatmapTableData> {
