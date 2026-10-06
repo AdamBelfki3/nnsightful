@@ -79,6 +79,13 @@ class LogitLensTool(Tool):
             top_k: int = 5,
             include_entropy: bool=True
         ) -> dict[Any, Any]:
+            """Format ``[layer, pos, vocab]`` lens logits.
+
+            Overwrites ``logits`` in place: at full-vocab width a single copy
+            of this tensor is a sizable share of a model's memory budget on
+            NDIF, so the softmax and entropy reuse it instead of allocating
+            their own. Peak is the input plus one buffer for the probabilities.
+            """
 
             # AXIS LABELS + TICKS
             input_tokens = [
@@ -88,19 +95,30 @@ class LogitLensTool(Tool):
             layers = list(range(model.num_layers))
             positions = list(range(len(input_tokens)))
 
-            # ENTROPY: entropy[l_idx][pos]
+            # Softmax preserves order, so rank the untouched logits: same tokens,
+            # without the rounding the probabilities pick up in half precision.
+            _, top_indices = torch.topk(logits, k=top_k, dim=-1)
+
+            # Softmax by hand so every full-size step but one is in place.
+            # z = logits - max(logits), written into the input.
+            z = logits.sub_(logits.amax(dim=-1, keepdim=True))
+            # The one extra full-size buffer. exp writes into it through out=
+            # because NDIF runs traces under torch.autocast, which would
+            # otherwise return half-precision input's exp in float32 (2x size);
+            # out= and in-place ops are exempt, as are calls given dtype=.
+            probs = torch.exp(z, out=torch.empty_like(z))
+            # Accumulate in float32, as torch.softmax does for half inputs.
+            denom = probs.sum(dim=-1, keepdim=True, dtype=torch.float32)
+            probs.div_(denom)
+
+            # ENTROPY: entropy[l_idx][pos] = -sum(p * log p), log p = z - log(denom)
             if include_entropy:
-                log_p = torch.nn.functional.log_softmax(logits, dim=-1)
-                p = log_p.exp()
-                entropy = torch.round(-(p * log_p).sum(dim=-1), decimals=3).tolist()
+                log_p = z.sub_(denom.log())
+                entropy = log_p.mul_(probs).sum(dim=-1, dtype=torch.float32).neg_()
+                entropy = torch.round(entropy, decimals=3).tolist()
             else:
                 entropy = None
 
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-
-            logits.to('cpu') # free memory
-
-            _, top_indices = torch.topk(probs, k=top_k, dim=-1)
 
             # TOP-K
             topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
