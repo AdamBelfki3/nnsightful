@@ -130,7 +130,7 @@ class LogitLensTool(Tool):
                 all_logits = list()
 
                 for l_idx in range(model.num_layers):
-                    all_logits.append(model.project_on_vocab(model.layers_output[l_idx]))
+                    all_logits.append(model.project_on_vocab(model.layers[l_idx].layer_output))
 
                 all_logits = torch.cat(all_logits, dim=0)
 

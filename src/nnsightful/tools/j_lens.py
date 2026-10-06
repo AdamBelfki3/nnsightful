@@ -219,7 +219,14 @@ class JLensTool(Tool):
         if not jacobians:
             lens_config = JLensTool.get_lens_config(model.repo_id)
 
-        gen_kwargs = {"max_new_tokens": max_new_tokens, **(generate_kwargs or {})}
+        # The lens loop below is bounded to max_new_tokens steps, and nnsight
+        # discards the code after a loop that asks for a step the run never
+        # makes. Hold the run to that count so an early EOS can't cut it short.
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": max_new_tokens,
+            **(generate_kwargs or {}),
+        }
 
         with torch.no_grad():
             with model.generate(prompt, **gen_kwargs, remote=remote, backend=backend) as tracer:
@@ -228,18 +235,21 @@ class JLensTool(Tool):
                     jacobians.update(JLensTool.load_jacobians(filename, repo_id))
 
                 gen_logits = list() #[num_layers, seq, vocab]
-                for _ in tracer.all():
+                # One step per forward pass: the prefill, then each decode.
+                # Bounded rather than tracer.all(), which ends by overrunning
+                # the run and so skips everything after the loop.
+                for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
                     step_logits = list()
                     for l_idx in range(model.num_layers - 1):
-                        res = model.layers_output[l_idx]
+                        res = model.layers[l_idx].layer_output
                         jac = jacobians[l_idx].to(device=res.device)
                         inter = res @ jac.T.to(res.dtype)
                         step_logits.append(model.project_on_vocab(inter))
-                    step_logits.append(model.project_on_vocab(model.layers_output[-1]))
+                    step_logits.append(model.project_on_vocab(model.layers[-1].layer_output))
                     gen_logits.append(torch.cat(step_logits, dim=0))
 
                 # Full token sequence (prompt + generated) for position labels.
-                output_ids = model.generator.output
+                output_ids = tracer.result
 
                 if raw:
                     results =  torch.cat([step for step in gen_logits], dim=1).cpu().save() # [layer, pos, vocab]
