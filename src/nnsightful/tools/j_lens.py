@@ -245,17 +245,17 @@ class JLensTool(Tool):
 
                 gen_logits = list() #[num_layers, seq, vocab]
                 for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
-                    step_logits = None # [num_layers, seq, vocab]
+                    step_logits = torch.empty(
+                        (model.num_layers, model.input_size[1], model.vocab_size),
+                        dtype=model.lm_head.weight.dtype,
+                        device=model.lm_head.weight.device,
+                    ) # [num_layers, seq, vocab]
                     for l_idx in range(model.num_layers):
                         res = model.layers[l_idx].layer_output
                         if l_idx < model.num_layers - 1:
                             jac = jacobians[l_idx].to(device=res.device)
                             res = res @ jac.T.to(res.dtype)
-                        layer_logits = model.project_on_vocab(res)
-                        if step_logits is None:
-                            step_logits = layer_logits.new_empty((model.num_layers, *layer_logits.shape[1:]))
-                        step_logits[l_idx] = layer_logits[0]
-                    del res, layer_logits
+                        step_logits[l_idx] = model.project_on_vocab(res)[0]
                     gen_logits.append(step_logits)
 
                 # Full token sequence (prompt + generated) for position labels.
