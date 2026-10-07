@@ -130,10 +130,9 @@ class JLensTool(Tool):
     ) -> dict[Any, Any]:
         """Format one step's ``[layer, pos, vocab]`` lens logits.
 
-        Overwrites ``logits`` in place: at full-vocab width a single copy of
-        this tensor is a sizable share of a model's memory budget on NDIF, so
-        the softmax and entropy reuse it instead of allocating their own.
-        Peak is the input plus one buffer for the probabilities.
+        Overwrites ``logits`` with the probabilities, then with ``p * log p``:
+        at full-vocab width a second tensor this size is a sizable share of a
+        model's memory budget on NDIF, so nothing here allocates one.
         """
         input_tokens = [
             str(model.tokenizer.decode(token))
@@ -142,30 +141,16 @@ class JLensTool(Tool):
         layers = list(range(model.num_layers))
         positions = list(range(len(input_tokens)))
 
-        # Softmax preserves order, so rank the untouched logits: same tokens,
-        # without the rounding the probabilities pick up in half precision.
+        # Softmax preserves order, so rank the logits rather than rounded probabilities.
         _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
-        # Softmax by hand so every full-size step but one is in place.
-        # z = logits - max(logits), written into the input.
-        z = logits.sub_(logits.amax(dim=-1, keepdim=True))
-        # The one extra full-size buffer. exp writes into it through out=
-        # because NDIF runs traces under torch.autocast, which would
-        # otherwise return half-precision input's exp in float32 (2x size);
-        # out= and in-place ops are exempt, as are calls given dtype=.
-        probs = torch.exp(z, out=torch.empty_like(z))
-        # Accumulate in float32, as torch.softmax does for half inputs.
-        denom = probs.sum(dim=-1, keepdim=True, dtype=torch.float32)
-        probs.div_(denom)
-
-        # ENTROPY: entropy[l_idx][pos] = -sum(p * log p), log p = z - log(denom)
-        if include_entropy:
-            log_p = z.sub_(denom.log())
-            entropy = log_p.mul_(probs).sum(dim=-1, dtype=torch.float32).neg_()
-            entropy = torch.round(entropy, decimals=3).tolist()
-        else:
-            entropy = None
-
+        # Softmax one layer at a time, written back over the logits, so the only
+        # extra buffer is one layer's worth. dtype= keeps that buffer in the
+        # logits' dtype: NDIF runs traces under torch.autocast, which otherwise
+        # returns softmax of a half-precision input in float32.
+        probs = logits
+        for layer_probs in probs:
+            layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
 
         # TOP-K
         topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
@@ -175,8 +160,17 @@ class JLensTool(Tool):
             torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
             for pi in range(top_indices.shape[1])
         ]
-        probs = probs.permute(1, 2, 0)
-        trajectories = [{model.tokenizer.decode(token): torch.round(probs[pos_idx][token], decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+        # .float() so the rounding lands on 0.123 rather than bf16's nearest, 0.12305
+        tracked_probs = probs.permute(1, 2, 0)
+        trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+
+        # ENTROPY: entropy[l_idx][pos] = -sum(p * log p), with p * log p
+        # written over probs (xlogy gives 0 where p underflowed to 0)
+        if include_entropy:
+            entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
+            entropy = torch.round(entropy, decimals=3).tolist()
+        else:
+            entropy = None
 
         step = {
             "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
@@ -259,14 +253,20 @@ class JLensTool(Tool):
                 # Bounded rather than tracer.all(), which ends by overrunning
                 # the run and so skips everything after the loop.
                 for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
-                    step_logits = list()
-                    for l_idx in range(model.num_layers - 1):
+                    # Each layer's projection goes straight into its slice of
+                    # step_logits, so there is never a second copy to concatenate.
+                    step_logits = None # [num_layers, seq, vocab]
+                    for l_idx in range(model.num_layers):
                         res = model.layers[l_idx].layer_output
-                        jac = jacobians[l_idx].to(device=res.device)
-                        inter = res @ jac.T.to(res.dtype)
-                        step_logits.append(model.project_on_vocab(inter))
-                    step_logits.append(model.project_on_vocab(model.layers[-1].layer_output))
-                    gen_logits.append(torch.cat(step_logits, dim=0))
+                        if l_idx < model.num_layers - 1:
+                            jac = jacobians[l_idx].to(device=res.device)
+                            res = res @ jac.T.to(res.dtype)
+                        layer_logits = model.project_on_vocab(res)
+                        if step_logits is None:
+                            step_logits = layer_logits.new_empty((model.num_layers, *layer_logits.shape[1:]))
+                        step_logits[l_idx] = layer_logits[0]
+                    del res, layer_logits
+                    gen_logits.append(step_logits)
 
                 # Full token sequence (prompt + generated) for position labels.
                 output_ids = tracer.result
