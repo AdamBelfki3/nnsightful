@@ -133,14 +133,14 @@ class LogitLensTool(Tool):
 
         with torch.no_grad():
             with model.trace(prompt, remote=remote, backend=backend) as tracer:
-                all_logits = None # [num_layers, seq, vocab]
+                all_logits = torch.empty(
+                    (model.num_layers, model.input_size[1], model.vocab_size),
+                    dtype=model.lm_head.weight.dtype,
+                    device=model.lm_head.weight.device,
+                ) # [num_layers, seq, vocab]
 
                 for l_idx in range(model.num_layers):
-                    layer_logits = model.project_on_vocab(model.layers[l_idx].layer_output)
-                    if all_logits is None:
-                        all_logits = layer_logits.new_empty((model.num_layers, *layer_logits.shape[1:]))
-                    all_logits[l_idx] = layer_logits[0]
-                del layer_logits
+                    all_logits[l_idx] = model.project_on_vocab(model.layers[l_idx].layer_output)[0]
 
                 if raw:
                     results = all_logits.to('cpu').save()
