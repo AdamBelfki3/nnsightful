@@ -130,9 +130,10 @@ class JLensTool(Tool):
     ) -> dict[Any, Any]:
         """Format one step's ``[layer, pos, vocab]`` lens logits.
 
-        Overwrites ``logits`` with the probabilities, then with ``p * log p``:
-        at full-vocab width a second tensor this size is a sizable share of a
-        model's memory budget on NDIF, so nothing here allocates one.
+        Overwrites ``logits`` in place (probabilities, then ``p * log p``) so no
+        second tensor of this size is allocated. Top-k is ranked on the logits;
+        softmax runs per layer with ``dtype`` pinned, since NDIF's autocast would
+        otherwise return it in float32.
         """
         input_tokens = [
             str(model.tokenizer.decode(token))
@@ -141,13 +142,8 @@ class JLensTool(Tool):
         layers = list(range(model.num_layers))
         positions = list(range(len(input_tokens)))
 
-        # Softmax preserves order, so rank the logits rather than rounded probabilities.
         _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
-        # Softmax one layer at a time, written back over the logits, so the only
-        # extra buffer is one layer's worth. dtype= keeps that buffer in the
-        # logits' dtype: NDIF runs traces under torch.autocast, which otherwise
-        # returns softmax of a half-precision input in float32.
         probs = logits
         for layer_probs in probs:
             layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
@@ -160,12 +156,10 @@ class JLensTool(Tool):
             torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
             for pi in range(top_indices.shape[1])
         ]
-        # .float() so the rounding lands on 0.123 rather than bf16's nearest, 0.12305
         tracked_probs = probs.permute(1, 2, 0)
         trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
 
-        # ENTROPY: entropy[l_idx][pos] = -sum(p * log p), with p * log p
-        # written over probs (xlogy gives 0 where p underflowed to 0)
+        # ENTROPY: entropy[l_idx][pos]
         if include_entropy:
             entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
             entropy = torch.round(entropy, decimals=3).tolist()
@@ -225,6 +219,10 @@ class JLensTool(Tool):
         to skip that lookup, extra ``generate_kwargs`` (e.g. sampling options)
         for the generation, and get back the formatted j-lens payload — or, when
         ``remote and non_blocking``, the NDIF job id to poll.
+
+        ``min_new_tokens`` defaults to ``max_new_tokens``: nnsight drops the code
+        after a ``tracer.iter`` loop that asks for more steps than the run makes,
+        so an early EOS must not cut the run short.
         """
         # Fresh dict per call — never a shared mutable default, or a previous
         # model's Jacobians would leak into the next call on this singleton.
@@ -233,9 +231,6 @@ class JLensTool(Tool):
         if not jacobians:
             lens_config = JLensTool.get_lens_config(model.repo_id)
 
-        # The lens loop below is bounded to max_new_tokens steps, and nnsight
-        # discards the code after a loop that asks for a step the run never
-        # makes. Hold the run to that count so an early EOS can't cut it short.
         gen_kwargs = {
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": max_new_tokens,
@@ -249,12 +244,7 @@ class JLensTool(Tool):
                     jacobians.update(JLensTool.load_jacobians(filename, repo_id))
 
                 gen_logits = list() #[num_layers, seq, vocab]
-                # One step per forward pass: the prefill, then each decode.
-                # Bounded rather than tracer.all(), which ends by overrunning
-                # the run and so skips everything after the loop.
                 for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
-                    # Each layer's projection goes straight into its slice of
-                    # step_logits, so there is never a second copy to concatenate.
                     step_logits = None # [num_layers, seq, vocab]
                     for l_idx in range(model.num_layers):
                         res = model.layers[l_idx].layer_output

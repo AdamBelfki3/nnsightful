@@ -81,9 +81,10 @@ class LogitLensTool(Tool):
         ) -> dict[Any, Any]:
             """Format ``[layer, pos, vocab]`` lens logits.
 
-            Overwrites ``logits`` with the probabilities, then with ``p * log p``:
-            at full-vocab width a second tensor this size is a sizable share of a
-            model's memory budget on NDIF, so nothing here allocates one.
+            Overwrites ``logits`` in place (probabilities, then ``p * log p``) so
+            no second tensor of this size is allocated. Top-k is ranked on the
+            logits; softmax runs per layer with ``dtype`` pinned, since NDIF's
+            autocast would otherwise return it in float32.
             """
 
             # AXIS LABELS + TICKS
@@ -94,13 +95,8 @@ class LogitLensTool(Tool):
             layers = list(range(model.num_layers))
             positions = list(range(len(input_tokens)))
 
-            # Softmax preserves order, so rank the logits rather than rounded probabilities.
             _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
-            # Softmax one layer at a time, written back over the logits, so the only
-            # extra buffer is one layer's worth. dtype= keeps that buffer in the
-            # logits' dtype: NDIF runs traces under torch.autocast, which otherwise
-            # returns softmax of a half-precision input in float32.
             probs = logits
             for layer_probs in probs:
                 layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
@@ -113,12 +109,10 @@ class LogitLensTool(Tool):
                 torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
                 for pi in range(top_indices.shape[1])
             ]
-            # .float() so the rounding lands on 0.123 rather than bf16's nearest, 0.12305
             tracked_probs = probs.permute(1, 2, 0)
             trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
 
-            # ENTROPY: entropy[l_idx][pos] = -sum(p * log p), with p * log p
-            # written over probs (xlogy gives 0 where p underflowed to 0)
+            # ENTROPY: entropy[l_idx][pos]
             if include_entropy:
                 entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
                 entropy = torch.round(entropy, decimals=3).tolist()
@@ -139,8 +133,6 @@ class LogitLensTool(Tool):
 
         with torch.no_grad():
             with model.trace(prompt, remote=remote, backend=backend) as tracer:
-                # Each layer's projection goes straight into its slice of
-                # all_logits, so there is never a second copy to concatenate.
                 all_logits = None # [num_layers, seq, vocab]
 
                 for l_idx in range(model.num_layers):
