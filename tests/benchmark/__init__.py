@@ -1,15 +1,18 @@
 """Performance benchmarking for nnsightful tools."""
 
-from .config import ToolBenchmarkConfig, default_configs
+from .config import ToolBenchmarkConfig, default_configs, memory_configs
 from .diff import print_diff, print_results
-from .runner import SECTIONS, BenchmarkRunner, promote_latest_to_baseline
+from .runner import BenchmarkRunner
+from .store import DIMENSIONS, ENV_KINDS, promote_files
 
 __all__ = [
     "BenchmarkRunner",
-    "SECTIONS",
+    "DIMENSIONS",
+    "ENV_KINDS",
     "ToolBenchmarkConfig",
     "default_configs",
+    "memory_configs",
     "print_diff",
     "print_results",
-    "promote_latest_to_baseline",
+    "promote_files",
 ]
