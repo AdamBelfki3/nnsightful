@@ -347,14 +347,13 @@ it, it can be added as a remote peak-memory benchmark.
 
 ## Migration
 
-Older results files load and are upgraded in memory: the original
-`results.local` / `results.remote` rows and every intermediate format
-(dimension files, kind-first files, slot blocks). Each upgraded set of
-results is matched to the current or archived definition whose test
-set it equals and gets that version (or `version: null` if none
-matches); stale slots of the slot-block format are dropped with a
-warning. Default paths fall back to `results.json` / `latest.json` when
-`baseline.json` / `run.json` don't exist.
+Besides the current format, only the original results format loads
+(`results.local` / `results.remote` rows, upgraded in memory by
+`legacy.py`): each kind's rows become one latency result, versioned by
+the current or archived definition whose test set they equal (or
+`version: null` if none matches). Any other file is rejected with an
+error naming it. Default paths fall back to `results.json` /
+`latest.json` when `baseline.json` / `run.json` don't exist.
 
 The results recorded before definitions existed became **v0** of
 `local_latency` and `remote_latency`, defined in
@@ -425,8 +424,8 @@ baseline (dashed). The Y-axis switches to log scale when values span
 | `prompts.py` | `prompt_of_length()` — prompts of an exact token count |
 | `runner.py` | `run_benchmark()`, `run_individual()`, `BenchmarkRunner` measurements, environment stamp |
 | `memory.py` | `search_max_lengths()` — coarse sweep + bisection for the threshold lengths (pure) |
-| `store.py` | Result format, status, promotion, file loading and upgrades (pure) |
-| `legacy.py` | Readers for the earlier results formats (pure) |
+| `store.py` | Result format, status, env fields per kind, promotion, file loading (pure) |
+| `legacy.py` | Reader for the original `results.json` format (pure) |
 | `backend.py` | `RemoteBackendCounter` — per-phase latency for remote runs |
 | `diff.py` | `print_results`, `print_diff`, `markdown_results`, `markdown_diff` |
 | `plots.py` | Latency and peak-memory plots for the Markdown export |

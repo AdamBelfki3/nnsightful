@@ -21,8 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import legacy
-from .definitions import KINDS, expand_tests, load_archive, load_definitions, stamp
+from .definitions import expand_tests, load_archive, load_definitions, stamp
 
 BENCH_DIR = Path(__file__).parent
 BASELINE_FILE = BENCH_DIR / "baseline.json"
@@ -33,7 +32,17 @@ LEGACY_RUN_FILE = BENCH_DIR / "latest.json"
 COMPLETE, INCOMPLETE = "complete", "incomplete"
 OK, NOT_RUN, FAILED, UNSUPPORTED = "ok", "not_run", "failed", "unsupported"
 
-ENV_KINDS = KINDS
+_CODE_FIELDS = ("git_hash", "dirty", "dirty_fingerprint", "timestamp")
+_CLIENT_FIELDS = ("nnsight", "nnsight_commit", "nnterp", "nnterp_commit")
+ENV_FIELDS = {
+    "local": (
+        *_CODE_FIELDS, "python", *_CLIENT_FIELDS,
+        "transformers", "transformers_commit", "torch", "torch_commit",
+        "gpu", "dtype", "autocast",
+    ),
+    "remote": (*_CODE_FIELDS, *_CLIENT_FIELDS, "remote_server"),
+}
+UNKNOWN_SERVER = "unknown"
 _TEST_FIELDS = ("tool", "model", "params")
 _NOT_WARNED = ("git_hash", "dirty", "dirty_fingerprint", "timestamp")
 
@@ -96,6 +105,14 @@ def result_kind(result: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def kind_env(env: dict[str, Any], kind: str) -> dict[str, Any]:
+    """The fields of *env* that matter for *kind* (remote gets ``remote_server``, ``"unknown"`` if absent)."""
+    out = {k: env[k] for k in ENV_FIELDS[kind] if k in env}
+    if kind == "remote":
+        out.setdefault("remote_server", UNKNOWN_SERVER)
+    return out
+
+
 def env_differences(base: dict[str, Any], new: dict[str, Any]) -> list[str]:
     """``field: old -> new`` for differing env fields other than the code-state stamps."""
     out = []
@@ -135,7 +152,7 @@ def same_measurement(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool
 
 
 def _is_benchmark_doc(data: dict[str, Any]) -> bool:
-    return bool(data) and all(isinstance(v, dict) and "benchmark" in v for v in data.values())
+    return all(isinstance(v, dict) and "benchmark" in v for v in data.values())
 
 
 def _definitions_for(dimension: str, kind: str) -> list[dict[str, Any]]:
@@ -152,55 +169,45 @@ def _match_definition(dimension: str, kind: str, ids: set[str]) -> dict[str, Any
     return None
 
 
-def _result_from_block(block_name: str, block: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    """A slot block as ``(benchmark name, result)``; versioned by the definition its tests match."""
-    dimension = legacy.block_dim(block_name)
-    kind = legacy.block_kind(block_name)
-    slots = [s for s in block.get("runs", []) if s.get("status") == OK and s.get("stats") is not None]
-    stale = [s for s in slots if s.get("stale")]
-    if stale:
-        print(f"warning: {block_name}: dropping {len(stale)} stale result(s) measured in another environment")
-    slots = [s for s in slots if not s.get("stale")]
-    if not slots:
-        return None
-    outcomes = [{**{k: s[k] for k in _TEST_FIELDS}, "status": OK, "stats": s["stats"]} for s in slots]
-    defn = _match_definition(dimension, kind, {case_id(s) for s in slots})
-    if defn is None:
-        name = next((d["name"] for d in _definitions_for(dimension, kind)), f"{dimension}_{kind}")
-        benchmark = {"name": name, "version": None, "config_hash": None, "kind": kind, "dimension": dimension}
-        result = make_result(None, block.get("env") or {}, block.get("meta_params", {}), outcomes, benchmark)
-        return name, result
-    meta = {**defn["meta_params"], **block.get("meta_params", {})}
-    return defn["name"], make_result(defn, block.get("env") or {}, meta, outcomes)
+def _from_v1(data: dict[str, Any]) -> dict[str, Any]:
+    """The original ``results.json`` format as results, versioned by the definition their tests match."""
+    from . import legacy
 
-
-def upgrade_run(data: dict[str, Any]) -> dict[str, Any]:
-    """Any results document as a run: ``{name: result}``."""
-    if _is_benchmark_doc(data) and not any("previous" in v for v in data.values()):
-        return copy.deepcopy(data)
-    if _is_benchmark_doc(data):
-        return {k: {kk: vv for kk, vv in v.items() if kk != "previous"} for k, v in data.items()}
-    return _from_blocks(legacy.to_blocks(data, as_baseline=False))
-
-
-def upgrade_baseline(data: dict[str, Any]) -> dict[str, Any]:
-    """Any results document as a baseline: ``{name: result + previous}``."""
-    if _is_benchmark_doc(data):
-        return {k: {**copy.deepcopy(v), "previous": copy.deepcopy(v.get("previous"))} for k, v in data.items()}
-    return {k: {**v, "previous": None} for k, v in _from_blocks(legacy.to_blocks(data, as_baseline=True)).items()}
-
-
-def _from_blocks(blocks: dict[str, Any]) -> dict[str, Any]:
     out = {}
-    for block_name in legacy.BLOCKS:
-        block = legacy.get_block(blocks, block_name)
-        if not block:
-            continue
-        converted = _result_from_block(block_name, block)
-        if converted is not None:
-            name, result = converted
-            out[name] = result
+    for part in legacy.read_v1(data):
+        dimension, kind, outcomes = part["dimension"], part["kind"], part["outcomes"]
+        defn = _match_definition(dimension, kind, {case_id(o) for o in outcomes})
+        if defn is None:
+            name = next((d["name"] for d in _definitions_for(dimension, kind)), f"{dimension}_{kind}")
+            benchmark = {"name": name, "version": None, "config_hash": None, "kind": kind, "dimension": dimension}
+            out[name] = make_result(None, part["env"], part["meta_params"], outcomes, benchmark)
+        else:
+            meta = {**defn["meta_params"], **part["meta_params"]}
+            out[defn["name"]] = make_result(defn, part["env"], meta, outcomes)
     return out
+
+
+def _upgrade(data: dict[str, Any], source: str) -> dict[str, Any]:
+    from . import legacy
+
+    if _is_benchmark_doc(data):
+        return copy.deepcopy(data)
+    if legacy.is_v1(data):
+        return _from_v1(data)
+    raise UnknownFormatError(
+        f"{source} is not a results file this version reads (current format, or the original "
+        f"results.json format)"
+    )
+
+
+def upgrade_run(data: dict[str, Any], source: str = "results") -> dict[str, Any]:
+    """A run (current or original format) as ``{name: result}``."""
+    return {k: {kk: vv for kk, vv in v.items() if kk != "previous"} for k, v in _upgrade(data, source).items()}
+
+
+def upgrade_baseline(data: dict[str, Any], source: str = "results") -> dict[str, Any]:
+    """A baseline (current or original format) as ``{name: result + previous}``."""
+    return {k: {**v, "previous": v.get("previous")} for k, v in _upgrade(data, source).items()}
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +217,10 @@ def _from_blocks(blocks: dict[str, Any]) -> dict[str, Any]:
 
 class CorruptResultsError(ValueError):
     """A results file exists but can't be parsed; nothing should overwrite it."""
+
+
+class UnknownFormatError(CorruptResultsError):
+    """A results file is valid JSON but in no format this version reads."""
 
 
 def _read(path: Path) -> dict[str, Any] | None:
@@ -242,14 +253,16 @@ def baseline_path(path: Path | None = None) -> Path:
 
 def load_run(path: Path | None = None) -> dict[str, Any] | None:
     """Load ``run.json`` (or any older results file), or None if missing."""
-    data = _read(run_path(path))
-    return upgrade_run(data) if data is not None else None
+    path = run_path(path)
+    data = _read(path)
+    return upgrade_run(data, str(path)) if data is not None else None
 
 
 def load_baseline(path: Path | None = None) -> dict[str, Any] | None:
     """Load ``baseline.json`` (or any older results file), or None if missing."""
-    data = _read(baseline_path(path))
-    return upgrade_baseline(data) if data is not None else None
+    path = baseline_path(path)
+    data = _read(path)
+    return upgrade_baseline(data, str(path)) if data is not None else None
 
 
 def save_json(path: Path, data: dict[str, Any]) -> None:

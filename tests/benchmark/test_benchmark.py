@@ -38,6 +38,7 @@ from tests.benchmark.memory import coarse_grid, search_max_lengths, threshold_la
 from tests.benchmark.runner import BenchmarkRunner, model_footprint, peak_pct, run_benchmark, run_individual
 from tests.benchmark.store import (
     CorruptResultsError,
+    UnknownFormatError,
     case_id,
     load_baseline,
     load_run,
@@ -428,24 +429,29 @@ class TestMigration:
             "kind": "remote", "git_hash": OLD_HASH, "timestamp": OLD_TS, "nnsight": "0.6.3", "remote_server": "unknown",
         }
 
-    def test_slot_blocks_matching_v1(self):
-        defn = load_definitions()["peak_mem"]
-        slots = [{"tool": t["tool"], "model": t["model"], "params": t["params"], "status": "ok",
-                  "stats": _peak_stats({"10%": i})} for i, t in enumerate(expand_tests(defn))]
-        slots.append({"tool": "x", "model": "y", "params": {}, "status": "not_run", "stats": None})
-        doc = {"latency": {"local": None, "remote": None},
-               "peak_mem": {"env": _env(), "meta_params": {"n_repeat": 3}, "runs": slots}}
-        run = upgrade_run(doc)
-        r = run["peak_mem"]
-        assert r["benchmark"] == stamp(defn) and r["status"] == "complete"
-        assert [x["stats"] for x in r["results"]] == [s["stats"] for s in slots[:-1]]
+    def test_v1_with_unmatched_test_set_is_unversioned(self):
+        old = _old()
+        old["results"]["local"] = [dict(old["results"]["local"][0], params={"prompt_length": 7})]
+        old["results"]["remote"] = []
+        run = upgrade_run(old)
+        assert list(run) == ["local_latency"]
+        r = run["local_latency"]
+        assert r["benchmark"]["version"] is None and r["benchmark"]["kind"] == "local"
+        assert r["results"][0]["stats"] == old["results"]["local"][0]["latency"]
 
-    def test_unmatched_test_set_is_unversioned(self):
-        doc = {"latency": {"local": {"env": _env(), "meta_params": {}, "runs": [
-            {"tool": LL, "model": GPT2, "params": {"prompt_length": 7}, "status": "ok", "stats": _stats(0.1)}]},
-            "remote": None}, "peak_mem": None}
-        r = upgrade_run(doc)["local_latency"]
-        assert r["benchmark"]["version"] is None and r["results"][0]["stats"] == _stats(0.1)
+    @pytest.mark.parametrize("doc", [
+        {"git_hash": "x", "latency": {"meta_params": {}, "runs": []}, "peak_mem": {"meta_params": {}, "runs": []}},
+        {"local": {"current": None, "stale": []}, "remote": {"current": None, "stale": []}},
+        {"latency": {"local": None, "remote": None}, "peak_mem": None},
+    ])
+    def test_intermediate_formats_are_rejected(self, tmp_path, doc):
+        save_json(tmp_path / "baseline.json", doc)
+        with pytest.raises(UnknownFormatError, match="baseline.json"):
+            load_baseline(tmp_path / "baseline.json")
+
+    def test_empty_files_are_valid(self, tmp_path):
+        save_json(tmp_path / "run.json", {})
+        assert load_run(tmp_path / "run.json") == {}
 
     def test_current_format_round_trips(self, tmp_path):
         base = upgrade_baseline(_old())

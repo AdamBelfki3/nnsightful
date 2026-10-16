@@ -20,13 +20,13 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from .config import ToolBenchmarkConfig, UnsupportedTest, sweep_combos, tool_configs
 from .definitions import expand_tests, stamp, version_warnings
-from .legacy import kind_env
 from .memory import search_max_lengths
 from .store import (
     BENCH_DIR,
     FAILED,
     OK,
     UNSUPPORTED,
+    kind_env,
     load_run,
     make_result,
     run_path,

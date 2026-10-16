@@ -1,96 +1,44 @@
 """Show and diff utilities for benchmark results.
 
-Each benchmark result is laid out as a display *block* by its dimension
-and kind: ``local_latency`` and ``remote_latency`` as one latency table
-per kind (side by side by (tool, model, params)), ``peak_mem`` as a table
-of footprint and max prompt lengths per threshold. Tables show the
+Works directly on ``run.json`` / ``baseline.json`` entries (see
+``store.py``). Latency benchmarks get one table per kind (local /
+remote, side by side by (tool, model, params)); peak-memory benchmarks a
+table of footprint and max prompt lengths per threshold. Tables show the
 measured tests; failed / unsupported / not-run tests are summarized
-below them with the benchmark's status.
+below them with each benchmark's status.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from . import legacy
-from .definitions import DIMENSIONS, load_definitions
+from .definitions import DIMENSIONS, KINDS
 from .store import (
-    ENV_KINDS,
     FAILED,
     NOT_RUN,
     UNSUPPORTED,
     baseline_path as _baseline_path,
+    case_id,
     env_differences,
     env_label,
-    load_baseline as _load_baseline_doc,
-    load_run as _load_run_doc,
+    load_baseline,
+    load_run,
     run_path,
 )
 
-BLOCKS = legacy.BLOCKS
-_BLOCK_OF = {("latency", "local"): "latency.local", ("latency", "remote"): "latency.remote", ("peak_mem", "local"): "peak_mem"}
+
+def _load(path: Path | dict | None) -> dict[str, Any] | None:
+    """A run's results: *path* itself if already loaded, else ``run.json`` at *path*."""
+    return path if isinstance(path, dict) else load_run(path)
 
 
-def block_dim(block: str) -> str:
-    return block.split(".")[0]
-
-
-def has_value(slot: dict[str, Any]) -> bool:
-    return slot.get("status") == "ok" and slot.get("stats") is not None
-
-
-def slot_key(block: str, slot: dict[str, Any]) -> str:
-    return json.dumps(
-        {"block": block, "tool": slot["tool"], "model": slot["model"], "params": slot["params"]},
-        sort_keys=True, default=str,
-    )
-
-
-def _block_name(name: str, result: dict[str, Any]) -> str | None:
-    b = result.get("benchmark") or {}
-    dim, kind = b.get("dimension"), b.get("kind")
-    if dim is None:
-        defn = load_definitions().get(name, {})
-        dim, kind = defn.get("dimension"), defn.get("kind")
-    return _BLOCK_OF.get((dim, kind or (result.get("env") or {}).get("kind")))
-
-
-def to_view(results: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Benchmark results as display blocks (``latency.local`` / ``latency.remote`` / ``peak_mem``)."""
-    if results is None:
-        return None
-    doc = legacy.empty_doc()
-    for name, r in results.items():
-        if not r:
-            continue
-        block = _block_name(name, r)
-        if block is None:
-            continue
-        runs = [{**{k: x[k] for k in ("tool", "model", "params")}, "status": "ok", "stats": x["stats"]} for x in r["results"]]
-        runs += [{**f, "stats": None} for f in r.get("failed", [])]
-        runs += [{**f, "stats": None, "optional": True} for f in r.get("optional_failed", [])]
-        legacy.set_block(doc, block, {
-            "name": name, "benchmark": r.get("benchmark") or {},
-            "status": "individual tests" if (r.get("benchmark") or {}).get("individual") else r.get("status"),
-            "env": r.get("env"), "meta_params": r.get("meta_params", {}), "runs": runs,
-        })
-    return doc
-
-
-def load_run(path: Path | dict | None = None) -> dict[str, Any] | None:
-    """``run.json`` (or an in-memory run) as display blocks."""
-    return to_view(path if isinstance(path, dict) else _load_run_doc(path))
-
-
-def _baseline_views(path: Path | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """The baseline's current results and their ``previous`` results, as display blocks."""
-    base = _load_baseline_doc(path)
+def _load_baseline(path: Path | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The baseline's results and, per benchmark, the ``previous`` result it replaced."""
+    base = load_baseline(path)
     if base is None:
         return None, None
-    previous = {n: r["previous"] for n, r in base.items() if r.get("previous")}
-    return to_view(base), to_view(previous)
+    return base, {n: r["previous"] for n, r in base.items() if r.get("previous")}
 
 
 def _resolve(path: Path | dict | None) -> Path | dict:
@@ -101,30 +49,46 @@ def _name(path: Path | dict) -> str:
     return "(in memory)" if isinstance(path, dict) else path.name
 
 
-def get_block(doc: dict[str, Any] | None, block: str) -> dict[str, Any] | None:
-    return legacy.get_block(doc, block)
+def _stamp(result: dict[str, Any]) -> dict[str, Any]:
+    return result.get("benchmark") or {}
 
 
-def _index(view: dict[str, Any] | None) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
-    """``slot_key -> (slot, block)`` for every measured test of a view."""
-    out = {}
-    for block in BLOCKS:
-        b = get_block(view, block)
-        for slot in (b or {}).get("runs", []):
-            if has_value(slot):
-                out[slot_key(block, slot)] = (slot, b)
-    return out
+def _version(result: dict[str, Any] | None) -> Any:
+    return _stamp(result or {}).get("version")
 
 
-def _version(b: dict[str, Any] | None) -> Any:
-    return ((b or {}).get("benchmark") or {}).get("version")
+def _bench_name(name: str, result: dict[str, Any]) -> str:
+    return _stamp(result).get("name", name)
 
 
-def _source(old_block: dict[str, Any], new_block: dict[str, Any]) -> str:
+def _ordered(doc: dict[str, Any] | None, dims: list[str] | None = None, remote: bool | None = None):
+    """``(name, result)`` of the benchmarks shown, latency (local, remote) before peak_mem."""
+    dims = dims or list(DIMENSIONS)
+    kinds = _sections_to_show(remote)
+    shown = [
+        (name, r) for name, r in (doc or {}).items()
+        if r and _stamp(r).get("dimension") in dims and _stamp(r).get("kind") in kinds
+    ]
+    return sorted(shown, key=lambda nr: (
+        DIMENSIONS.index(_stamp(nr[1])["dimension"]), KINDS.index(_stamp(nr[1])["kind"]), nr[0],
+    ))
+
+
+def _of(doc: dict[str, Any] | None, dimension: str, kind: str | None = None):
+    """``(name, result)`` of the benchmarks with *dimension* (and *kind*)."""
+    return [(n, r) for n, r in _ordered(doc, [dimension]) if kind is None or _stamp(r)["kind"] == kind]
+
+
+def _source(old: dict[str, Any], new: dict[str, Any]) -> str:
     """``baseline`` (same version) or ``baseline v0`` (a different version)."""
-    if _version(old_block) == _version(new_block):
+    if _version(old) == _version(new):
         return "baseline"
-    return f"baseline v{_version(old_block)}"
+    return f"baseline v{_version(old)}"
+
+
+def _unsuccessful(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Failed tests then optional failed ones (marked ``optional``)."""
+    return list(result.get("failed", [])) + [{**f, "optional": True} for f in result.get("optional_failed", [])]
 
 
 def _row_matches(
@@ -149,31 +113,26 @@ def _sections_to_show(remote: bool | None) -> list[str]:
         return ["remote"]
     if remote is False:
         return ["local"]
-    return list(ENV_KINDS)
-
-
-def _block(data: dict[str, Any] | None, block: str) -> dict[str, Any]:
-    return get_block(data, block) or {}
+    return list(KINDS)
 
 
 def latency_rows(data: dict[str, Any] | None, env: str) -> list[dict[str, Any]]:
-    """Measured slots of ``latency.<env>`` as ``(tool, model, params, latency[, latency_breakdown])`` rows."""
+    """Tests of the *env* latency benchmark(s) as ``(tool, model, params, latency[, latency_breakdown])`` rows."""
     rows = []
-    for slot in _block(data, f"latency.{env}").get("runs", []):
-        if not has_value(slot):
-            continue
-        stats = slot["stats"]
-        row = {"tool": slot["tool"], "model": slot["model"], "params": slot["params"], "latency": stats}
-        if "breakdown" in stats:
-            row["latency_breakdown"] = stats["breakdown"]
-        rows.append(row)
+    for _, result in _of(data, "latency", env):
+        for test in result.get("results", []):
+            stats = test["stats"]
+            row = {"tool": test["tool"], "model": test["model"], "params": test["params"], "latency": stats}
+            if "breakdown" in stats:
+                row["latency_breakdown"] = stats["breakdown"]
+            rows.append(row)
     return rows
 
 
 def _latency_repeat(data: dict[str, Any]) -> Any:
     repeats = {
-        kind: _block(data, f"latency.{kind}").get("meta_params", {}).get("n_repeat", "?")
-        for kind in ENV_KINDS if latency_rows(data, kind)
+        kind: result.get("meta_params", {}).get("n_repeat", "?")
+        for kind in KINDS for _, result in _of(data, "latency", kind) if result.get("results")
     }
     return ", ".join(f"{k} {v}" for k, v in repeats.items()) or "?"
 
@@ -181,42 +140,37 @@ def _latency_repeat(data: dict[str, Any]) -> Any:
 def _run_label(data: dict[str, Any]) -> str:
     """``local_latency v1 @ a1b2c3d 2026-01-02 · peak_mem v1 @ …`` for the benchmarks present."""
     return " · ".join(
-        f"{_block(data, block).get('name', block)} v{_version(_block(data, block))} @ {env_label(_block(data, block).get('env'))}"
-        for block in BLOCKS if _block(data, block)
+        f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}" for name, r in _ordered(data)
     ) or "(empty)"
 
 
 def status_lines(
-    data: dict[str, Any] | None, blocks: list[str], tools: list[str] | None = None,
-    models: list[str] | None = None, detail: bool = False,
+    data: dict[str, Any] | None, dims: list[str] | None = None, remote: bool | None = None,
+    tools: list[str] | None = None, models: list[str] | None = None, detail: bool = False,
 ) -> list[str]:
     """Per benchmark: status, and counts of tests not in the tables (failed / unsupported / not run).
 
     With *detail*, those tests are listed with their error.
     """
     out = []
-    for block in blocks:
-        b = _block(data, block)
-        if not b:
-            continue
-        runs = [s for s in b.get("runs", []) if _row_matches(s, tools, models)]
-        skipped = [s for s in runs if not has_value(s)]
-        head = f"{b.get('name', block)} v{_version(b)} ({b.get('status', '?')}): {sum(has_value(s) for s in runs)} measured"
+    for name, result in _ordered(data, _dims(dims, remote), remote):
+        measured = [t for t in result.get("results", []) if _row_matches(t, tools, models)]
+        skipped = [t for t in _unsuccessful(result) if _row_matches(t, tools, models)]
+        head = f"{_bench_name(name, result)} v{_version(result)} ({result.get('status', '?')}): {len(measured)} measured"
         if skipped:
-            req = [s for s in skipped if not s.get("optional")]
-            opt = [s for s in skipped if s.get("optional")]
             parts = []
-            for label, group in (("", req), ("optional ", opt)):
-                counts = {st: sum(s.get("status") == st for s in group) for st in (FAILED, UNSUPPORTED, NOT_RUN)}
+            for label, group in (("", [t for t in skipped if not t.get("optional")]),
+                                 ("optional ", [t for t in skipped if t.get("optional")])):
+                counts = {st: sum(t.get("status") == st for t in group) for st in (FAILED, UNSUPPORTED, NOT_RUN)}
                 parts += [f"{n} {label}{st.replace('_', ' ')}" for st, n in counts.items() if n]
             head += "; " + ", ".join(parts)
         out.append(head)
         if detail:
-            for slot in skipped:
-                tag = " (optional)" if slot.get("optional") else ""
+            for test in skipped:
+                tag = " (optional)" if test.get("optional") else ""
                 out.append(
-                    f"    {slot['status']}{tag}: {slot['tool']} | {slot['model']} | "
-                    f"{_format_params(slot)} — {slot.get('error', '')}"
+                    f"    {test['status']}{tag}: {test['tool']} | {test['model']} | "
+                    f"{_format_params(test)} — {test.get('error', '')}"
                 )
     return out
 
@@ -303,21 +257,18 @@ def _format_delta(row: dict[str, Any]) -> str:
 
 
 def _baseline_summary(baseline: dict[str, Any] | None) -> str:
-    parts = []
-    for block in BLOCKS:
-        b = get_block(baseline, block)
-        if b:
-            parts.append(f"{b.get('name', block)} v{_version(b)} @ {env_label(b.get('env'))}")
-    return "; ".join(parts) or "(empty)"
+    return "; ".join(
+        f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}" for name, r in _ordered(baseline)
+    ) or "(empty)"
 
 
 def _arrow(old: dict[str, Any], new: dict[str, Any]) -> str:
     return f"{((old.get('env') or {}).get('git_hash') or '?')[:7]} → {((new.get('env') or {}).get('git_hash') or '?')[:7]}"
 
 
-def _latency_row(section, slot, status="new", source=None) -> dict[str, Any]:
+def _latency_row(section, test, status="new", source=None) -> dict[str, Any]:
     return {
-        "section": section, "tool": slot["tool"], "model": slot["model"], "params": slot["params"],
+        "section": section, "tool": test["tool"], "model": test["model"], "params": test["params"],
         "new_mean": None, "old_mean": None, "delta_ms": None, "delta_pct": None,
         "status": status, "source": source,
     }
@@ -342,43 +293,42 @@ def compute_diff(
     Returns dicts with keys: section, tool, model, params, old_mean,
     new_mean, delta_ms, delta_pct, status, source.
     """
-    current = load_run(latest_path)
+    current = _load(latest_path)
     if current is None:
         return []
-    base, prev = _baseline_views(baseline_path)
+    base, prev = _load_baseline(baseline_path)
     rows: list[dict[str, Any]] = []
     for section in _sections_to_show(remote):
-        block = f"latency.{section}"
-        new_b, old_b = get_block(current, block), get_block(base, block)
-        if new_b:
-            rows += _latency_compare(section, new_b, old_b, _source(old_b, new_b) if old_b else None)
-        elif with_previous and old_b and get_block(prev, block):
-            prev_b = get_block(prev, block)
-            rows += [
-                {**r, "source": f"last change ({_arrow(prev_b, old_b)})"}
-                for r in _latency_compare(section, old_b, prev_b, "") if r["status"] == "changed"
-            ]
+        for name, new in _of(current, "latency", section):
+            old = (base or {}).get(name)
+            rows += _latency_compare(section, new, old, _source(old, new) if old else None)
+        if not with_previous:
+            continue
+        for name, old in _of(base, "latency", section):
+            if name not in current and (prev or {}).get(name):
+                rows += [
+                    {**r, "source": f"last change ({_arrow(prev[name], old)})"}
+                    for r in _latency_compare(section, old, prev[name], "") if r["status"] == "changed"
+                ]
     return [r for r in rows if _row_matches(r, tools, models)]
 
 
-def _latency_compare(section: str, new_b: dict[str, Any], old_b: dict[str, Any] | None, source: str | None):
-    old = {slot_key("x", s): s for s in (old_b or {}).get("runs", []) if has_value(s)}
-    failed = {slot_key("x", s) for s in new_b.get("runs", []) if not has_value(s)}
+def _latency_compare(section: str, new: dict[str, Any], old: dict[str, Any] | None, source: str | None):
+    old_tests = {case_id(t): t for t in (old or {}).get("results", [])}
+    failed = {case_id(t) for t in _unsuccessful(new)}
     rows = []
-    for slot in new_b.get("runs", []):
-        if not has_value(slot):
-            continue
-        row = _latency_row(section, slot)
-        row["new_mean"] = slot["stats"]["mean"]
-        prev = old.pop(slot_key("x", slot), None)
+    for test in new.get("results", []):
+        row = _latency_row(section, test)
+        row["new_mean"] = test["stats"]["mean"]
+        prev = old_tests.pop(case_id(test), None)
         if prev is not None:
             _set_change(row, prev["stats"]["mean"], row["new_mean"])
             row["source"] = source
         rows.append(row)
-    if old_b is not None:
-        for key, slot in old.items():
-            row = _latency_row(section, slot, "removed", "failed in run" if key in failed else "not in run")
-            row["old_mean"] = slot["stats"]["mean"]
+    if old is not None:
+        for key, test in old_tests.items():
+            row = _latency_row(section, test, "removed", "failed in run" if key in failed else "not in run")
+            row["old_mean"] = test["stats"]["mean"]
             rows.append(row)
     return rows
 
@@ -407,40 +357,34 @@ def comparison_warnings(
     Code-state stamps (git hash, dirty) are expected to differ and aren't
     reported; package versions, GPU, dtype, autocast, server etc. are.
     """
-    current = load_run(latest_path)
+    current = _load(latest_path)
     if current is None:
         return []
-    base, _ = _baseline_views(baseline_path)
+    base, _ = _load_baseline(baseline_path)
     out = []
-    for block in _blocks_to_show(dims, remote):
-        new_b, old_b = get_block(current, block), get_block(base, block)
-        if not new_b or not old_b:
+    for name, new in _ordered(current, _dims(dims, remote), remote):
+        old = (base or {}).get(name)
+        if not old:
             continue
-        name = new_b.get("name", block)
-        nb, ob = new_b.get("benchmark") or {}, old_b.get("benchmark") or {}
+        label = _bench_name(name, new)
+        nb, ob = _stamp(new), _stamp(old)
         if nb.get("version") != ob.get("version"):
-            new_ids = {slot_key("x", s) for s in new_b["runs"] if has_value(s)}
-            old_ids = {slot_key("x", s) for s in old_b["runs"] if has_value(s)}
+            new_ids = {case_id(t) for t in new.get("results", [])}
+            old_ids = {case_id(t) for t in old.get("results", [])}
             out.append(
-                f"{name}: run v{nb.get('version')} vs baseline v{ob.get('version')} — comparing the "
+                f"{label}: run v{nb.get('version')} vs baseline v{ob.get('version')} — comparing the "
                 f"{len(new_ids & old_ids)} shared test(s); {len(new_ids - old_ids)} only in the run, "
                 f"{len(old_ids - new_ids)} only in the baseline"
             )
         elif nb.get("config_hash") and ob.get("config_hash") and nb["config_hash"] != ob["config_hash"]:
             out.append(
-                f"{name}: same version v{nb.get('version')} but different definitions "
+                f"{label}: same version v{nb.get('version')} but different definitions "
                 f"(config hash {ob['config_hash']} -> {nb['config_hash']}); bump the version"
             )
-        diffs = env_differences(old_b.get("env") or {}, new_b.get("env") or {})
+        diffs = env_differences(old.get("env") or {}, new.get("env") or {})
         if diffs:
-            out.append(f"{name} vs baseline: " + "; ".join(diffs))
+            out.append(f"{label} vs baseline: " + "; ".join(diffs))
     return out
-
-
-def _blocks_to_show(dims: list[str] | None, remote: bool | None) -> list[str]:
-    selected = _dims(dims, remote)
-    kinds = _sections_to_show(remote)
-    return [b for b in BLOCKS if block_dim(b) in selected and (b == "peak_mem" or b.split(".")[1] in kinds)]
 
 
 # ---------------------------------------------------------------------------
@@ -482,15 +426,15 @@ def _print_diff_latency(
         print(f"No benchmark results to compare{filt}.")
         return
 
-    current = load_run(latest_path)
-    baseline, _ = _baseline_views(baseline_path)
+    current = _load(latest_path)
+    baseline, _ = _load_baseline(baseline_path)
 
     print("=" * 80)
     print("BENCHMARK DIFF")
     print("=" * 80)
     if current:
         print(f"  Current:   {_run_label(current)}  [{_name(latest_path)}]")
-    if baseline:
+    if baseline is not None:
         print(f"  Baseline:  {_baseline_summary(baseline)}  [{baseline_path.name}]")
     else:
         print(f"  Baseline:  (no baseline at {baseline_path.name})")
@@ -558,7 +502,7 @@ def _print_results_latency(
     Running/Download/Total breakdown.
     """
     path = _resolve(path)
-    current = load_run(path)
+    current = _load(path)
 
     if current is None:
         print(f"No benchmark results found at {path}.")
@@ -705,15 +649,15 @@ def _markdown_diff_latency(
     if not rows:
         return "# Benchmark Diff\n\n_No benchmark results to compare._\n"
 
-    current = load_run(latest_path)
-    baseline, _ = _baseline_views(baseline_path)
+    current = _load(latest_path)
+    baseline, _ = _load_baseline(baseline_path)
 
     out: list[str] = ["# Benchmark Diff", ""]
     if current:
         out.append(
             f"- **Current:** `{_run_label(current)}` — `{_name(latest_path)}`"
         )
-    if baseline:
+    if baseline is not None:
         out.append(
             f"- **Baseline:** {_baseline_summary(baseline)} — `{baseline_path.name}`"
         )
@@ -805,7 +749,7 @@ def _markdown_results_latency(
     (one line per model), embedded as a base64 PNG data URL.
     """
     path = _resolve(path)
-    current = load_run(path)
+    current = _load(path)
     if current is None:
         return f"# Benchmark Results\n\n_No benchmark results found at `{path}`._\n"
 
@@ -944,21 +888,26 @@ def _pct(val: float | None) -> str:
     return f"{val:.1f}%" if val is not None else "-"
 
 
-def _peak_view(slot: dict[str, Any]) -> dict[str, Any]:
-    """A measured peak slot with its stats lifted to the top level, for display."""
-    return {**{k: slot[k] for k in ("tool", "model", "params")}, **slot["stats"]}
+def _peak_view(test: dict[str, Any]) -> dict[str, Any]:
+    """A peak-memory test with its stats lifted to the top level, for display."""
+    return {**{k: test[k] for k in ("tool", "model", "params")}, **test["stats"]}
 
 
 def _peak_runs(data: dict[str, Any] | None) -> list[dict[str, Any]]:
-    return [_peak_view(s) for s in _block(data, "peak_mem").get("runs", []) if has_value(s)]
+    return [_peak_view(t) for _, r in _of(data, "peak_mem") for t in r.get("results", [])]
+
+
+def _peak_result(data: dict[str, Any] | None) -> dict[str, Any]:
+    benches = _of(data, "peak_mem")
+    return benches[0][1] if benches else {}
 
 
 def _peak_meta(data: dict[str, Any] | None) -> dict[str, Any]:
-    return _block(data, "peak_mem").get("meta_params", {})
+    return _peak_result(data).get("meta_params", {})
 
 
 def _peak_env(data: dict[str, Any] | None) -> dict[str, Any]:
-    return _block(data, "peak_mem").get("env") or {}
+    return _peak_result(data).get("env") or {}
 
 
 def _threshold_labels(*runs_lists: list[dict[str, Any]]) -> list[str]:
@@ -985,7 +934,7 @@ def _max_len_cell(run: dict[str, Any] | None, label: str, meta: dict[str, Any]) 
 
 
 def _peak_header_line(meta: dict[str, Any], env: dict[str, Any]) -> str:
-    """``local, bfloat16, autocast, swept=prompt_length, repeat=3`` from the block env and meta_params."""
+    """``local, bfloat16, autocast, swept=prompt_length, repeat=3`` from the benchmark env and meta_params."""
     parts = [str(env.get("kind", "?")), str(env.get("dtype", "?"))]
     if env.get("autocast"):
         parts.append("autocast")
@@ -1016,7 +965,7 @@ def _print_results_peak(
     models: list[str] | None,
     detail: bool,
 ) -> None:
-    current = load_run(path)
+    current = _load(path)
     runs = _filtered_peak_runs(current, tools, models)
     if not runs:
         print("No peak-memory results in the latest run.")
@@ -1076,40 +1025,39 @@ def compute_peak_diff(
     Each row has ``tool``, ``model``, ``params``, ``old`` / ``new`` (runs,
     or None), ``status`` (``changed`` / ``new`` / ``removed``) and ``source``.
     """
-    current = load_run(latest_path)
-    base, prev = _baseline_views(baseline_path)
-    new_b, old_b = get_block(current, "peak_mem"), get_block(base, "peak_mem")
+    current = _load(latest_path)
+    base, prev = _load_baseline(baseline_path)
     rows = []
-    if new_b:
-        rows = _peak_compare(new_b, old_b, _source(old_b, new_b) if old_b else None)
-    elif with_previous and current is not None and old_b and get_block(prev, "peak_mem"):
-        prev_b = get_block(prev, "peak_mem")
-        rows = [
-            {**r, "source": f"last change ({_arrow(prev_b, old_b)})"}
-            for r in _peak_compare(old_b, prev_b, "") if r["status"] == "changed"
-        ]
+    for name, new in _of(current, "peak_mem"):
+        old = (base or {}).get(name)
+        rows += _peak_compare(new, old, _source(old, new) if old else None)
+    if with_previous and current is not None:
+        for name, old in _of(base, "peak_mem"):
+            if name not in current and (prev or {}).get(name):
+                rows += [
+                    {**r, "source": f"last change ({_arrow(prev[name], old)})"}
+                    for r in _peak_compare(old, prev[name], "") if r["status"] == "changed"
+                ]
     rows = [r for r in rows if _row_matches(r, tools, models)]
     return sorted(rows, key=_sort_key)
 
 
-def _peak_compare(new_b: dict[str, Any], old_b: dict[str, Any] | None, source: str | None):
-    old = {slot_key("x", s): s for s in (old_b or {}).get("runs", []) if has_value(s)}
-    failed = {slot_key("x", s) for s in new_b.get("runs", []) if not has_value(s)}
+def _peak_compare(new: dict[str, Any], old: dict[str, Any] | None, source: str | None):
+    old_tests = {case_id(t): t for t in (old or {}).get("results", [])}
+    failed = {case_id(t) for t in _unsuccessful(new)}
     rows = []
-    for slot in new_b.get("runs", []):
-        if not has_value(slot):
-            continue
-        prev = old.pop(slot_key("x", slot), None)
+    for test in new.get("results", []):
+        prev = old_tests.pop(case_id(test), None)
         rows.append({
-            "tool": slot["tool"], "model": slot["model"], "params": slot["params"],
-            "old": _peak_view(prev) if prev else None, "new": _peak_view(slot),
+            "tool": test["tool"], "model": test["model"], "params": test["params"],
+            "old": _peak_view(prev) if prev else None, "new": _peak_view(test),
             "status": "changed" if prev else "new", "source": source if prev else None,
         })
-    if old_b is not None:
-        for key, slot in old.items():
+    if old is not None:
+        for key, test in old_tests.items():
             rows.append({
-                "tool": slot["tool"], "model": slot["model"], "params": slot["params"],
-                "old": _peak_view(slot), "new": None, "status": "removed",
+                "tool": test["tool"], "model": test["model"], "params": test["params"],
+                "old": _peak_view(test), "new": None, "status": "removed",
                 "source": "failed in run" if key in failed else "not in run",
             })
     return rows
@@ -1172,7 +1120,7 @@ def _print_diff_peak(
     if not rows:
         print("No peak-memory results to compare.")
         return
-    meta = _peak_meta(load_run(latest_path))
+    meta = _peak_meta(_load(latest_path))
     labels = _threshold_labels([r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]])
     tool_w = max(len(r["tool"]) for r in rows)
     model_w = max(len(r["model"]) for r in rows)
@@ -1243,7 +1191,7 @@ def _markdown_results_peak(
     detail: bool,
     plots: bool,
 ) -> list[str]:
-    current = load_run(path)
+    current = _load(path)
     runs = _filtered_peak_runs(current, tools, models)
     if not runs:
         return []
@@ -1303,7 +1251,7 @@ def _markdown_diff_peak(
     rows = compute_peak_diff(latest_path, baseline_path, tools, models, with_previous)
     if not rows:
         return []
-    meta = _peak_meta(load_run(latest_path))
+    meta = _peak_meta(_load(latest_path))
     labels = _threshold_labels([r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]])
 
     out = ["## PEAK MEMORY (local GPU)", ""]
@@ -1343,7 +1291,7 @@ def _dims(dims: list[str] | None, remote: bool | None) -> list[str]:
 
 
 def _has_latency(*docs: dict[str, Any] | None) -> bool:
-    return any(latency_rows(d, kind) for d in docs for kind in ENV_KINDS)
+    return any(latency_rows(d, kind) for d in docs for kind in KINDS)
 
 
 def _has_peak(*docs: dict[str, Any] | None) -> bool:
@@ -1360,7 +1308,7 @@ def print_results(
 ) -> None:
     """Print the latest run: a latency table per environment, then the peak_mem table."""
     selected = _dims(dims, remote)
-    current = load_run(path)
+    current = _load(path)
     explicit = dims is not None
     if "latency" in selected and (explicit or _has_latency(current) or not _has_peak(current)):
         _print_results_latency(path, tools=tools, models=models, remote=remote, detail=detail)
@@ -1371,7 +1319,7 @@ def print_results(
 
 
 def _print_status(current, dims, remote, tools, models, detail) -> None:
-    lines = status_lines(current, _blocks_to_show(dims, remote), tools, models, detail)
+    lines = status_lines(current, dims, remote, tools, models, detail)
     if lines:
         print("\n  Benchmarks (failed tests are not in the tables; --detail lists them):")
         for line in lines:
@@ -1393,7 +1341,7 @@ def print_diff(
     :func:`compute_diff`); differing environments are warned about first.
     """
     selected = _dims(dims, remote)
-    current = load_run(latest_path)
+    current = _load(latest_path)
     explicit = dims is not None
     warnings = comparison_warnings(latest_path, baseline_path, dims, remote, tools, models)
     if warnings:
@@ -1423,7 +1371,7 @@ def markdown_results(
 ) -> str:
     """Markdown version of :func:`print_results` (optionally with embedded plots)."""
     selected = _dims(dims, remote)
-    current = load_run(path)
+    current = _load(path)
     parts: list[str] = []
     if "latency" in selected and (_has_latency(current) or not _has_peak(current)):
         parts.append(_markdown_results_latency(
@@ -1438,7 +1386,7 @@ def markdown_results(
 
 
 def _md_status(current, dims, remote, tools, models, detail) -> list[str]:
-    lines = status_lines(current, _blocks_to_show(dims, remote), tools, models, detail)
+    lines = status_lines(current, dims, remote, tools, models, detail)
     if not lines:
         return []
     return ["## Benchmarks", "", *(f"- {line.strip()}" for line in lines), ""]
@@ -1456,7 +1404,7 @@ def markdown_diff(
 ) -> str:
     """Markdown version of :func:`print_diff` (optionally with embedded plots)."""
     selected = _dims(dims, remote)
-    current = load_run(latest_path)
+    current = _load(latest_path)
     parts: list[str] = []
     if "latency" in selected and (_has_latency(current) or not _has_peak(current)):
         parts.append(_markdown_diff_latency(
@@ -1470,7 +1418,7 @@ def markdown_diff(
     parts.extend(_md_status(current, dims, remote, tools, models, False))
     warnings = comparison_warnings(latest_path, baseline_path, dims, remote, tools, models)
     if warnings:
-        block = ["> **Warning:** comparing across different environments:"]
-        block += [f"> - {line}" for line in warnings]
-        parts.insert(1, "\n".join(block) + "\n")
+        note = ["> **Warning:** comparing across different environments:"]
+        note += [f"> - {line}" for line in warnings]
+        parts.insert(1, "\n".join(note) + "\n")
     return "\n".join(parts)
