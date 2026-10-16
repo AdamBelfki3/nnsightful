@@ -18,13 +18,15 @@ from .store import (
     FAILED,
     NOT_RUN,
     UNSUPPORTED,
-    baseline_path as _baseline_path,
     case_id,
     env_differences,
     env_label,
     load_baseline,
     load_run,
     run_path,
+)
+from .store import (
+    baseline_path as _baseline_path,
 )
 
 
@@ -33,8 +35,10 @@ def _load(path: Path | dict | None) -> dict[str, Any] | None:
     return path if isinstance(path, dict) else load_run(path)
 
 
-def _load_baseline(path: Path | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """The baseline's results and, per benchmark, the ``previous`` result it replaced."""
+def _load_baseline(
+    path: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The baseline's results and, per benchmark, the result it replaced."""
     base = load_baseline(path)
     if base is None:
         return None, None
@@ -61,22 +65,36 @@ def _bench_name(name: str, result: dict[str, Any]) -> str:
     return _stamp(result).get("name", name)
 
 
-def _ordered(doc: dict[str, Any] | None, dims: list[str] | None = None, remote: bool | None = None):
-    """``(name, result)`` of the benchmarks shown, latency (local, remote) before peak_mem."""
+def _ordered(
+    doc: dict[str, Any] | None,
+    dims: list[str] | None = None,
+    remote: bool | None = None,
+):
+    """``(name, result)`` of the shown benchmarks: latency (local, remote), peak_mem."""
     dims = dims or list(DIMENSIONS)
     kinds = _sections_to_show(remote)
     shown = [
-        (name, r) for name, r in (doc or {}).items()
+        (name, r)
+        for name, r in (doc or {}).items()
         if r and _stamp(r).get("dimension") in dims and _stamp(r).get("kind") in kinds
     ]
-    return sorted(shown, key=lambda nr: (
-        DIMENSIONS.index(_stamp(nr[1])["dimension"]), KINDS.index(_stamp(nr[1])["kind"]), nr[0],
-    ))
+    return sorted(
+        shown,
+        key=lambda nr: (
+            DIMENSIONS.index(_stamp(nr[1])["dimension"]),
+            KINDS.index(_stamp(nr[1])["kind"]),
+            nr[0],
+        ),
+    )
 
 
 def _of(doc: dict[str, Any] | None, dimension: str, kind: str | None = None):
     """``(name, result)`` of the benchmarks with *dimension* (and *kind*)."""
-    return [(n, r) for n, r in _ordered(doc, [dimension]) if kind is None or _stamp(r)["kind"] == kind]
+    return [
+        (n, r)
+        for n, r in _ordered(doc, [dimension])
+        if kind is None or _stamp(r)["kind"] == kind
+    ]
 
 
 def _source(old: dict[str, Any], new: dict[str, Any]) -> str:
@@ -88,7 +106,9 @@ def _source(old: dict[str, Any], new: dict[str, Any]) -> str:
 
 def _unsuccessful(result: dict[str, Any]) -> list[dict[str, Any]]:
     """Failed tests then optional failed ones (marked ``optional``)."""
-    return list(result.get("failed", [])) + [{**f, "optional": True} for f in result.get("optional_failed", [])]
+    return list(result.get("failed", [])) + [
+        {**f, "optional": True} for f in result.get("optional_failed", [])
+    ]
 
 
 def _row_matches(
@@ -117,12 +137,20 @@ def _sections_to_show(remote: bool | None) -> list[str]:
 
 
 def latency_rows(data: dict[str, Any] | None, env: str) -> list[dict[str, Any]]:
-    """Tests of the *env* latency benchmark(s) as ``(tool, model, params, latency[, latency_breakdown])`` rows."""
+    """The *env* latency benchmark's tests as display rows.
+
+    Each row is ``(tool, model, params, latency[, latency_breakdown])``.
+    """
     rows = []
     for _, result in _of(data, "latency", env):
         for test in result.get("results", []):
             stats = test["stats"]
-            row = {"tool": test["tool"], "model": test["model"], "params": test["params"], "latency": stats}
+            row = {
+                "tool": test["tool"],
+                "model": test["model"],
+                "params": test["params"],
+                "latency": stats,
+            }
             if "breakdown" in stats:
                 row["latency_breakdown"] = stats["breakdown"]
             rows.append(row)
@@ -132,37 +160,63 @@ def latency_rows(data: dict[str, Any] | None, env: str) -> list[dict[str, Any]]:
 def _latency_repeat(data: dict[str, Any]) -> Any:
     repeats = {
         kind: result.get("meta_params", {}).get("n_repeat", "?")
-        for kind in KINDS for _, result in _of(data, "latency", kind) if result.get("results")
+        for kind in KINDS
+        for _, result in _of(data, "latency", kind)
+        if result.get("results")
     }
     return ", ".join(f"{k} {v}" for k, v in repeats.items()) or "?"
 
 
 def _run_label(data: dict[str, Any]) -> str:
-    """``local_latency v1 @ a1b2c3d 2026-01-02 · peak_mem v1 @ …`` for the benchmarks present."""
-    return " · ".join(
-        f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}" for name, r in _ordered(data)
-    ) or "(empty)"
+    """``local_latency v1 @ a1b2c3d 2026-01-02 · peak_mem v1 @ …``."""
+    return (
+        " · ".join(
+            f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}"
+            for name, r in _ordered(data)
+        )
+        or "(empty)"
+    )
 
 
 def status_lines(
-    data: dict[str, Any] | None, dims: list[str] | None = None, remote: bool | None = None,
-    tools: list[str] | None = None, models: list[str] | None = None, detail: bool = False,
+    data: dict[str, Any] | None,
+    dims: list[str] | None = None,
+    remote: bool | None = None,
+    tools: list[str] | None = None,
+    models: list[str] | None = None,
+    detail: bool = False,
 ) -> list[str]:
-    """Per benchmark: status, and counts of tests not in the tables (failed / unsupported / not run).
+    """Per benchmark: status, and counts of tests not in the tables.
+
+    Those are the failed / unsupported / not-run tests.
 
     With *detail*, those tests are listed with their error.
     """
     out = []
     for name, result in _ordered(data, _dims(dims, remote), remote):
-        measured = [t for t in result.get("results", []) if _row_matches(t, tools, models)]
+        measured = [
+            t for t in result.get("results", []) if _row_matches(t, tools, models)
+        ]
         skipped = [t for t in _unsuccessful(result) if _row_matches(t, tools, models)]
-        head = f"{_bench_name(name, result)} v{_version(result)} ({result.get('status', '?')}): {len(measured)} measured"
+        head = (
+            f"{_bench_name(name, result)} v{_version(result)} "
+            f"({result.get('status', '?')}): {len(measured)} measured"
+        )
         if skipped:
             parts = []
-            for label, group in (("", [t for t in skipped if not t.get("optional")]),
-                                 ("optional ", [t for t in skipped if t.get("optional")])):
-                counts = {st: sum(t.get("status") == st for t in group) for st in (FAILED, UNSUPPORTED, NOT_RUN)}
-                parts += [f"{n} {label}{st.replace('_', ' ')}" for st, n in counts.items() if n]
+            for label, group in (
+                ("", [t for t in skipped if not t.get("optional")]),
+                ("optional ", [t for t in skipped if t.get("optional")]),
+            ):
+                counts = {
+                    st: sum(t.get("status") == st for t in group)
+                    for st in (FAILED, UNSUPPORTED, NOT_RUN)
+                }
+                parts += [
+                    f"{n} {label}{st.replace('_', ' ')}"
+                    for st, n in counts.items()
+                    if n
+                ]
             head += "; " + ", ".join(parts)
         out.append(head)
         if detail:
@@ -257,20 +311,33 @@ def _format_delta(row: dict[str, Any]) -> str:
 
 
 def _baseline_summary(baseline: dict[str, Any] | None) -> str:
-    return "; ".join(
-        f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}" for name, r in _ordered(baseline)
-    ) or "(empty)"
+    return (
+        "; ".join(
+            f"{_bench_name(name, r)} v{_version(r)} @ {env_label(r.get('env'))}"
+            for name, r in _ordered(baseline)
+        )
+        or "(empty)"
+    )
 
 
 def _arrow(old: dict[str, Any], new: dict[str, Any]) -> str:
-    return f"{((old.get('env') or {}).get('git_hash') or '?')[:7]} → {((new.get('env') or {}).get('git_hash') or '?')[:7]}"
+    old_hash = (old.get("env") or {}).get("git_hash") or "?"
+    new_hash = (new.get("env") or {}).get("git_hash") or "?"
+    return f"{old_hash[:7]} → {new_hash[:7]}"
 
 
 def _latency_row(section, test, status="new", source=None) -> dict[str, Any]:
     return {
-        "section": section, "tool": test["tool"], "model": test["model"], "params": test["params"],
-        "new_mean": None, "old_mean": None, "delta_ms": None, "delta_pct": None,
-        "status": status, "source": source,
+        "section": section,
+        "tool": test["tool"],
+        "model": test["model"],
+        "params": test["params"],
+        "new_mean": None,
+        "old_mean": None,
+        "delta_ms": None,
+        "delta_pct": None,
+        "status": status,
+        "source": source,
     }
 
 
@@ -301,19 +368,24 @@ def compute_diff(
     for section in _sections_to_show(remote):
         for name, new in _of(current, "latency", section):
             old = (base or {}).get(name)
-            rows += _latency_compare(section, new, old, _source(old, new) if old else None)
+            rows += _latency_compare(
+                section, new, old, _source(old, new) if old else None
+            )
         if not with_previous:
             continue
         for name, old in _of(base, "latency", section):
             if name not in current and (prev or {}).get(name):
                 rows += [
                     {**r, "source": f"last change ({_arrow(prev[name], old)})"}
-                    for r in _latency_compare(section, old, prev[name], "") if r["status"] == "changed"
+                    for r in _latency_compare(section, old, prev[name], "")
+                    if r["status"] == "changed"
                 ]
     return [r for r in rows if _row_matches(r, tools, models)]
 
 
-def _latency_compare(section: str, new: dict[str, Any], old: dict[str, Any] | None, source: str | None):
+def _latency_compare(
+    section: str, new: dict[str, Any], old: dict[str, Any] | None, source: str | None
+):
     old_tests = {case_id(t): t for t in (old or {}).get("results", [])}
     failed = {case_id(t) for t in _unsuccessful(new)}
     rows = []
@@ -327,7 +399,12 @@ def _latency_compare(section: str, new: dict[str, Any], old: dict[str, Any] | No
         rows.append(row)
     if old is not None:
         for key, test in old_tests.items():
-            row = _latency_row(section, test, "removed", "failed in run" if key in failed else "not in run")
+            row = _latency_row(
+                section,
+                test,
+                "removed",
+                "failed in run" if key in failed else "not in run",
+            )
             row["old_mean"] = test["stats"]["mean"]
             rows.append(row)
     return rows
@@ -352,7 +429,7 @@ def comparison_warnings(
     tools: list[str] | None = None,
     models: list[str] | None = None,
 ) -> list[str]:
-    """Warnings for each benchmark compared: different versions, changed definitions, differing envs.
+    """Warnings per benchmark compared: versions, changed definitions, differing envs.
 
     Code-state stamps (git hash, dirty) are expected to differ and aren't
     reported; package versions, GPU, dtype, autocast, server etc. are.
@@ -372,14 +449,20 @@ def comparison_warnings(
             new_ids = {case_id(t) for t in new.get("results", [])}
             old_ids = {case_id(t) for t in old.get("results", [])}
             out.append(
-                f"{label}: run v{nb.get('version')} vs baseline v{ob.get('version')} — comparing the "
-                f"{len(new_ids & old_ids)} shared test(s); {len(new_ids - old_ids)} only in the run, "
+                f"{label}: run v{nb.get('version')} vs baseline v{ob.get('version')} "
+                f"— comparing the {len(new_ids & old_ids)} shared test(s); "
+                f"{len(new_ids - old_ids)} only in the run, "
                 f"{len(old_ids - new_ids)} only in the baseline"
             )
-        elif nb.get("config_hash") and ob.get("config_hash") and nb["config_hash"] != ob["config_hash"]:
+        elif (
+            nb.get("config_hash")
+            and ob.get("config_hash")
+            and nb["config_hash"] != ob["config_hash"]
+        ):
             out.append(
                 f"{label}: same version v{nb.get('version')} but different definitions "
-                f"(config hash {ob['config_hash']} -> {nb['config_hash']}); bump the version"
+                f"(config hash {ob['config_hash']} -> {nb['config_hash']}); "
+                "bump the version"
             )
         diffs = env_differences(old.get("env") or {}, new.get("env") or {})
         if diffs:
@@ -410,7 +493,11 @@ def _print_diff_latency(
     baseline_path = _baseline_path(baseline_path)
 
     all_rows = compute_diff(
-        latest_path, baseline_path, tools=tools, models=models, remote=remote,
+        latest_path,
+        baseline_path,
+        tools=tools,
+        models=models,
+        remote=remote,
         with_previous=with_previous,
     )
 
@@ -553,7 +640,7 @@ def _print_results_latency(
 def _print_results_local(
     rows: list[dict[str, Any]], tool_w: int, model_w: int, detail: bool
 ) -> None:
-    print(f"\n  [LOCAL]")
+    print("\n  [LOCAL]")
 
     cols = f"{'Mean':>10}  {'Std':>10}"
     if detail:
@@ -583,7 +670,8 @@ def _print_results_remote(
 
     cols = f"{'Mean':>10}  {'Std':>10}"
     if detail:
-        cols += f"  {'Min':>10}  {'Max':>10}  {'Running':>10}  {'Download':>10}  {'Total':>10}"
+        cols += f"  {'Min':>10}  {'Max':>10}"
+        cols += f"  {'Running':>10}  {'Download':>10}  {'Total':>10}"
     header = f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}  {'Params':<30}  {cols}"
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -642,7 +730,11 @@ def _markdown_diff_latency(
     baseline_path = _baseline_path(baseline_path)
 
     rows = compute_diff(
-        latest_path, baseline_path, tools=tools, models=models, remote=remote,
+        latest_path,
+        baseline_path,
+        tools=tools,
+        models=models,
+        remote=remote,
         with_previous=with_previous,
     )
 
@@ -654,9 +746,7 @@ def _markdown_diff_latency(
 
     out: list[str] = ["# Benchmark Diff", ""]
     if current:
-        out.append(
-            f"- **Current:** `{_run_label(current)}` — `{_name(latest_path)}`"
-        )
+        out.append(f"- **Current:** `{_run_label(current)}` — `{_name(latest_path)}`")
     if baseline is not None:
         out.append(
             f"- **Baseline:** {_baseline_summary(baseline)} — `{baseline_path.name}`"
@@ -696,9 +786,7 @@ def _markdown_diff_latency(
                 out.append(f"### {row['tool']}")
                 out.append("")
                 if plot_renderer is not None:
-                    tool_rows = [
-                        r for r in section_rows if r["tool"] == row["tool"]
-                    ]
+                    tool_rows = [r for r in section_rows if r["tool"] == row["tool"]]
                     data_url = plot_renderer(row["tool"], section, tool_rows)
                     if data_url is not None:
                         out.append(
@@ -894,7 +982,9 @@ def _peak_view(test: dict[str, Any]) -> dict[str, Any]:
 
 
 def _peak_runs(data: dict[str, Any] | None) -> list[dict[str, Any]]:
-    return [_peak_view(t) for _, r in _of(data, "peak_mem") for t in r.get("results", [])]
+    return [
+        _peak_view(t) for _, r in _of(data, "peak_mem") for t in r.get("results", [])
+    ]
 
 
 def _peak_result(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -927,14 +1017,18 @@ def _max_len_cell(run: dict[str, Any] | None, label: str, meta: dict[str, Any]) 
         return "-"
     value = run.get("max_prompt_length", {}).get(label)
     if value is None:
-        return f"<{meta.get('min_length', '?')}" if label in run.get("max_prompt_length", {}) else "-"
+        return (
+            f"<{meta.get('min_length', '?')}"
+            if label in run.get("max_prompt_length", {})
+            else "-"
+        )
     if label in run.get("capped", []):
         return f">={value}"
     return str(value)
 
 
 def _peak_header_line(meta: dict[str, Any], env: dict[str, Any]) -> str:
-    """``local, bfloat16, autocast, swept=prompt_length, repeat=3`` from the benchmark env and meta_params."""
+    """``local, bfloat16, autocast, swept=prompt_length, repeat=3``."""
     parts = [str(env.get("kind", "?")), str(env.get("dtype", "?"))]
     if env.get("autocast"):
         parts.append("autocast")
@@ -992,7 +1086,7 @@ def _print_results_peak(
     print(header)
     print("  " + "-" * (len(header) - 2))
     for run in runs:
-        cells = "".join(f"  {_max_len_cell(run, l, meta):>8}" for l in labels)
+        cells = "".join(f"  {_max_len_cell(run, lb, meta):>8}" for lb in labels)
         print(
             f"  {run['tool']:<{tool_w}}  {run['model']:<{model_w}}  "
             f"{_format_params(run):<30}  {_bytes(run['footprint_bytes']):>10}{cells}"
@@ -1036,7 +1130,8 @@ def compute_peak_diff(
             if name not in current and (prev or {}).get(name):
                 rows += [
                     {**r, "source": f"last change ({_arrow(prev[name], old)})"}
-                    for r in _peak_compare(old, prev[name], "") if r["status"] == "changed"
+                    for r in _peak_compare(old, prev[name], "")
+                    if r["status"] == "changed"
                 ]
     rows = [r for r in rows if _row_matches(r, tools, models)]
     return sorted(rows, key=_sort_key)
@@ -1048,18 +1143,30 @@ def _peak_compare(new: dict[str, Any], old: dict[str, Any] | None, source: str |
     rows = []
     for test in new.get("results", []):
         prev = old_tests.pop(case_id(test), None)
-        rows.append({
-            "tool": test["tool"], "model": test["model"], "params": test["params"],
-            "old": _peak_view(prev) if prev else None, "new": _peak_view(test),
-            "status": "changed" if prev else "new", "source": source if prev else None,
-        })
+        rows.append(
+            {
+                "tool": test["tool"],
+                "model": test["model"],
+                "params": test["params"],
+                "old": _peak_view(prev) if prev else None,
+                "new": _peak_view(test),
+                "status": "changed" if prev else "new",
+                "source": source if prev else None,
+            }
+        )
     if old is not None:
         for key, test in old_tests.items():
-            rows.append({
-                "tool": test["tool"], "model": test["model"], "params": test["params"],
-                "old": _peak_view(test), "new": None, "status": "removed",
-                "source": "failed in run" if key in failed else "not in run",
-            })
+            rows.append(
+                {
+                    "tool": test["tool"],
+                    "model": test["model"],
+                    "params": test["params"],
+                    "old": _peak_view(test),
+                    "new": None,
+                    "status": "removed",
+                    "source": "failed in run" if key in failed else "not in run",
+                }
+            )
     return rows
 
 
@@ -1082,10 +1189,7 @@ def _peak_direction(row: dict[str, Any]) -> int:
         return 0
     old = row["old"].get("max_prompt_length", {})
     new = row["new"].get("max_prompt_length", {})
-    deltas = [
-        (new[l] or 0) - (old[l] or 0)
-        for l in set(old) & set(new)
-    ]
+    deltas = [(new[lb] or 0) - (old[lb] or 0) for lb in set(old) & set(new)]
     if any(d < 0 for d in deltas):
         return -1
     if any(d > 0 for d in deltas):
@@ -1121,7 +1225,9 @@ def _print_diff_peak(
         print("No peak-memory results to compare.")
         return
     meta = _peak_meta(_load(latest_path))
-    labels = _threshold_labels([r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]])
+    labels = _threshold_labels(
+        [r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]]
+    )
     tool_w = max(len(r["tool"]) for r in rows)
     model_w = max(len(r["model"]) for r in rows)
 
@@ -1129,12 +1235,13 @@ def _print_diff_peak(
     print("PEAK MEMORY DIFF (max prompt length within N% of footprint)")
     print("=" * 80)
     cols = "".join(f"  {label:>20}" for label in labels)
-    header = f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}  {'Footprint':>10}{cols}  {'vs':<26}"
+    header = f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}  {'Footprint':>10}"
+    header += f"{cols}  {'vs':<26}"
     print(header)
     print("  " + "-" * (len(header) - 2))
     for row in rows:
         ref = row["new"] or row["old"]
-        cells = "".join(f"  {_peak_delta_cell(row, l, meta):>20}" for l in labels)
+        cells = "".join(f"  {_peak_delta_cell(row, lb, meta):>20}" for lb in labels)
         print(
             f"  {row['tool']:<{tool_w}}  {row['model']:<{model_w}}  "
             f"{_bytes(ref['footprint_bytes']):>10}{cells}  {_peak_source(row):<26}"
@@ -1203,7 +1310,8 @@ def _markdown_results_peak(
     out.append(f"- **Setup:** {_peak_header_line(meta, _peak_env(current))}")
     out.append(
         f"- **Cells:** largest `{axis}` whose peak stays within N% of the "
-        f"model footprint (`>=` hit the length cap, `<` already over at the smallest length)"
+        "model footprint (`>=` hit the length cap, `<` already over at the "
+        "smallest length)"
     )
     out.append("")
     plot_fn = _peak_plotter(plots, "plot_peak_mem", out)
@@ -1214,7 +1322,7 @@ def _markdown_results_peak(
             "|-------|--------|----------:|" + "".join("----:|" for _ in labels),
         ]
         for run in tool_runs:
-            cells = " | ".join(_max_len_cell(run, l, meta) for l in labels)
+            cells = " | ".join(_max_len_cell(run, lb, meta) for lb in labels)
             lines.append(
                 f"| {run['model']} | {_md_params(run)} | "
                 f"{_bytes(run['footprint_bytes'])} | {cells} |"
@@ -1232,7 +1340,8 @@ def _markdown_results_peak(
                     mean, std = _point_latency(point)
                     peak = "OOM" if point.get("oom") else _bytes(point["peak_bytes"])
                     lines.append(
-                        f"| {point[axis]} | {peak} | {_pct(point['pct'])} | {mean} | {std} |"
+                        f"| {point[axis]} | {peak} | {_pct(point['pct'])} "
+                        f"| {mean} | {std} |"
                     )
         return lines
 
@@ -1252,10 +1361,14 @@ def _markdown_diff_peak(
     if not rows:
         return []
     meta = _peak_meta(_load(latest_path))
-    labels = _threshold_labels([r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]])
+    labels = _threshold_labels(
+        [r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]]
+    )
 
     out = ["## PEAK MEMORY (local GPU)", ""]
-    out.append("_Largest prompt length within N% of the model footprint: baseline -> current._")
+    out.append(
+        "_Largest prompt length within N% of the model footprint: baseline -> current._"
+    )
     out.append("")
     plot_fn = _peak_plotter(plots, "plot_peak_mem_diff", out)
 
@@ -1266,14 +1379,16 @@ def _markdown_diff_peak(
         ]
         for row in tool_rows:
             ref = row["new"] or row["old"]
-            cells = " | ".join(_peak_delta_cell(row, l, meta) for l in labels)
+            cells = " | ".join(_peak_delta_cell(row, lb, meta) for lb in labels)
             lines.append(
                 f"| {_peak_status_emoji(row)} | {row['model']} | "
                 f"{_bytes(ref['footprint_bytes'])} | {cells} | {_peak_source(row)} |"
             )
         return lines
 
-    out += _md_peak_section(_group_by_tool(rows), table, plot_fn, meta.get("swept", "prompt_length"))
+    out += _md_peak_section(
+        _group_by_tool(rows), table, plot_fn, meta.get("swept", "prompt_length")
+    )
     return out
 
 
@@ -1306,12 +1421,16 @@ def print_results(
     detail: bool = False,
     dims: list[str] | None = None,
 ) -> None:
-    """Print the latest run: a latency table per environment, then the peak_mem table."""
+    """Print the run: a latency table per kind, then the peak_mem table."""
     selected = _dims(dims, remote)
     current = _load(path)
     explicit = dims is not None
-    if "latency" in selected and (explicit or _has_latency(current) or not _has_peak(current)):
-        _print_results_latency(path, tools=tools, models=models, remote=remote, detail=detail)
+    if "latency" in selected and (
+        explicit or _has_latency(current) or not _has_peak(current)
+    ):
+        _print_results_latency(
+            path, tools=tools, models=models, remote=remote, detail=detail
+        )
     if "peak_mem" in selected and (explicit or _has_peak(current)):
         print()
         _print_results_peak(path, tools, models, detail)
@@ -1321,7 +1440,9 @@ def print_results(
 def _print_status(current, dims, remote, tools, models, detail) -> None:
     lines = status_lines(current, dims, remote, tools, models, detail)
     if lines:
-        print("\n  Benchmarks (failed tests are not in the tables; --detail lists them):")
+        print(
+            "\n  Benchmarks (failed tests are not in the tables; --detail lists them):"
+        )
         for line in lines:
             print(f"  {line}")
 
@@ -1337,21 +1458,32 @@ def print_diff(
 ) -> None:
     """Print latency and/or peak-memory diffs of ``run.json`` vs. the baseline.
 
-    Tests are compared with the baseline's ``current``, else ``stale`` (see
-    :func:`compute_diff`); differing environments are warned about first.
+    Each benchmark is compared test by test with its baseline result (see
+    :func:`compute_diff`); version and environment differences are warned about first.
     """
     selected = _dims(dims, remote)
     current = _load(latest_path)
     explicit = dims is not None
-    warnings = comparison_warnings(latest_path, baseline_path, dims, remote, tools, models)
+    warnings = comparison_warnings(
+        latest_path, baseline_path, dims, remote, tools, models
+    )
     if warnings:
-        print("WARNING: comparing across different environments (results may not be comparable):")
+        print(
+            "WARNING: comparing across different environments "
+            "(results may not be comparable):"
+        )
         for line in warnings:
             print(f"  - {line}")
         print()
-    if "latency" in selected and (explicit or _has_latency(current) or not _has_peak(current)):
+    if "latency" in selected and (
+        explicit or _has_latency(current) or not _has_peak(current)
+    ):
         _print_diff_latency(
-            latest_path, baseline_path, tools=tools, models=models, remote=remote,
+            latest_path,
+            baseline_path,
+            tools=tools,
+            models=models,
+            remote=remote,
             with_previous=with_previous,
         )
     if "peak_mem" in selected and (explicit or _has_peak(current)):
@@ -1374,9 +1506,16 @@ def markdown_results(
     current = _load(path)
     parts: list[str] = []
     if "latency" in selected and (_has_latency(current) or not _has_peak(current)):
-        parts.append(_markdown_results_latency(
-            path, tools=tools, models=models, remote=remote, detail=detail, plots=plots
-        ))
+        parts.append(
+            _markdown_results_latency(
+                path,
+                tools=tools,
+                models=models,
+                remote=remote,
+                detail=detail,
+                plots=plots,
+            )
+        )
     else:
         parts.append("# Benchmark Results\n")
     if "peak_mem" in selected:
@@ -1407,16 +1546,29 @@ def markdown_diff(
     current = _load(latest_path)
     parts: list[str] = []
     if "latency" in selected and (_has_latency(current) or not _has_peak(current)):
-        parts.append(_markdown_diff_latency(
-            latest_path, baseline_path, tools=tools, models=models, remote=remote, plots=plots,
-            with_previous=with_previous,
-        ))
+        parts.append(
+            _markdown_diff_latency(
+                latest_path,
+                baseline_path,
+                tools=tools,
+                models=models,
+                remote=remote,
+                plots=plots,
+                with_previous=with_previous,
+            )
+        )
     else:
         parts.append("# Benchmark Diff\n")
     if "peak_mem" in selected:
-        parts.extend(_markdown_diff_peak(latest_path, baseline_path, tools, models, plots, with_previous))
+        parts.extend(
+            _markdown_diff_peak(
+                latest_path, baseline_path, tools, models, plots, with_previous
+            )
+        )
     parts.extend(_md_status(current, dims, remote, tools, models, False))
-    warnings = comparison_warnings(latest_path, baseline_path, dims, remote, tools, models)
+    warnings = comparison_warnings(
+        latest_path, baseline_path, dims, remote, tools, models
+    )
     if warnings:
         note = ["> **Warning:** comparing across different environments:"]
         note += [f"> - {line}" for line in warnings]

@@ -40,12 +40,22 @@ def read_v1(data: dict[str, Any]) -> list[dict[str, Any]]:
             stats = dict(row["latency"])
             if "latency_breakdown" in row:
                 stats["breakdown"] = row["latency_breakdown"]
-            outcomes.append({
-                "tool": row["tool"], "model": row["model"], "params": row["params"],
-                "status": OK, "stats": stats,
-            })
-        out.append({
-            "dimension": "latency", "kind": kind, "env": {"kind": kind, **kind_env(env, kind)},
-            "meta_params": dict(meta), "outcomes": outcomes,
-        })
+            outcomes.append(
+                {
+                    "tool": row["tool"],
+                    "model": row["model"],
+                    "params": row["params"],
+                    "status": OK,
+                    "stats": stats,
+                }
+            )
+        out.append(
+            {
+                "dimension": "latency",
+                "kind": kind,
+                "env": {"kind": kind, **kind_env(env, kind)},
+                "meta_params": dict(meta),
+                "outcomes": outcomes,
+            }
+        )
     return out

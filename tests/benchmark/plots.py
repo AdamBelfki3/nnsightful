@@ -18,7 +18,6 @@ import base64
 import io
 from typing import Any
 
-
 _PALETTE = [
     "#1f77b4",  # blue
     "#ff7f0e",  # orange
@@ -130,11 +129,7 @@ def plot_tool_section(
         highs = [m + s for m, s in zip(means_ms, stds_ms)]
         ax.fill_between(xs, lows, highs, color=color, alpha=0.15, linewidth=0)
 
-    all_means = [
-        r["latency"]["mean"] * 1000
-        for rs in by_model.values()
-        for r in rs
-    ]
+    all_means = [r["latency"]["mean"] * 1000 for rs in by_model.values() for r in rs]
     _apply_latency_yaxis(ax, all_means)
 
     section_label = "remote (unqueued)" if section == "remote" else "local"
@@ -199,10 +194,18 @@ def plot_tool_section_diff(
         color = _PALETTE[i % len(_PALETTE)]
         marker = _MARKER
 
-        base_xs = [r["params"][axis] for r in model_rows if r.get("old_mean") is not None]
-        base_ys = [r["old_mean"] * 1000 for r in model_rows if r.get("old_mean") is not None]
-        cur_xs = [r["params"][axis] for r in model_rows if r.get("new_mean") is not None]
-        cur_ys = [r["new_mean"] * 1000 for r in model_rows if r.get("new_mean") is not None]
+        base_xs = [
+            r["params"][axis] for r in model_rows if r.get("old_mean") is not None
+        ]
+        base_ys = [
+            r["old_mean"] * 1000 for r in model_rows if r.get("old_mean") is not None
+        ]
+        cur_xs = [
+            r["params"][axis] for r in model_rows if r.get("new_mean") is not None
+        ]
+        cur_ys = [
+            r["new_mean"] * 1000 for r in model_rows if r.get("new_mean") is not None
+        ]
 
         # Label whichever line the model actually has; prefer the solid
         # "current" one. Ensures every model ends up in the legend, even
@@ -212,9 +215,15 @@ def plot_tool_section_diff(
 
         if base_xs:
             ax.plot(
-                base_xs, base_ys,
-                linestyle="--", linewidth=1.8, marker=marker, markersize=6,
-                color=color, alpha=0.55, label=base_label,
+                base_xs,
+                base_ys,
+                linestyle="--",
+                linewidth=1.8,
+                marker=marker,
+                markersize=6,
+                color=color,
+                alpha=0.55,
+                label=base_label,
             )
             all_means_ms.extend(base_ys)
             if base_label:
@@ -222,9 +231,14 @@ def plot_tool_section_diff(
 
         if cur_xs:
             ax.plot(
-                cur_xs, cur_ys,
-                linestyle="-", linewidth=2, marker=marker, markersize=7,
-                color=color, label=cur_label,
+                cur_xs,
+                cur_ys,
+                linestyle="-",
+                linewidth=2,
+                marker=marker,
+                markersize=7,
+                color=color,
+                label=cur_label,
             )
             all_means_ms.extend(cur_ys)
             if cur_label:
@@ -242,9 +256,7 @@ def plot_tool_section_diff(
     ax.set_xlabel(axis, fontsize=10)
     ax.set_ylabel("Mean latency", fontsize=10)
     ax.tick_params(labelsize=9)
-    ax.set_xticks(sorted({
-        r["params"][axis] for rs in by_model.values() for r in rs
-    }))
+    ax.set_xticks(sorted({r["params"][axis] for rs in by_model.values() for r in rs}))
 
     _place_legend(ax, n_entries=n_labeled, title="Model")
     _clean_spines(ax)
@@ -270,9 +282,14 @@ def _draw_thresholds(ax, thresholds: list[float]) -> None:
     for t in thresholds:
         ax.axhline(t, color="#555555", linestyle=":", linewidth=1)
         ax.annotate(
-            f"{t:g}%", xy=(1, t), xycoords=("axes fraction", "data"),
-            xytext=(3, 0), textcoords="offset points",
-            fontsize=8, color="#555555", va="center",
+            f"{t:g}%",
+            xy=(1, t),
+            xycoords=("axes fraction", "data"),
+            xytext=(3, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color="#555555",
+            va="center",
         )
 
 
@@ -285,14 +302,18 @@ def _log2_xaxis(ax) -> None:
 
 
 def _threshold_values(runs: list[dict[str, Any]]) -> list[float]:
-    return sorted({
-        float(label.rstrip("%"))
-        for run in runs
-        for label in run.get("max_prompt_length", {})
-    })
+    return sorted(
+        {
+            float(label.rstrip("%"))
+            for run in runs
+            for label in run.get("max_prompt_length", {})
+        }
+    )
 
 
-def plot_peak_mem(tool_name: str, runs: list[dict[str, Any]], axis: str = "prompt_length") -> str | None:
+def plot_peak_mem(
+    tool_name: str, runs: list[dict[str, Any]], axis: str = "prompt_length"
+) -> str | None:
     """Peak memory (MiB) and % of footprint vs. *axis*, one line per model.
 
     OOM points are drawn as ``x`` at the top of the % panel.
@@ -310,14 +331,25 @@ def plot_peak_mem(tool_name: str, runs: list[dict[str, Any]], axis: str = "promp
     for i, model in enumerate(sorted(by_model)):
         color = _PALETTE[i % len(_PALETTE)]
         xs, mib, pct, oom = _peak_series(by_model[model], axis)
-        ax_mib.plot(xs, mib, marker=_MARKER, markersize=4, linewidth=1.8, color=color, label=model)
+        ax_mib.plot(
+            xs,
+            mib,
+            marker=_MARKER,
+            markersize=4,
+            linewidth=1.8,
+            color=color,
+            label=model,
+        )
         ax_pct.plot(xs, pct, marker=_MARKER, markersize=4, linewidth=1.8, color=color)
         if oom:
             top = max(pct + _threshold_values(runs) or [100])
             ax_pct.scatter(oom, [top] * len(oom), marker="x", color=color, s=40)
 
     _draw_thresholds(ax_pct, _threshold_values(runs))
-    for ax, ylabel in ((ax_mib, "Peak beyond weights (MiB)"), (ax_pct, "% of model footprint")):
+    for ax, ylabel in (
+        (ax_mib, "Peak beyond weights (MiB)"),
+        (ax_pct, "% of model footprint"),
+    ):
         _log2_xaxis(ax)
         ax.set_xlabel(axis, fontsize=10)
         ax.set_ylabel(ylabel, fontsize=10)
@@ -326,15 +358,22 @@ def plot_peak_mem(tool_name: str, runs: list[dict[str, Any]], axis: str = "promp
         _clean_spines(ax)
     ax_mib.set_yscale("log")
     ax_pct.set_yscale("log")
-    ax_mib.set_title(f"{tool_name} — peak memory (local GPU)", fontsize=12, fontweight="bold", loc="left")
+    ax_mib.set_title(
+        f"{tool_name} — peak memory (local GPU)",
+        fontsize=12,
+        fontweight="bold",
+        loc="left",
+    )
 
     _place_legend(ax_mib, n_entries=len(by_model), title="Model")
     fig.tight_layout()
     return _encode_png(fig)
 
 
-def plot_peak_mem_diff(tool_name: str, diff_rows: list[dict[str, Any]], axis: str = "prompt_length") -> str | None:
-    """% of footprint vs. *axis*: current (solid) over baseline (dashed), one color per model."""
+def plot_peak_mem_diff(
+    tool_name: str, diff_rows: list[dict[str, Any]], axis: str = "prompt_length"
+) -> str | None:
+    """% of footprint vs. *axis*: current (solid) over baseline (dashed), per model."""
     runs = [r[k] for r in diff_rows for k in ("old", "new") if r.get(k)]
     if not any(len(r.get("points", [])) >= 2 for r in runs):
         return None
@@ -351,12 +390,29 @@ def plot_peak_mem_diff(tool_name: str, diff_rows: list[dict[str, Any]], axis: st
         row = next(r for r in diff_rows if r["model"] == model)
         if row.get("old"):
             xs, _, pct, _ = _peak_series(row["old"], axis)
-            ax.plot(xs, pct, linestyle="--", linewidth=1.6, marker=_MARKER, markersize=4,
-                    color=color, alpha=0.55, label=None if row.get("new") else model)
+            ax.plot(
+                xs,
+                pct,
+                linestyle="--",
+                linewidth=1.6,
+                marker=_MARKER,
+                markersize=4,
+                color=color,
+                alpha=0.55,
+                label=None if row.get("new") else model,
+            )
         if row.get("new"):
             xs, _, pct, _ = _peak_series(row["new"], axis)
-            ax.plot(xs, pct, linestyle="-", linewidth=2, marker=_MARKER, markersize=4,
-                    color=color, label=model)
+            ax.plot(
+                xs,
+                pct,
+                linestyle="-",
+                linewidth=2,
+                marker=_MARKER,
+                markersize=4,
+                color=color,
+                label=model,
+            )
 
     _draw_thresholds(ax, _threshold_values(runs))
     _log2_xaxis(ax)
@@ -366,7 +422,9 @@ def plot_peak_mem_diff(tool_name: str, diff_rows: list[dict[str, Any]], axis: st
     ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
     ax.set_title(
         f"{tool_name} — peak memory  ·  solid=current, dashed=baseline",
-        fontsize=11, fontweight="bold", loc="left",
+        fontsize=11,
+        fontweight="bold",
+        loc="left",
     )
     _place_legend(ax, n_entries=len(models), title="Model")
     _clean_spines(ax)
@@ -415,9 +473,7 @@ def _apply_latency_yaxis(ax, values_ms: list[float]) -> None:
         ax.set_yscale("log")
         # Major ticks at each decade, minor at 2× and 5× within each.
         ax.yaxis.set_major_locator(LogLocator(base=10, numticks=12))
-        ax.yaxis.set_minor_locator(
-            LogLocator(base=10, subs=(2.0, 5.0), numticks=30)
-        )
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2.0, 5.0), numticks=30))
         ax.grid(True, which="major", alpha=0.3, linewidth=0.6)
         ax.grid(True, which="minor", alpha=0.12, linewidth=0.4)
     else:

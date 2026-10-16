@@ -40,7 +40,7 @@ class ToolBenchmarkConfig:
     """Configuration for benchmarking a single tool.
 
     Attributes:
-        tool_name: Human-readable name for this benchmark group.
+        tool_name: The name the tool's tests carry (e.g. ``logit_lens[length]``).
         tool: The tool instance to benchmark.
         fixed_args: kwargs that stay constant across all sweep combinations.
         sweep_params: Mapping of parameter name to a list of values to
@@ -79,7 +79,7 @@ def _activation_patching_length_build(
     fixed: dict[str, Any],
     sweep: dict[str, Any],
 ) -> dict[str, Any]:
-    """Patch the last position of equal-length prompts, so positions track the length."""
+    """Patch the last position of equal-length prompts (positions track the length)."""
     n = sweep["prompt_length"]
     src = prompt_of_length(model.tokenizer, n, variant="src")
     tgt = prompt_of_length(model.tokenizer, n, variant="tgt")
@@ -143,23 +143,30 @@ def tool_configs(
         if tools and not any(t in label for t in tools):
             continue
         if entry["tool"] not in TOOLS:
-            raise KeyError(f"{defn['name']}: no runner for tool {entry['tool']!r} (known: {sorted(TOOLS)})")
+            raise KeyError(
+                f"{defn['name']}: no runner for tool {entry['tool']!r} "
+                f"(known: {sorted(TOOLS)})"
+            )
         tool, build = TOOLS[entry["tool"]]
         sweep = dict(entry.get("sweep", {}))
         for key, values in (params or {}).items():
             if key in sweep:
                 sweep[key] = values
-        out.append(ToolBenchmarkConfig(
-            tool_name=label,
-            tool=tool,
-            fixed_args=dict(entry.get("fixed_args", {})),
-            sweep_params=sweep if defn["dimension"] == "latency" else {},
-            build_args=build,
-            sweep_axis=defn["meta_params"].get("swept", "prompt_length"),
-        ))
+        out.append(
+            ToolBenchmarkConfig(
+                tool_name=label,
+                tool=tool,
+                fixed_args=dict(entry.get("fixed_args", {})),
+                sweep_params=sweep if defn["dimension"] == "latency" else {},
+                build_args=build,
+                sweep_axis=defn["meta_params"].get("swept", "prompt_length"),
+            )
+        )
     return out
 
 
 def sweep_combos(config: ToolBenchmarkConfig) -> list[dict[str, Any]]:
     keys = list(config.sweep_params)
-    return [dict(zip(keys, values)) for values in product(*config.sweep_params.values())]
+    return [
+        dict(zip(keys, values)) for values in product(*config.sweep_params.values())
+    ]

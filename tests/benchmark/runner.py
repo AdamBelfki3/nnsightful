@@ -26,8 +26,8 @@ from .store import (
     FAILED,
     OK,
     UNSUPPORTED,
-    kind_env,
     clear_partial,
+    kind_env,
     load_run,
     make_result,
     mark_in_progress,
@@ -74,11 +74,19 @@ def git_state() -> dict[str, Any]:
     top = Path(_git("rev-parse", "--show-toplevel").strip())
     excluded = [str((BENCH_DIR / f).relative_to(top)) for f in _OUTPUT_FILES]
     pathspec = [".", *(f":(exclude){f}" for f in excluded)]
-    status = _git("status", "--porcelain", "--untracked-files=all", "--", *pathspec, cwd=top) or ""
+    status = (
+        _git("status", "--porcelain", "--untracked-files=all", "--", *pathspec, cwd=top)
+        or ""
+    )
     state: dict[str, Any] = {"git_hash": head.strip(), "dirty": bool(status.strip())}
     if state["dirty"]:
-        digest = hashlib.sha256((_git("diff", "HEAD", "--", *pathspec, cwd=top) or "").encode())
-        untracked = _git("ls-files", "--others", "--exclude-standard", "--", *pathspec, cwd=top) or ""
+        digest = hashlib.sha256(
+            (_git("diff", "HEAD", "--", *pathspec, cwd=top) or "").encode()
+        )
+        untracked = (
+            _git("ls-files", "--others", "--exclude-standard", "--", *pathspec, cwd=top)
+            or ""
+        )
         for name in sorted(untracked.splitlines()):
             digest.update(name.encode())
             digest.update((top / name).read_bytes())
@@ -101,10 +109,14 @@ def _package_info() -> dict[str, str]:
 def capture_env(
     kind: str, dtype: str, autocast: bool, remote_server: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Everything that makes *kind*'s results comparable (see README "Environment stamp")."""
+    """Everything that makes *kind*'s results comparable (README: ``env`` fields)."""
     import torch
 
-    env = {**git_state(), "timestamp": _timestamp(), "python": platform.python_version()}
+    env = {
+        **git_state(),
+        "timestamp": _timestamp(),
+        "python": platform.python_version(),
+    }
     env.update(_package_info())
     if torch.cuda.is_available():
         env["gpu"] = torch.cuda.get_device_name(0)
@@ -116,7 +128,7 @@ def capture_env(
 
 
 def remote_server_info(host: str) -> dict[str, Any]:
-    """Host plus the server's python / key package versions from its ``/env``, best effort."""
+    """Host plus the server's python / package versions from ``/env`` (best effort)."""
     import httpx
 
     info: dict[str, Any] = {"host": host}
@@ -148,9 +160,7 @@ def _autocast(dtype_name: str | None):
 
     if dtype_name is None or not torch.cuda.is_available():
         return nullcontext()
-    return torch.autocast(
-        "cuda", dtype=getattr(torch, dtype_name), cache_enabled=False
-    )
+    return torch.autocast("cuda", dtype=getattr(torch, dtype_name), cache_enabled=False)
 
 
 def free_cuda() -> None:
@@ -165,7 +175,6 @@ def free_cuda() -> None:
 def _warmup_tool(
     tool: Any,
     model: "StandardizedTransformer",
-    model_name: str,
     call_args: dict[str, Any],
     n_warmup: int,
     remote: bool = False,
@@ -225,7 +234,6 @@ def _measure_local(
 def _measure_remote(
     tool: Any,
     model: "StandardizedTransformer",
-    model_name: str,
     call_args: dict[str, Any],
     n_repeat: int,
     label: str = "",
@@ -258,8 +266,7 @@ def _measure_remote(
     return {
         **_stats_from_samples(phases["total_unqueued"]),
         "breakdown": {
-            phase: _stats_from_samples(samples)
-            for phase, samples in phases.items()
+            phase: _stats_from_samples(samples) for phase, samples in phases.items()
         },
     }
 
@@ -269,7 +276,10 @@ def _is_oom(exc: BaseException) -> bool:
     import torch
 
     while exc is not None:
-        if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
+        if (
+            isinstance(exc, torch.OutOfMemoryError)
+            or "out of memory" in str(exc).lower()
+        ):
             return True
         exc = exc.__cause__ or exc.__context__
     return False
@@ -305,8 +315,7 @@ def peak_pct(peak_bytes: int, footprint_bytes: int) -> float:
 def model_footprint(model: "StandardizedTransformer") -> int:
     """Bytes of the model's parameters and buffers, in their loaded dtype."""
     return sum(
-        t.numel() * t.element_size()
-        for t in (*model.parameters(), *model.buffers())
+        t.numel() * t.element_size() for t in (*model.parameters(), *model.buffers())
     )
 
 
@@ -318,12 +327,12 @@ def context_length(model: "StandardizedTransformer") -> int | None:
 
 
 class BenchmarkRunner:
-    """Run one block of the benchmark matrix for one model at a time.
+    """Measure a benchmark's tests for one model at a time.
 
     Local calls run under NDIF's autocast in ``dtype`` when CUDA is
     available (``autocast=False`` turns that off). Every test is
     isolated: a failing or unsupported test becomes a ``failed`` /
-    ``unsupported`` slot instead of aborting the run.
+    ``unsupported`` outcome instead of aborting the run.
     """
 
     def __init__(
@@ -363,21 +372,10 @@ class BenchmarkRunner:
                 nnsight.CONFIG.API.HOST = PRODUCTION_HOST
                 remote_server = remote_server_info(PRODUCTION_HOST)
             kind = "remote" if self.remote else "local"
-            self._env_cache = capture_env(kind, self.dtype, self._autocast_dtype is not None, remote_server)
+            self._env_cache = capture_env(
+                kind, self.dtype, self._autocast_dtype is not None, remote_server
+            )
         return self._env_cache
-
-    def latency_meta(self) -> dict[str, Any]:
-        return {"n_repeat": self.n_repeat, "n_warmup": self.n_warmup}
-
-    def peak_meta(self, axis: str = "prompt_length") -> dict[str, Any]:
-        return {
-            "thresholds": list(self.thresholds),
-            "swept": axis,
-            "min_length": self.min_length,
-            "max_length": self.max_length,
-            "n_repeat": self.n_repeat,
-            "n_warmup": self.n_warmup,
-        }
 
     def run(
         self,
@@ -385,9 +383,9 @@ class BenchmarkRunner:
         model: "StandardizedTransformer",
         configs: list[ToolBenchmarkConfig],
     ) -> list[dict[str, Any]]:
-        """Latency slots (``ok`` / ``failed`` / ``unsupported``) for every config × combo of one model."""
+        """Latency outcomes (ok / failed / unsupported) per config × combo."""
         kind = "remote" if self.remote else "local"
-        slots: list[dict[str, Any]] = []
+        outcomes: list[dict[str, Any]] = []
         for config in configs:
             label = f"{config.tool_name} | {model_name} | {kind}"
             built = []
@@ -402,33 +400,50 @@ class BenchmarkRunner:
                 print(f"  warming up: {label} (n_warmup={self.n_warmup})")
                 try:
                     _warmup_tool(
-                        config.tool, model, model_name, warm, self.n_warmup,
-                        remote=self.remote, autocast=self._autocast_dtype,
+                        config.tool,
+                        model,
+                        warm,
+                        self.n_warmup,
+                        remote=self.remote,
+                        autocast=self._autocast_dtype,
                     )
                 except Exception as exc:
-                    print(f"  warning: warmup failed ({type(exc).__name__}: {exc}); measuring each test anyway")
+                    print(
+                        f"  warning: warmup failed ({type(exc).__name__}: {exc}); "
+                        "measuring each test anyway"
+                    )
 
             for sweep, call_args, err in built:
-                slot = {"tool": config.tool_name, "model": model_name, "params": sweep}
-                test_label = f"{label} | " + ", ".join(f"{k}={v}" for k, v in sweep.items())
+                test = {"tool": config.tool_name, "model": model_name, "params": sweep}
+                test_label = f"{label} | " + ", ".join(
+                    f"{k}={v}" for k, v in sweep.items()
+                )
                 if err is None:
                     print(f"  benchmarking: {test_label}")
                     try:
                         if self.remote:
                             stats = _measure_remote(
-                                config.tool, model, model_name, call_args, self.n_repeat, label=test_label,
+                                config.tool,
+                                model,
+                                call_args,
+                                self.n_repeat,
+                                label=test_label,
                             )
                         else:
                             stats = _measure_local(
-                                config.tool, model, call_args, self.n_repeat,
-                                label=test_label, autocast=self._autocast_dtype,
+                                config.tool,
+                                model,
+                                call_args,
+                                self.n_repeat,
+                                label=test_label,
+                                autocast=self._autocast_dtype,
                             )
-                        slots.append({**slot, "status": OK, "stats": stats})
+                        outcomes.append({**test, "status": OK, "stats": stats})
                         continue
                     except Exception as exc:
                         err = exc
-                slots.append(_error_slot(slot, err, test_label))
-        return slots
+                outcomes.append(_failed_outcome(test, err, test_label))
+        return outcomes
 
     def run_peak_mem(
         self,
@@ -436,7 +451,7 @@ class BenchmarkRunner:
         model: "StandardizedTransformer",
         configs: list[ToolBenchmarkConfig],
     ) -> list[dict[str, Any]]:
-        """Peak-memory slots for every config of one model.
+        """Peak-memory outcomes for every config of one model.
 
         For each tool: a coarse doubling sweep of the config's
         ``sweep_axis`` from ``min_length``, then bisection to the exact
@@ -448,12 +463,16 @@ class BenchmarkRunner:
         footprint = model_footprint(model)
         ctx = context_length(model)
         cap = self.max_length if ctx is None else min(self.max_length, ctx - 1)
-        slots: list[dict[str, Any]] = []
+        outcomes: list[dict[str, Any]] = []
 
         for config in configs:
             axis = config.sweep_axis
             label = f"{config.tool_name} | {model_name} | peak_mem"
-            slot = {"tool": config.tool_name, "model": model_name, "params": dict(config.fixed_args)}
+            test = {
+                "tool": config.tool_name,
+                "model": model_name,
+                "params": dict(config.fixed_args),
+            }
             print(f"  sweeping: {label} (cap {axis}={cap})")
             points: dict[int, dict[str, Any]] = {}
 
@@ -467,24 +486,30 @@ class BenchmarkRunner:
             try:
                 _build(config, model, {axis: self.min_length})
                 found = search_max_lengths(
-                    measure, footprint, self.thresholds, cap, start=self.min_length,
+                    measure,
+                    footprint,
+                    self.thresholds,
+                    cap,
+                    start=self.min_length,
                 )
             except Exception as exc:
-                slots.append(_error_slot(slot, exc, label))
+                outcomes.append(_failed_outcome(test, exc, label))
                 continue
 
-            slots.append({
-                **slot,
-                "status": OK,
-                "stats": {
-                    "footprint_bytes": footprint,
-                    "context_cap": cap,
-                    "max_prompt_length": found.max_lengths,
-                    "capped": found.capped,
-                    "points": [points[n] for n in sorted(points)],
-                },
-            })
-        return slots
+            outcomes.append(
+                {
+                    **test,
+                    "status": OK,
+                    "stats": {
+                        "footprint_bytes": footprint,
+                        "context_cap": cap,
+                        "max_prompt_length": found.max_lengths,
+                        "capped": found.capped,
+                        "points": [points[n] for n in sorted(points)],
+                    },
+                }
+            )
+        return outcomes
 
     def _measure_point(
         self,
@@ -530,9 +555,14 @@ class BenchmarkRunner:
         return point
 
     @classmethod
-    def for_definition(cls, defn: dict[str, Any], **overrides: Any) -> "BenchmarkRunner":
+    def for_definition(
+        cls, defn: dict[str, Any], **overrides: Any
+    ) -> "BenchmarkRunner":
         """A runner set up from a benchmark definition's kind and ``meta_params``."""
-        meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+        meta = {
+            **defn["meta_params"],
+            **{k: v for k, v in overrides.items() if v is not None},
+        }
         return cls(
             n_repeat=meta.get("n_repeat", 3),
             n_warmup=meta.get("n_warmup", 1),
@@ -551,7 +581,7 @@ class BenchmarkRunner:
         load_model: Callable[[str], "StandardizedTransformer"],
         configs: list[ToolBenchmarkConfig],
     ) -> list[dict[str, Any]]:
-        """Outcomes of *configs* on one model; a model that fails to load fails its tests."""
+        """Outcomes of *configs* on one model (all failed if it can't be loaded)."""
         try:
             model = load_model(model_name)
         except Exception as exc:
@@ -559,9 +589,14 @@ class BenchmarkRunner:
             tests = expand_tests({**defn, "models": [model_name]})
             names = {c.tool_name for c in configs}
             return [
-                {**{k: t[k] for k in ("tool", "model", "params")}, "status": FAILED,
-                 "stats": None, "error": f"model load: {type(exc).__name__}: {exc}"[:500]}
-                for t in tests if t["tool"] in names
+                {
+                    **{k: t[k] for k in ("tool", "model", "params")},
+                    "status": FAILED,
+                    "stats": None,
+                    "error": f"model load: {type(exc).__name__}: {exc}"[:500],
+                }
+                for t in tests
+                if t["tool"] in names
             ]
         try:
             if defn["dimension"] == "peak_mem":
@@ -588,22 +623,34 @@ def run_benchmark(
     runner = BenchmarkRunner.for_definition(defn)
     configs = tool_configs(defn)
     env = runner.env()
-    for warning in version_warnings({defn["name"]: defn}, _recorded_stamps(defn["name"], path)):
+    for warning in version_warnings(
+        {defn["name"]: defn}, _recorded_stamps(defn["name"], path)
+    ):
         print(f"warning: {warning}")
-    print(f"\nRunning {defn['name']} v{defn['version']} ({len(defn['models'])} model(s) × {len(configs)} tool(s))...")
+    print(
+        f"\nRunning {defn['name']} v{defn['version']} "
+        f"({len(defn['models'])} model(s) × {len(configs)} tool(s))..."
+    )
     outcomes: list[dict[str, Any]] = []
     models = list(defn["models"])
     for i, model_name in enumerate(models):
         outcomes += runner.run_tests(defn, model_name, load_model, configs)
         partial = make_result(defn, env, defn["meta_params"], outcomes)
-        save_partial(path, defn["name"], mark_in_progress(partial, models[: i + 1], models[i + 1:]))
+        save_partial(
+            path,
+            defn["name"],
+            mark_in_progress(partial, models[: i + 1], models[i + 1 :]),
+        )
     result = make_result(defn, env, defn["meta_params"], outcomes)
     run = load_run(path) or {}
     run[defn["name"]] = result
     save_json(path, run)
     clear_partial(path, defn["name"])
-    print(f"\n  {defn['name']}: {result['status']} ({len(result['results'])} result(s), "
-          f"{len(result['failed'])} failed, {len(result['optional_failed'])} optional failed) -> {path}")
+    print(
+        f"\n  {defn['name']}: {result['status']} ({len(result['results'])} result(s), "
+        f"{len(result['failed'])} failed, "
+        f"{len(result['optional_failed'])} optional failed) -> {path}"
+    )
     return result
 
 
@@ -619,18 +666,29 @@ def run_individual(
 
     *models* / *tools* are substring filters; *params* overrides sweep values.
     """
-    selected = [m for m in defn["models"] if not models or any(sub in m for sub in models)]
+    selected = [
+        m for m in defn["models"] if not models or any(sub in m for sub in models)
+    ]
     if models:
         selected += [m for m in models if "/" in m and m not in selected]
     configs = tool_configs(defn, tools, params)
     if not selected or not configs:
         return None
     runner = BenchmarkRunner.for_definition(defn, **overrides)
-    meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+    meta = {
+        **defn["meta_params"],
+        **{k: v for k, v in overrides.items() if v is not None},
+    }
     outcomes: list[dict[str, Any]] = []
     for model_name in selected:
         outcomes += runner.run_tests(defn, model_name, load_model, configs)
-    return make_result(None, runner.env(), meta, outcomes, benchmark={**stamp(defn), "individual": True})
+    return make_result(
+        None,
+        runner.env(),
+        meta,
+        outcomes,
+        benchmark={**stamp(defn), "individual": True},
+    )
 
 
 def _recorded_stamps(name: str, path: Path | None = None) -> list[dict[str, Any]]:
@@ -645,17 +703,21 @@ def _recorded_stamps(name: str, path: Path | None = None) -> list[dict[str, Any]
     return out
 
 
-def _build(config: ToolBenchmarkConfig, model: "StandardizedTransformer", sweep: dict[str, Any]) -> dict[str, Any]:
+def _build(
+    config: ToolBenchmarkConfig, model: "StandardizedTransformer", sweep: dict[str, Any]
+) -> dict[str, Any]:
     if config.build_args is not None:
         return config.build_args(model, config.fixed_args, sweep)
     return {**config.fixed_args, **sweep}
 
 
-def _error_slot(slot: dict[str, Any], exc: BaseException, label: str) -> dict[str, Any]:
-    """A ``failed`` (or ``unsupported``) slot recording *exc*."""
+def _failed_outcome(
+    test: dict[str, Any], exc: BaseException, label: str
+) -> dict[str, Any]:
+    """A ``failed`` (or ``unsupported``) outcome for *test*, recording *exc*."""
     status = UNSUPPORTED if isinstance(exc, UnsupportedTest) else FAILED
     message = f"{type(exc).__name__}: {exc}"
     if _is_oom(exc):
         message = f"out of memory: {message}"
     print(f"  {status.upper()}: {label}: {message}")
-    return {**slot, "status": status, "stats": None, "error": message[:500]}
+    return {**test, "status": status, "stats": None, "error": message[:500]}

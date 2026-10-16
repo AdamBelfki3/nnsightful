@@ -31,14 +31,10 @@ _BASE_TGT = (
     "The amphitheater is in"
 )
 
-_FILLER = (
-    "The quick brown fox jumps over the lazy dog. " * 100
-)
+_FILLER = "The quick brown fox jumps over the lazy dog. " * 100
 
 
-def _truncate_to_length(
-    tokenizer: "PreTrainedTokenizerBase", text: str, n: int
-) -> str:
+def _truncate_to_length(tokenizer: "PreTrainedTokenizerBase", text: str, n: int) -> str:
     """Return a string that re-encodes to exactly ``n`` tokens.
 
     The source ids are encoded without special tokens and padded with

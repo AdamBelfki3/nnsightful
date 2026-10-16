@@ -101,7 +101,6 @@ def search_max_lengths(
         result.max_lengths[label] = lo
 
     result.max_lengths = {
-        threshold_label(t): result.max_lengths[threshold_label(t)]
-        for t in thresholds
+        threshold_label(t): result.max_lengths[threshold_label(t)] for t in thresholds
     }
     return result
