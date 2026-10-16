@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
 
-# Two base texts of roughly similar structure. Long enough that any
-# reasonable tokenizer produces well over 50 tokens.
+# Two base texts of roughly similar structure; longer prompts continue
+# with _FILLER.
 _BASE_SRC = (
     "The Eiffel Tower is a famous landmark located in the heart of France. "
     "It was built in 1889 for the World's Fair and stands over three hundred "
@@ -41,6 +41,11 @@ def _truncate_to_length(
 ) -> str:
     """Return a string that re-encodes to exactly ``n`` tokens.
 
+    The source ids are encoded without special tokens and padded with
+    filler to at least ``2n`` ids, so any length works and a BOS is never
+    decoded into the text; ``n`` counts the special tokens the tokenizer
+    adds when the tool re-encodes the prompt.
+
     Naive ``decode(encode(text)[:n])`` doesn't guarantee an N-token output
     because BPE decode→re-encode can drift by a token or two at boundaries
     (special tokens, whitespace normalization, merges). Since the tools we
@@ -48,11 +53,10 @@ def _truncate_to_length(
     the drift amount without correction. We iterate: decode a prefix,
     measure the re-encoded length, shift the prefix boundary, retry.
     """
-    ids = tokenizer.encode(text)
-    if len(ids) < n * 2:
-        # Pad generously so we have headroom to grow the prefix if the
-        # drift pushes us below n.
-        ids = ids + tokenizer.encode(_FILLER)
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    filler = tokenizer.encode(_FILLER, add_special_tokens=False)
+    while len(ids) < n * 2:
+        ids = ids + filler
 
     k = n  # number of source token ids to decode from
     decoded = tokenizer.decode(ids[:k])

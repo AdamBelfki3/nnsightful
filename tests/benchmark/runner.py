@@ -1,62 +1,134 @@
-"""Benchmark runner: sweep parameters, measure latency, write results."""
+"""Benchmark runner: run whole benchmarks (or individual tests) and record them.
+
+A benchmark run measures every test of its JSON definition, one model at
+a time, and writes one result to ``run.json`` with a single env stamp
+(see ``store.py``).
+"""
 
 from __future__ import annotations
 
-import json
+import gc
+import hashlib
+import importlib
 import platform
 import statistics
 import subprocess
 import time
-from itertools import product
+from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
-from .config import ToolBenchmarkConfig
+from .config import ToolBenchmarkConfig, UnsupportedTest, sweep_combos, tool_configs
+from .definitions import expand_tests, stamp, version_warnings
+from .memory import search_max_lengths
+from .store import (
+    BENCH_DIR,
+    FAILED,
+    OK,
+    UNSUPPORTED,
+    kind_env,
+    clear_partial,
+    load_run,
+    make_result,
+    mark_in_progress,
+    run_path,
+    save_json,
+    save_partial,
+)
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
 
-BASELINE_FILE = Path(__file__).parent / "results.json"
-LATEST_FILE = Path(__file__).parent / "latest.json"
+DEFAULT_THRESHOLDS = (0.10, 0.25, 0.50)
 
-SECTIONS = ("local", "remote")
-
-
-def _section_for(remote: bool) -> str:
-    return "remote" if remote else "local"
+PRODUCTION_HOST = "https://api.ndif.us"
+_SERVER_PACKAGES = ("ndif", "nnsight", "nnterp", "torch", "transformers")
+_CLIENT_PACKAGES = ("nnsight", "nnterp", "transformers", "torch")
+_OUTPUT_FILES = ("baseline.json", "results.md", "benchmark_diff.md")
 
 
-def _empty_sections() -> dict[str, list]:
-    return {"local": [], "remote": []}
-
-
-
-def _git_hash() -> str:
+def _git(*args: str, cwd: Path = BENCH_DIR) -> str | None:
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=Path(__file__).parent,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
+        return subprocess.check_output(
+            ["git", *args], cwd=cwd, stderr=subprocess.DEVNULL
+        ).decode()
     except Exception:
-        return "unknown"
+        return None
 
 
-def _system_info() -> dict[str, str]:
+def _timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def git_state() -> dict[str, Any]:
+    """``git_hash``, ``dirty`` and, when dirty, a ``dirty_fingerprint`` of the changes.
+
+    Benchmark outputs (baseline, reports) don't count as
+    changes; ``run.json`` is gitignored. The fingerprint hashes the diff
+    against HEAD plus untracked files, so two dirty runs of identical code
+    share it.
+    """
+    head = _git("rev-parse", "HEAD")
+    if head is None:
+        return {"git_hash": "unknown", "dirty": True}
+    top = Path(_git("rev-parse", "--show-toplevel").strip())
+    excluded = [str((BENCH_DIR / f).relative_to(top)) for f in _OUTPUT_FILES]
+    pathspec = [".", *(f":(exclude){f}" for f in excluded)]
+    status = _git("status", "--porcelain", "--untracked-files=all", "--", *pathspec, cwd=top) or ""
+    state: dict[str, Any] = {"git_hash": head.strip(), "dirty": bool(status.strip())}
+    if state["dirty"]:
+        digest = hashlib.sha256((_git("diff", "HEAD", "--", *pathspec, cwd=top) or "").encode())
+        untracked = _git("ls-files", "--others", "--exclude-standard", "--", *pathspec, cwd=top) or ""
+        for name in sorted(untracked.splitlines()):
+            digest.update(name.encode())
+            digest.update((top / name).read_bytes())
+        state["dirty_fingerprint"] = digest.hexdigest()[:16]
+    return state
+
+
+def _package_info() -> dict[str, str]:
+    """Versions of the key packages, plus the git commit of editable checkouts."""
+    info = {}
+    for name in _CLIENT_PACKAGES:
+        module = importlib.import_module(name)
+        info[name] = module.__version__
+        src = Path(module.__file__)
+        if _git("ls-files", "--error-unmatch", src.name, cwd=src.parent) is not None:
+            info[f"{name}_commit"] = _git("rev-parse", "HEAD", cwd=src.parent).strip()
+    return info
+
+
+def capture_env(
+    kind: str, dtype: str, autocast: bool, remote_server: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Everything that makes *kind*'s results comparable (see README "Environment stamp")."""
     import torch
-    import transformers
-    import nnsight
 
-    return {
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "transformers": transformers.__version__,
-        "nnsight": nnsight.__version__,
-    }
+    env = {**git_state(), "timestamp": _timestamp(), "python": platform.python_version()}
+    env.update(_package_info())
+    if torch.cuda.is_available():
+        env["gpu"] = torch.cuda.get_device_name(0)
+    env["dtype"] = dtype
+    env["autocast"] = autocast
+    if remote_server is not None:
+        env["remote_server"] = remote_server
+    return {"kind": kind, **kind_env(env, kind)}
+
+
+def remote_server_info(host: str) -> dict[str, Any]:
+    """Host plus the server's python / key package versions from its ``/env``, best effort."""
+    import httpx
+
+    info: dict[str, Any] = {"host": host}
+    try:
+        env = httpx.get(f"{host}/env", timeout=10).json()
+    except Exception as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"
+        return info
+    info["python"] = str(env.get("python_version", "")).split(" ")[0]
+    packages = env.get("packages", {})
+    info["packages"] = {k: packages[k] for k in _SERVER_PACKAGES if k in packages}
+    return info
 
 
 def _sync() -> None:
@@ -67,6 +139,29 @@ def _sync() -> None:
         torch.cuda.synchronize()
 
 
+def _autocast(dtype_name: str | None):
+    """NDIF's execution context: ``torch.autocast`` in the model dtype, no cache.
+
+    ``None`` (or no CUDA) disables it.
+    """
+    import torch
+
+    if dtype_name is None or not torch.cuda.is_available():
+        return nullcontext()
+    return torch.autocast(
+        "cuda", dtype=getattr(torch, dtype_name), cache_enabled=False
+    )
+
+
+def free_cuda() -> None:
+    """Collect garbage and return cached CUDA blocks."""
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _warmup_tool(
     tool: Any,
     model: "StandardizedTransformer",
@@ -74,6 +169,7 @@ def _warmup_tool(
     call_args: dict[str, Any],
     n_warmup: int,
     remote: bool = False,
+    autocast: str | None = None,
 ) -> None:
     """Untimed warmup calls for a specific (tool, model) pair."""
     for _ in range(n_warmup):
@@ -83,7 +179,8 @@ def _warmup_tool(
             backend = RemoteBackendCounter(model.to_model_key())
             tool(model, remote=True, backend=backend, **call_args)
         else:
-            tool(model, **call_args)
+            with _autocast(autocast):
+                tool(model, **call_args)
             _sync()
 
 
@@ -106,8 +203,9 @@ def _measure_local(
     call_args: dict[str, Any],
     n_repeat: int,
     label: str = "",
+    autocast: str | None = None,
 ) -> dict[str, Any]:
-    """Measure wall-clock latency for a local tool call."""
+    """Wall-clock latency stats for a local tool call."""
     from tqdm import tqdm
 
     kwargs = dict(call_args)
@@ -115,12 +213,13 @@ def _measure_local(
     for _ in tqdm(range(n_repeat), desc=label, leave=False):
         _sync()
         t0 = time.perf_counter()
-        tool(model, **kwargs)
+        with _autocast(autocast):
+            tool(model, **kwargs)
         _sync()
         t1 = time.perf_counter()
         samples.append(t1 - t0)
 
-    return {"latency": _stats_from_samples(samples)}
+    return _stats_from_samples(samples)
 
 
 def _measure_remote(
@@ -131,12 +230,11 @@ def _measure_remote(
     n_repeat: int,
     label: str = "",
 ) -> dict[str, Any]:
-    """Measure latency for a remote tool call using the backend counter.
+    """Latency stats for a remote tool call using the backend counter.
 
     Creates a fresh ``RemoteBackendCounter`` per call to capture
-    per-phase timing. The primary ``latency`` field stores
-    ``total_unqueued`` stats — the cost excluding queue wait. A
-    ``latency_breakdown`` dict holds all four phase stats.
+    per-phase timing. The top-level stats are ``total_unqueued`` — the
+    cost excluding queue wait — and ``breakdown`` holds all four phases.
     """
     from tqdm import tqdm
 
@@ -158,342 +256,406 @@ def _measure_remote(
             phases[phase].append(value)
 
     return {
-        "latency": _stats_from_samples(phases["total_unqueued"]),
-        "latency_breakdown": {
+        **_stats_from_samples(phases["total_unqueued"]),
+        "breakdown": {
             phase: _stats_from_samples(samples)
             for phase, samples in phases.items()
         },
     }
 
 
-def result_key(entry: dict[str, Any]) -> str:
-    """Unique key for a row within its section: (tool, model, params).
+def _is_oom(exc: BaseException) -> bool:
+    """True for a CUDA out-of-memory error, including ones nnsight re-wraps."""
+    import torch
 
-    ``remote`` is no longer part of the key — rows live in separate
-    ``results.local`` / ``results.remote`` sections instead.
+    while exc is not None:
+        if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def measure_peak(fn: Callable[[], Any]) -> int | None:
+    """Peak CUDA bytes allocated by ``fn()`` beyond what was allocated before it.
+
+    Returns ``None`` when ``fn`` runs out of memory.
     """
-    return json.dumps(
-        {
-            "tool": entry["tool"],
-            "model": entry["model"],
-            "params": entry["params"],
-        },
-        sort_keys=True,
-        default=str,
+    import torch
+
+    free_cuda()
+    _sync()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    try:
+        fn()
+        _sync()
+    except Exception as exc:
+        if not _is_oom(exc):
+            raise
+        free_cuda()
+        return None
+    return torch.cuda.max_memory_allocated() - base
+
+
+def peak_pct(peak_bytes: int, footprint_bytes: int) -> float:
+    """Peak as a percentage of the model footprint, to 3 decimals."""
+    return round(peak_bytes / footprint_bytes * 100, 3)
+
+
+def model_footprint(model: "StandardizedTransformer") -> int:
+    """Bytes of the model's parameters and buffers, in their loaded dtype."""
+    return sum(
+        t.numel() * t.element_size()
+        for t in (*model.parameters(), *model.buffers())
     )
 
 
+def context_length(model: "StandardizedTransformer") -> int | None:
+    """The model's maximum position count, if its config declares one."""
+    config = model.config
+    config = getattr(config, "text_config", None) or config
+    return getattr(config, "max_position_embeddings", None)
+
+
 class BenchmarkRunner:
-    """Run benchmarks across models and tool configurations."""
+    """Run one block of the benchmark matrix for one model at a time.
+
+    Local calls run under NDIF's autocast in ``dtype`` when CUDA is
+    available (``autocast=False`` turns that off). Every test is
+    isolated: a failing or unsupported test becomes a ``failed`` /
+    ``unsupported`` slot instead of aborting the run.
+    """
 
     def __init__(
         self,
         n_repeat: int = 3,
         n_warmup: int = 1,
         remote: bool = False,
+        dtype: str = "bfloat16",
+        autocast: bool = True,
+        thresholds: tuple[float, ...] = DEFAULT_THRESHOLDS,
+        min_length: int = 2,
+        max_length: int = 4096,
     ):
         self.n_repeat = n_repeat
         self.n_warmup = n_warmup
         self.remote = remote
+        self.dtype = dtype
+        self.autocast = autocast
+        self.thresholds = tuple(thresholds)
+        self.min_length = min_length
+        self.max_length = max_length
+        self._env_cache: dict[str, Any] | None = None
+
+    @property
+    def _autocast_dtype(self) -> str | None:
+        import torch
+
+        return self.dtype if self.autocast and torch.cuda.is_available() else None
+
+    def env(self) -> dict[str, Any]:
+        """The env stamp of this runner's kind (captured once per runner)."""
+        if self._env_cache is None:
+            remote_server = None
+            if self.remote:
+                import nnsight
+
+                nnsight.CONFIG.API.HOST = PRODUCTION_HOST
+                remote_server = remote_server_info(PRODUCTION_HOST)
+            kind = "remote" if self.remote else "local"
+            self._env_cache = capture_env(kind, self.dtype, self._autocast_dtype is not None, remote_server)
+        return self._env_cache
+
+    def latency_meta(self) -> dict[str, Any]:
+        return {"n_repeat": self.n_repeat, "n_warmup": self.n_warmup}
+
+    def peak_meta(self, axis: str = "prompt_length") -> dict[str, Any]:
+        return {
+            "thresholds": list(self.thresholds),
+            "swept": axis,
+            "min_length": self.min_length,
+            "max_length": self.max_length,
+            "n_repeat": self.n_repeat,
+            "n_warmup": self.n_warmup,
+        }
 
     def run(
         self,
-        models: dict[str, "StandardizedTransformer"],
+        model_name: str,
+        model: "StandardizedTransformer",
         configs: list[ToolBenchmarkConfig],
-    ) -> dict[str, Any]:
-        """Run all benchmarks and return the full results dict.
-
-        Rows are placed into ``results.local`` or ``results.remote``
-        depending on ``self.remote``. The other section is left empty
-        (merge will preserve the existing section's data).
-        """
-        rows: list[dict[str, Any]] = []
-        errors: list[str] = []
-
+    ) -> list[dict[str, Any]]:
+        """Latency slots (``ok`` / ``failed`` / ``unsupported``) for every config × combo of one model."""
+        kind = "remote" if self.remote else "local"
+        slots: list[dict[str, Any]] = []
         for config in configs:
-            sweep_keys = list(config.sweep_params.keys())
-            sweep_values = [config.sweep_params[k] for k in sweep_keys]
-            combos = list(product(*sweep_values)) if sweep_values else [()]
+            label = f"{config.tool_name} | {model_name} | {kind}"
+            built = []
+            for sweep in sweep_combos(config):
+                try:
+                    built.append((sweep, _build(config, model, sweep), None))
+                except Exception as exc:
+                    built.append((sweep, None, exc))
 
-            for model_name, model in models.items():
-                combo_kwargs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-                for combo in combos:
-                    sweep_dict = dict(zip(sweep_keys, combo))
-                    if config.build_args is not None:
-                        call_args = config.build_args(
-                            model, config.fixed_args, sweep_dict
-                        )
-                    else:
-                        call_args = {**config.fixed_args, **sweep_dict}
-                    combo_kwargs.append((sweep_dict, call_args))
-
-                # Warmup — if it fails, skip this entire (config, model)
-                # but continue with the next one.
-                if self.n_warmup > 0 and combo_kwargs:
-                    warmup_label = f"{config.tool_name} | {model_name}"
-                    if self.remote:
-                        warmup_label += " | remote"
-                    print(
-                        f"  warming up: {warmup_label} (n_warmup={self.n_warmup})"
+            warm = next((args for _, args, err in reversed(built) if err is None), None)
+            if self.n_warmup > 0 and warm is not None:
+                print(f"  warming up: {label} (n_warmup={self.n_warmup})")
+                try:
+                    _warmup_tool(
+                        config.tool, model, model_name, warm, self.n_warmup,
+                        remote=self.remote, autocast=self._autocast_dtype,
                     )
-                    try:
-                        _warmup_tool(
-                            config.tool,
-                            model,
-                            model_name,
-                            combo_kwargs[-1][1],
-                            self.n_warmup,
-                            remote=self.remote,
-                        )
-                    except Exception as exc:
-                        msg = f"{warmup_label}: warmup failed ({exc})"
-                        print(f"  ERROR: {msg} — skipping this config")
-                        errors.append(msg)
-                        continue
+                except Exception as exc:
+                    print(f"  warning: warmup failed ({type(exc).__name__}: {exc}); measuring each test anyway")
 
-                for sweep_dict, call_args in combo_kwargs:
-                    label = f"{config.tool_name} | {model_name}"
-                    if sweep_dict:
-                        param_str = ", ".join(
-                            f"{k}={v}" for k, v in sweep_dict.items()
-                        )
-                        label += f" | {param_str}"
-                    if self.remote:
-                        label += " | remote"
-
-                    print(f"  benchmarking: {label}")
-
+            for sweep, call_args, err in built:
+                slot = {"tool": config.tool_name, "model": model_name, "params": sweep}
+                test_label = f"{label} | " + ", ".join(f"{k}={v}" for k, v in sweep.items())
+                if err is None:
+                    print(f"  benchmarking: {test_label}")
                     try:
                         if self.remote:
-                            measured = _measure_remote(
-                                config.tool,
-                                model,
-                                model_name,
-                                call_args,
-                                self.n_repeat,
-                                label=label,
+                            stats = _measure_remote(
+                                config.tool, model, model_name, call_args, self.n_repeat, label=test_label,
                             )
                         else:
-                            measured = _measure_local(
-                                config.tool,
-                                model,
-                                call_args,
-                                self.n_repeat,
-                                label=label,
+                            stats = _measure_local(
+                                config.tool, model, call_args, self.n_repeat,
+                                label=test_label, autocast=self._autocast_dtype,
                             )
-                    except Exception as exc:
-                        msg = f"{label}: {exc}"
-                        print(f"  ERROR: {msg} — skipping")
-                        errors.append(msg)
+                        slots.append({**slot, "status": OK, "stats": stats})
                         continue
+                    except Exception as exc:
+                        err = exc
+                slots.append(_error_slot(slot, err, test_label))
+        return slots
 
-                    rows.append(
-                        {
-                            "tool": config.tool_name,
-                            "model": model_name,
-                            "params": sweep_dict,
-                            **measured,
-                        }
-                    )
-
-        if errors:
-            print(f"\n  {len(errors)} config(s) failed:")
-            for e in errors:
-                print(f"    - {e}")
-
-        section = _section_for(self.remote)
-        results = _empty_sections()
-        results[section] = rows
-
-        return {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "git_hash": _git_hash(),
-            "system_info": _system_info(),
-            "n_repeat": self.n_repeat,
-            "n_warmup": self.n_warmup,
-            "results": results,
-        }
-
-    def run_and_save(
+    def run_peak_mem(
         self,
-        models: dict[str, "StandardizedTransformer"],
+        model_name: str,
+        model: "StandardizedTransformer",
         configs: list[ToolBenchmarkConfig],
-        path: Path | None = None,
-    ) -> dict[str, Any]:
-        """Run benchmarks and save them to the *latest* results file.
+    ) -> list[dict[str, Any]]:
+        """Peak-memory slots for every config of one model.
 
-        When the existing file's ``git_hash`` matches, sections are
-        merged independently: the active section's rows are updated
-        via key-match; the other section is preserved untouched.
-        On hash mismatch the file is replaced wholesale.
+        For each tool: a coarse doubling sweep of the config's
+        ``sweep_axis`` from ``min_length``, then bisection to the exact
+        largest value whose peak stays under each threshold of the model
+        footprint (see ``memory.search_max_lengths``). Every probed point
+        gets one peak measurement and, separately, ``n_warmup`` + ``n_repeat``
+        timed calls under the same conditions.
         """
-        path = path or LATEST_FILE
-        data = self.run(models, configs)
+        footprint = model_footprint(model)
+        ctx = context_length(model)
+        cap = self.max_length if ctx is None else min(self.max_length, ctx - 1)
+        slots: list[dict[str, Any]] = []
 
-        existing = load_run(path)
-        merged = _should_merge(existing, data)
-        if existing is not None and not merged:
-            _warn_replace(existing, data, path)
-        if merged:
-            _warn_settings_mismatch(existing, data)  # type: ignore[arg-type]
-            final = _merge_run(existing, data)  # type: ignore[arg-type]
-        else:
-            final = data
+        for config in configs:
+            axis = config.sweep_axis
+            label = f"{config.tool_name} | {model_name} | peak_mem"
+            slot = {"tool": config.tool_name, "model": model_name, "params": dict(config.fixed_args)}
+            print(f"  sweeping: {label} (cap {axis}={cap})")
+            points: dict[int, dict[str, Any]] = {}
 
-        save_run(path, final)
+            def measure(n: int) -> int | None:
+                point = self._measure_point(model, config, n, footprint)
+                points[n] = point
+                shown = "OOM" if point.get("oom") else f"{point['pct']:.1f}%"
+                print(f"    {axis}={n}: {shown}")
+                return point["peak_bytes"]
 
-        action = "merged into" if merged else "written to"
-        print(f"\n  results {action} {path}")
-        return data
+            try:
+                _build(config, model, {axis: self.min_length})
+                found = search_max_lengths(
+                    measure, footprint, self.thresholds, cap, start=self.min_length,
+                )
+            except Exception as exc:
+                slots.append(_error_slot(slot, exc, label))
+                continue
+
+            slots.append({
+                **slot,
+                "status": OK,
+                "stats": {
+                    "footprint_bytes": footprint,
+                    "context_cap": cap,
+                    "max_prompt_length": found.max_lengths,
+                    "capped": found.capped,
+                    "points": [points[n] for n in sorted(points)],
+                },
+            })
+        return slots
+
+    def _measure_point(
+        self,
+        model: "StandardizedTransformer",
+        config: ToolBenchmarkConfig,
+        n: int,
+        footprint: int,
+    ) -> dict[str, Any]:
+        """Warmup, one peak measurement, then timed repeats at ``axis = n``."""
+        axis = config.sweep_axis
+        call_args = _build(config, model, {axis: n})
+        point: dict[str, Any] = {axis: n, "peak_bytes": None, "pct": None}
+
+        def call() -> None:
+            with _autocast(self._autocast_dtype):
+                config.tool(model, **call_args)
+
+        try:
+            for _ in range(self.n_warmup):
+                call()
+                _sync()
+        except Exception as exc:
+            if not _is_oom(exc):
+                raise
+            free_cuda()
+            point["oom"] = True
+            return point
+
+        peak = measure_peak(call)
+        if peak is None:
+            point["oom"] = True
+            return point
+        point["peak_bytes"] = peak
+        point["pct"] = peak_pct(peak, footprint)
+        point["latency"] = _measure_local(
+            config.tool,
+            model,
+            call_args,
+            self.n_repeat,
+            label=f"{config.tool_name} | {axis}={n}",
+            autocast=self._autocast_dtype,
+        )
+        return point
+
+    @classmethod
+    def for_definition(cls, defn: dict[str, Any], **overrides: Any) -> "BenchmarkRunner":
+        """A runner set up from a benchmark definition's kind and ``meta_params``."""
+        meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+        return cls(
+            n_repeat=meta.get("n_repeat", 3),
+            n_warmup=meta.get("n_warmup", 1),
+            remote=defn["kind"] == "remote",
+            dtype=meta.get("dtype", "bfloat16"),
+            autocast=meta.get("autocast", True),
+            thresholds=tuple(meta.get("thresholds", DEFAULT_THRESHOLDS)),
+            min_length=meta.get("min_length", 2),
+            max_length=meta.get("max_length", 4096),
+        )
+
+    def run_tests(
+        self,
+        defn: dict[str, Any],
+        model_name: str,
+        load_model: Callable[[str], "StandardizedTransformer"],
+        configs: list[ToolBenchmarkConfig],
+    ) -> list[dict[str, Any]]:
+        """Outcomes of *configs* on one model; a model that fails to load fails its tests."""
+        try:
+            model = load_model(model_name)
+        except Exception as exc:
+            print(f"  FAILED to load {model_name}: {type(exc).__name__}: {exc}")
+            tests = expand_tests({**defn, "models": [model_name]})
+            names = {c.tool_name for c in configs}
+            return [
+                {**{k: t[k] for k in ("tool", "model", "params")}, "status": FAILED,
+                 "stats": None, "error": f"model load: {type(exc).__name__}: {exc}"[:500]}
+                for t in tests if t["tool"] in names
+            ]
+        try:
+            if defn["dimension"] == "peak_mem":
+                return self.run_peak_mem(model_name, model, configs)
+            return self.run(model_name, model, configs)
+        finally:
+            del model
+            free_cuda()
 
 
-def load_run(path: Path) -> dict[str, Any] | None:
-    """Load a benchmark run from *path*, or None on missing/corrupt."""
-    if not path.exists():
-        return None
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"warning: {path} is corrupt ({e}); treating as missing")
-        return None
+def run_benchmark(
+    defn: dict[str, Any],
+    load_model: Callable[[str], "StandardizedTransformer"],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Run a whole benchmark and write its finished result to ``run.json``.
 
-
-def save_run(path: Path, data: dict[str, Any]) -> None:
-    """Write a benchmark run to *path* as pretty-printed JSON."""
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _merge_section(
-    existing_rows: list[dict[str, Any]],
-    new_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Key-based merge within a single section."""
-    rows_by_key: dict[str, dict[str, Any]] = {
-        result_key(r): r for r in existing_rows
-    }
-    for row in new_rows:
-        rows_by_key[result_key(row)] = row
-    return list(rows_by_key.values())
-
-
-def _merge_run(existing: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """Merge *new* into *existing* section-by-section.
-
-    For each section, if *new* has rows in that section they are
-    key-merged (new wins on conflicts, existing non-overlapping rows
-    preserved). If *new* has no rows in a section, the existing
-    section is kept as-is. Run-level metadata is taken from *new*.
+    Progress goes to the in-progress file next to ``run.json`` after each
+    model (status ``in_progress``, with the models done); the benchmark's
+    entry in ``run.json`` is only replaced once it finishes, complete or
+    not. An interrupted run leaves ``run.json`` untouched.
     """
-    merged = dict(new)
-    merged_results = _empty_sections()
-
-    for section in SECTIONS:
-        existing_rows = existing.get("results", {}).get(section, [])
-        new_rows = new.get("results", {}).get(section, [])
-
-        if new_rows:
-            merged_results[section] = _merge_section(existing_rows, new_rows)
-        else:
-            merged_results[section] = list(existing_rows)
-
-    merged["results"] = merged_results
-    return merged
-
-
-def _should_merge(
-    existing: dict[str, Any] | None, new: dict[str, Any]
-) -> bool:
-    """Return True iff *new* should be section-merged into *existing*.
-
-    The only reason to replace wholesale is a git_hash change (or an
-    unknown/missing hash) — a different code state means the old
-    numbers aren't comparable in either section.
-    """
-    if existing is None:
-        return False
-    existing_hash = existing.get("git_hash")
-    new_hash = new.get("git_hash")
-    if not existing_hash or existing_hash == "unknown":
-        return False
-    if not new_hash or new_hash == "unknown":
-        return False
-    return existing_hash == new_hash
+    path = run_path(path)
+    runner = BenchmarkRunner.for_definition(defn)
+    configs = tool_configs(defn)
+    env = runner.env()
+    for warning in version_warnings({defn["name"]: defn}, _recorded_stamps(defn["name"], path)):
+        print(f"warning: {warning}")
+    print(f"\nRunning {defn['name']} v{defn['version']} ({len(defn['models'])} model(s) × {len(configs)} tool(s))...")
+    outcomes: list[dict[str, Any]] = []
+    models = list(defn["models"])
+    for i, model_name in enumerate(models):
+        outcomes += runner.run_tests(defn, model_name, load_model, configs)
+        partial = make_result(defn, env, defn["meta_params"], outcomes)
+        save_partial(path, defn["name"], mark_in_progress(partial, models[: i + 1], models[i + 1:]))
+    result = make_result(defn, env, defn["meta_params"], outcomes)
+    run = load_run(path) or {}
+    run[defn["name"]] = result
+    save_json(path, run)
+    clear_partial(path, defn["name"])
+    print(f"\n  {defn['name']}: {result['status']} ({len(result['results'])} result(s), "
+          f"{len(result['failed'])} failed, {len(result['optional_failed'])} optional failed) -> {path}")
+    return result
 
 
-def _warn_replace(
-    existing: dict[str, Any], new: dict[str, Any], path: Path
-) -> None:
-    """Surface why a prior file is about to be wiped."""
-    ex_hash = existing.get("git_hash", "unknown")
-    new_hash = new.get("git_hash", "unknown")
-    if new_hash == "unknown":
-        reason = "new run has no git hash (outside a git repo?)"
-    elif ex_hash == "unknown":
-        reason = "existing file has no git hash"
-    else:
-        reason = f"git_hash changed ({ex_hash[:8]} -> {new_hash[:8]})"
-    n_rows = sum(
-        len(existing.get("results", {}).get(s, []))
-        for s in SECTIONS
-    )
-    print(
-        f"warning: replacing {path} wholesale — {reason}; "
-        f"{n_rows} prior row(s) will be dropped."
-    )
-
-
-def _warn_settings_mismatch(
-    existing: dict[str, Any], new: dict[str, Any]
-) -> None:
-    """Warn when merging runs with different n_repeat or n_warmup.
-
-    After merge, the run-level metadata reflects the *new* invocation,
-    but rows that weren't re-run retain measurements from the prior
-    settings. This warning makes the inconsistency visible.
-    """
-    for field in ("n_repeat", "n_warmup"):
-        old_val = existing.get(field)
-        new_val = new.get(field)
-        if old_val is not None and new_val is not None and old_val != new_val:
-            print(
-                f"warning: {field} changed ({old_val} -> {new_val}); "
-                f"re-run rows will use the new setting but prior rows "
-                f"retain measurements from the old one."
-            )
-
-
-def promote_latest_to_baseline(
-    latest_path: Path | None = None,
-    baseline_path: Path | None = None,
+def run_individual(
+    defn: dict[str, Any],
+    load_model: Callable[[str], "StandardizedTransformer"],
+    models: list[str] | None = None,
+    tools: list[str] | None = None,
+    params: dict[str, list[Any]] | None = None,
+    **overrides: Any,
 ) -> dict[str, Any] | None:
-    """Promote the latest run to the committed baseline.
+    """Run selected tests of a benchmark; returns a result that is not written anywhere.
 
-    Same-hash merge semantics: sections are merged independently,
-    preserving non-overlapping rows in each section. On hash mismatch
-    the baseline is replaced outright.
+    *models* / *tools* are substring filters; *params* overrides sweep values.
     """
-    latest_path = latest_path or LATEST_FILE
-    baseline_path = baseline_path or BASELINE_FILE
-
-    latest = load_run(latest_path)
-    if latest is None:
-        print(f"No latest run found at {latest_path} — nothing to promote.")
+    selected = [m for m in defn["models"] if not models or any(sub in m for sub in models)]
+    if models:
+        selected += [m for m in models if "/" in m and m not in selected]
+    configs = tool_configs(defn, tools, params)
+    if not selected or not configs:
         return None
+    runner = BenchmarkRunner.for_definition(defn, **overrides)
+    meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+    outcomes: list[dict[str, Any]] = []
+    for model_name in selected:
+        outcomes += runner.run_tests(defn, model_name, load_model, configs)
+    return make_result(None, runner.env(), meta, outcomes, benchmark={**stamp(defn), "individual": True})
 
-    existing = load_run(baseline_path)
-    merged = _should_merge(existing, latest)
-    if existing is not None and not merged:
-        _warn_replace(existing, latest, baseline_path)
-    if merged:
-        _warn_settings_mismatch(existing, latest)  # type: ignore[arg-type]
-        final = _merge_run(existing, latest)  # type: ignore[arg-type]
-    else:
-        final = latest
 
-    save_run(baseline_path, final)
+def _recorded_stamps(name: str, path: Path | None = None) -> list[dict[str, Any]]:
+    """The ``benchmark`` stamps recorded for *name* in ``run.json`` and the baseline."""
+    from .store import load_baseline
 
-    action = "merged into" if merged else "written to"
-    print(f"latest run {action} baseline {baseline_path}")
-    return final
+    out = []
+    for doc in (load_run(path), load_baseline()):
+        entry = (doc or {}).get(name)
+        if entry and entry.get("benchmark"):
+            out.append(entry["benchmark"])
+    return out
+
+
+def _build(config: ToolBenchmarkConfig, model: "StandardizedTransformer", sweep: dict[str, Any]) -> dict[str, Any]:
+    if config.build_args is not None:
+        return config.build_args(model, config.fixed_args, sweep)
+    return {**config.fixed_args, **sweep}
+
+
+def _error_slot(slot: dict[str, Any], exc: BaseException, label: str) -> dict[str, Any]:
+    """A ``failed`` (or ``unsupported``) slot recording *exc*."""
+    status = UNSUPPORTED if isinstance(exc, UnsupportedTest) else FAILED
+    message = f"{type(exc).__name__}: {exc}"
+    if _is_oom(exc):
+        message = f"out of memory: {message}"
+    print(f"  {status.upper()}: {label}: {message}")
+    return {**slot, "status": status, "stats": None, "error": message[:500]}

@@ -128,6 +128,13 @@ class JLensTool(Tool):
         include_entropy: bool=True,
         results: Optional[dict[Any, Any]]=None,
     ) -> dict[Any, Any]:
+        """Format one step's ``[layer, pos, vocab]`` lens logits.
+
+        Overwrites ``logits`` in place (probabilities, then ``p * log p``) so no
+        second tensor of this size is allocated. Top-k is ranked on the logits;
+        softmax runs per layer with ``dtype`` pinned, since NDIF's autocast would
+        otherwise return it in float32.
+        """
         input_tokens = [
             str(model.tokenizer.decode(token))
             for token in input_ids
@@ -135,17 +142,11 @@ class JLensTool(Tool):
         layers = list(range(model.num_layers))
         positions = list(range(len(input_tokens)))
 
-        # ENTROPY: entropy[l_idx][pos]
-        if include_entropy:
-            log_p = torch.nn.functional.log_softmax(logits, dim=-1)
-            p = log_p.exp()
-            entropy = torch.round(-(p * log_p).sum(dim=-1), decimals=3).tolist()
-        else:
-            entropy = None
+        _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-
-        _, top_indices = torch.topk(probs, k=top_k, dim=-1)
+        probs = logits
+        for layer_probs in probs:
+            layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
 
         # TOP-K
         topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
@@ -155,8 +156,15 @@ class JLensTool(Tool):
             torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
             for pi in range(top_indices.shape[1])
         ]
-        probs = probs.permute(1, 2, 0)
-        trajectories = [{model.tokenizer.decode(token): torch.round(probs[pos_idx][token], decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+        tracked_probs = probs.permute(1, 2, 0)
+        trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+
+        # ENTROPY: entropy[l_idx][pos]
+        if include_entropy:
+            entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
+            entropy = torch.round(entropy, decimals=3).tolist()
+        else:
+            entropy = None
 
         step = {
             "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
@@ -211,6 +219,10 @@ class JLensTool(Tool):
         to skip that lookup, extra ``generate_kwargs`` (e.g. sampling options)
         for the generation, and get back the formatted j-lens payload — or, when
         ``remote and non_blocking``, the NDIF job id to poll.
+
+        ``min_new_tokens`` defaults to ``max_new_tokens``: nnsight drops the code
+        after a ``tracer.iter`` loop that asks for more steps than the run makes,
+        so an early EOS must not cut the run short.
         """
         # Fresh dict per call — never a shared mutable default, or a previous
         # model's Jacobians would leak into the next call on this singleton.
@@ -219,7 +231,11 @@ class JLensTool(Tool):
         if not jacobians:
             lens_config = JLensTool.get_lens_config(model.repo_id)
 
-        gen_kwargs = {"max_new_tokens": max_new_tokens, **(generate_kwargs or {})}
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": max_new_tokens,
+            **(generate_kwargs or {}),
+        }
 
         with torch.no_grad():
             with model.generate(prompt, **gen_kwargs, remote=remote, backend=backend) as tracer:
@@ -228,18 +244,22 @@ class JLensTool(Tool):
                     jacobians.update(JLensTool.load_jacobians(filename, repo_id))
 
                 gen_logits = list() #[num_layers, seq, vocab]
-                for _ in tracer.all():
-                    step_logits = list()
-                    for l_idx in range(model.num_layers - 1):
-                        res = model.layers_output[l_idx]
-                        jac = jacobians[l_idx].to(device=res.device)
-                        inter = res @ jac.T.to(res.dtype)
-                        step_logits.append(model.project_on_vocab(inter))
-                    step_logits.append(model.project_on_vocab(model.layers_output[-1]))
-                    gen_logits.append(torch.cat(step_logits, dim=0))
+                for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
+                    step_logits = torch.empty(
+                        (model.num_layers, model.input_size[1], model.vocab_size),
+                        dtype=model.lm_head.weight.dtype,
+                        device=model.lm_head.weight.device,
+                    ) # [num_layers, seq, vocab]
+                    for l_idx in range(model.num_layers):
+                        res = model.layers[l_idx].layer_output
+                        if l_idx < model.num_layers - 1:
+                            jac = jacobians[l_idx].to(device=res.device)
+                            res = res @ jac.T.to(res.dtype)
+                        step_logits[l_idx] = model.project_on_vocab(res)[0]
+                    gen_logits.append(step_logits)
 
                 # Full token sequence (prompt + generated) for position labels.
-                output_ids = model.generator.output
+                output_ids = tracer.result
 
                 if raw:
                     results =  torch.cat([step for step in gen_logits], dim=1).cpu().save() # [layer, pos, vocab]

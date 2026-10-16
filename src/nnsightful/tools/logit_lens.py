@@ -79,6 +79,13 @@ class LogitLensTool(Tool):
             top_k: int = 5,
             include_entropy: bool=True
         ) -> dict[Any, Any]:
+            """Format ``[layer, pos, vocab]`` lens logits.
+
+            Overwrites ``logits`` in place (probabilities, then ``p * log p``) so
+            no second tensor of this size is allocated. Top-k is ranked on the
+            logits; softmax runs per layer with ``dtype`` pinned, since NDIF's
+            autocast would otherwise return it in float32.
+            """
 
             # AXIS LABELS + TICKS
             input_tokens = [
@@ -88,19 +95,11 @@ class LogitLensTool(Tool):
             layers = list(range(model.num_layers))
             positions = list(range(len(input_tokens)))
 
-            # ENTROPY: entropy[l_idx][pos]
-            if include_entropy:
-                log_p = torch.nn.functional.log_softmax(logits, dim=-1)
-                p = log_p.exp()
-                entropy = torch.round(-(p * log_p).sum(dim=-1), decimals=3).tolist()
-            else:
-                entropy = None
+            _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-
-            logits.to('cpu') # free memory
-
-            _, top_indices = torch.topk(probs, k=top_k, dim=-1)
+            probs = logits
+            for layer_probs in probs:
+                layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
 
             # TOP-K
             topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
@@ -110,8 +109,15 @@ class LogitLensTool(Tool):
                 torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
                 for pi in range(top_indices.shape[1])
             ]
-            probs = probs.permute(1, 2, 0)
-            trajectories = [{model.tokenizer.decode(token): torch.round(probs[pos_idx][token], decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+            tracked_probs = probs.permute(1, 2, 0)
+            trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
+
+            # ENTROPY: entropy[l_idx][pos]
+            if include_entropy:
+                entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
+                entropy = torch.round(entropy, decimals=3).tolist()
+            else:
+                entropy = None
 
             return (
                 {
@@ -127,12 +133,14 @@ class LogitLensTool(Tool):
 
         with torch.no_grad():
             with model.trace(prompt, remote=remote, backend=backend) as tracer:
-                all_logits = list()
+                all_logits = torch.empty(
+                    (model.num_layers, model.input_size[1], model.vocab_size),
+                    dtype=model.lm_head.weight.dtype,
+                    device=model.lm_head.weight.device,
+                ) # [num_layers, seq, vocab]
 
                 for l_idx in range(model.num_layers):
-                    all_logits.append(model.project_on_vocab(model.layers_output[l_idx]))
-
-                all_logits = torch.cat(all_logits, dim=0)
+                    all_logits[l_idx] = model.project_on_vocab(model.layers[l_idx].layer_output)[0]
 
                 if raw:
                     results = all_logits.to('cpu').save()

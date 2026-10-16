@@ -1,7 +1,9 @@
 """Line-plot generation for benchmark Markdown reports.
 
-For each ``(tool, section)`` group, produces a plot of mean latency
-vs. the swept parameter — one line per model. Plots are returned as
+For each ``(tool, section)`` latency group, produces a plot of mean
+latency vs. the swept parameter — one line per model. For each
+peak-memory tool, plots peak bytes and % of model footprint vs. the
+swept prompt length, with the threshold levels drawn in. Plots are returned as
 base64-encoded PNGs so they can be embedded inline in Markdown as
 ``data:`` URLs, keeping the report self-contained (no sidecar files).
 
@@ -248,6 +250,127 @@ def plot_tool_section_diff(
     _clean_spines(ax)
     fig.tight_layout()
 
+    return _encode_png(fig)
+
+
+def _peak_series(run: dict[str, Any], axis: str) -> tuple[list, list, list, list]:
+    """``(xs, peak_mib, pct, oom_xs)`` for one peak-memory run, sorted by x."""
+    xs, mib, pct, oom = [], [], [], []
+    for point in sorted(run["points"], key=lambda p: p[axis]):
+        if point.get("oom") or point.get("peak_bytes") is None:
+            oom.append(point[axis])
+            continue
+        xs.append(point[axis])
+        mib.append(point["peak_bytes"] / 2**20)
+        pct.append(point["pct"])
+    return xs, mib, pct, oom
+
+
+def _draw_thresholds(ax, thresholds: list[float]) -> None:
+    for t in thresholds:
+        ax.axhline(t, color="#555555", linestyle=":", linewidth=1)
+        ax.annotate(
+            f"{t:g}%", xy=(1, t), xycoords=("axes fraction", "data"),
+            xytext=(3, 0), textcoords="offset points",
+            fontsize=8, color="#555555", va="center",
+        )
+
+
+def _log2_xaxis(ax) -> None:
+    """Log-2 x axis labelled with plain integers (2, 4, …, 1024)."""
+    from matplotlib.ticker import FuncFormatter
+
+    ax.set_xscale("log", base=2)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x:g}"))
+
+
+def _threshold_values(runs: list[dict[str, Any]]) -> list[float]:
+    return sorted({
+        float(label.rstrip("%"))
+        for run in runs
+        for label in run.get("max_prompt_length", {})
+    })
+
+
+def plot_peak_mem(tool_name: str, runs: list[dict[str, Any]], axis: str = "prompt_length") -> str | None:
+    """Peak memory (MiB) and % of footprint vs. *axis*, one line per model.
+
+    OOM points are drawn as ``x`` at the top of the % panel.
+    """
+    if not any(len(r.get("points", [])) >= 2 for r in runs):
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_mib, ax_pct) = plt.subplots(1, 2, figsize=(12, 5))
+    by_model = {r["model"]: r for r in runs}
+    for i, model in enumerate(sorted(by_model)):
+        color = _PALETTE[i % len(_PALETTE)]
+        xs, mib, pct, oom = _peak_series(by_model[model], axis)
+        ax_mib.plot(xs, mib, marker=_MARKER, markersize=4, linewidth=1.8, color=color, label=model)
+        ax_pct.plot(xs, pct, marker=_MARKER, markersize=4, linewidth=1.8, color=color)
+        if oom:
+            top = max(pct + _threshold_values(runs) or [100])
+            ax_pct.scatter(oom, [top] * len(oom), marker="x", color=color, s=40)
+
+    _draw_thresholds(ax_pct, _threshold_values(runs))
+    for ax, ylabel in ((ax_mib, "Peak beyond weights (MiB)"), (ax_pct, "% of model footprint")):
+        _log2_xaxis(ax)
+        ax.set_xlabel(axis, fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
+        _clean_spines(ax)
+    ax_mib.set_yscale("log")
+    ax_pct.set_yscale("log")
+    ax_mib.set_title(f"{tool_name} — peak memory (local GPU)", fontsize=12, fontweight="bold", loc="left")
+
+    _place_legend(ax_mib, n_entries=len(by_model), title="Model")
+    fig.tight_layout()
+    return _encode_png(fig)
+
+
+def plot_peak_mem_diff(tool_name: str, diff_rows: list[dict[str, Any]], axis: str = "prompt_length") -> str | None:
+    """% of footprint vs. *axis*: current (solid) over baseline (dashed), one color per model."""
+    runs = [r[k] for r in diff_rows for k in ("old", "new") if r.get(k)]
+    if not any(len(r.get("points", [])) >= 2 for r in runs):
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    models = sorted({r["model"] for r in diff_rows})
+    for i, model in enumerate(models):
+        color = _PALETTE[i % len(_PALETTE)]
+        row = next(r for r in diff_rows if r["model"] == model)
+        if row.get("old"):
+            xs, _, pct, _ = _peak_series(row["old"], axis)
+            ax.plot(xs, pct, linestyle="--", linewidth=1.6, marker=_MARKER, markersize=4,
+                    color=color, alpha=0.55, label=None if row.get("new") else model)
+        if row.get("new"):
+            xs, _, pct, _ = _peak_series(row["new"], axis)
+            ax.plot(xs, pct, linestyle="-", linewidth=2, marker=_MARKER, markersize=4,
+                    color=color, label=model)
+
+    _draw_thresholds(ax, _threshold_values(runs))
+    _log2_xaxis(ax)
+    ax.set_yscale("log")
+    ax.set_xlabel(axis, fontsize=10)
+    ax.set_ylabel("% of model footprint", fontsize=10)
+    ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
+    ax.set_title(
+        f"{tool_name} — peak memory  ·  solid=current, dashed=baseline",
+        fontsize=11, fontweight="bold", loc="left",
+    )
+    _place_legend(ax, n_entries=len(models), title="Model")
+    _clean_spines(ax)
+    fig.tight_layout()
     return _encode_png(fig)
 
 

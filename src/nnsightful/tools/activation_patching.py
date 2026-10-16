@@ -111,7 +111,7 @@ class ActivationPatchingTool(Tool):
                 with model.trace(src_prompt):
                     for l_idx in range(model.num_layers):
                         src_acts.append([])
-                        hs = model.layers_output[l_idx]
+                        hs = model.layers[l_idx].layer_output
 
                         for pos in src_pos:
                             if isinstance(pos, list):
@@ -137,7 +137,7 @@ class ActivationPatchingTool(Tool):
                         for l_idx in range(batch_start, batch_end):
                             with tracer.invoke(tgt_prompt):
                                 for sub_l_idx in range(l_idx, model.num_layers):
-                                    hs = model.layers_output[sub_l_idx]
+                                    hs = model.layers[sub_l_idx].layer_output
 
                                     if sub_l_idx == l_idx:
                                         for pos, src_act in zip(tgt_pos, src_acts[l_idx]):
