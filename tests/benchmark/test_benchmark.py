@@ -6,18 +6,24 @@ Run with ``pytest tests/benchmark``.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
+from tests.benchmark import __main__ as cli
 from tests.benchmark import config as bench_config
-from tests.benchmark import store
-from tests.benchmark.config import (
-    BlockConfig,
-    ToolBenchmarkConfig,
-    UnsupportedTest,
-    block_slots,
-    config_slots,
+from tests.benchmark import runner as bench_runner, store
+from tests.benchmark.config import UnsupportedTest
+from tests.benchmark.definitions import (
+    DefinitionError,
+    config_hash,
+    expand_tests,
+    load_archive,
+    load_definitions,
+    stamp,
+    validate,
+    version_warnings,
 )
 from tests.benchmark.diff import (
     comparison_warnings,
@@ -29,30 +35,26 @@ from tests.benchmark.diff import (
     print_results,
 )
 from tests.benchmark.memory import coarse_grid, search_max_lengths, threshold_label
-from tests.benchmark.runner import BenchmarkRunner, model_footprint, peak_pct
+from tests.benchmark.runner import BenchmarkRunner, model_footprint, peak_pct, run_benchmark, run_individual
 from tests.benchmark.store import (
     CorruptResultsError,
-    get_block,
-    identity,
-    last_changes,
+    case_id,
     load_baseline,
     load_run,
-    merge_run_block,
+    make_result,
     promote,
     promote_files,
-    same_identity,
     save_json,
-    slot_counts,
-    slot_id,
-    upgrade,
+    upgrade_baseline,
+    upgrade_run,
 )
 
 OLD_RESULTS = Path(__file__).parent / "fixtures" / "results_v1.json"
 OLD_HASH = "f66305ccbe2b543fe3f58715e8806dcf01d0c03c"
 OLD_TS = "2026-04-23T19:28:25-0400"
-OLD_STALE = "stale @ f66305c 2026-04-23"
 MIB = 2**20
 GPT2, GEMMA, LLAMA = "openai-community/gpt2", "google/gemma-3-1b-pt", "meta-llama/Llama-3.1-8B"
+L70, L405 = "meta-llama/Llama-3.1-70B", "meta-llama/Llama-3.1-405B-Instruct"
 LL = "logit_lens[length]"
 
 
@@ -77,13 +79,6 @@ def _env(git_hash: str = "aaaaaaa111", kind: str = "local", day: str = "2026-10-
     return env
 
 
-def _lat(tool: str, model: str, n: int, mean: float | None = None, remote: bool = False, status: str | None = None) -> dict:
-    slot = {"tool": tool, "model": model, "params": {"prompt_length": n}}
-    if mean is None:
-        return {**slot, "status": status or "not_run", "stats": None}
-    return {**slot, "status": "ok", "stats": _stats(mean, remote)}
-
-
 def _peak_stats(lengths: dict, capped=(), footprint=1000 * MIB) -> dict:
     return {
         "footprint_bytes": footprint,
@@ -98,84 +93,140 @@ def _peak_stats(lengths: dict, capped=(), footprint=1000 * MIB) -> dict:
     }
 
 
-def _peak(model: str, lengths: dict | None = None, **kw) -> dict:
-    slot = {"tool": "logit_lens", "model": model, "params": {}}
-    if lengths is None:
-        return {**slot, "status": "not_run", "stats": None}
-    return {**slot, "status": "ok", "stats": _peak_stats(lengths, **kw)}
+def _lat(tool: str, model: str, n: int, mean: float, remote: bool = False) -> dict:
+    return {"tool": tool, "model": model, "params": {"prompt_length": n}, "stats": _stats(mean, remote)}
 
 
-LAT_META = {"n_repeat": 3, "n_warmup": 3}
-PEAK_META = {"thresholds": [0.1, 0.25, 0.5], "swept": "prompt_length", "min_length": 2,
-             "max_length": 4096, "n_repeat": 3, "n_warmup": 1}
+def _pk(model: str, lengths: dict, tool: str = "logit_lens", **kw) -> dict:
+    return {"tool": tool, "model": model, "params": {}, "stats": _peak_stats(lengths, **kw)}
 
 
-def _block(env: dict | None, runs: list, meta: dict | None = None) -> dict:
-    return {"env": env, "meta_params": dict(meta or LAT_META), "runs": runs}
+def _bench(name: str, version: int = 1, kind: str = "local", dimension: str = "latency", config_hash="h1") -> dict:
+    return {"name": name, "version": version, "config_hash": config_hash, "kind": kind, "dimension": dimension}
 
 
-def _doc(local=None, remote=None, peak=None) -> dict:
-    return {"latency": {"local": local, "remote": remote}, "peak_mem": peak}
+def _result(name="local_latency", results=(), env=None, version=1, failed=(), optional_failed=(),
+            kind="local", dimension="latency", config_hash="h1", meta=None) -> dict:
+    return {
+        "benchmark": _bench(name, version, kind, dimension, config_hash),
+        "status": "incomplete" if failed else "complete",
+        "env": env or _env(kind=kind),
+        "meta_params": meta or {"n_repeat": 3, "n_warmup": 3},
+        "results": list(results), "failed": list(failed), "optional_failed": list(optional_failed),
+    }
 
 
-def _ids(slots: list) -> list:
-    return [{k: s[k] for k in ("tool", "model", "params")} for s in slots]
+def _fail(tool, model, n, status="failed", error="RuntimeError: boom") -> dict:
+    return {"tool": tool, "model": model, "params": {"prompt_length": n}, "status": status, "error": error}
 
 
-def _slot(doc: dict, block: str, tool: str, model: str, params: dict) -> dict:
-    sid = slot_id({"tool": tool, "model": model, "params": params})
-    return next(s for s in get_block(doc, block)["runs"] if slot_id(s) == sid)
-
-
-# ---------------------------------------------------------------------------
-# Shape, config matrix
-# ---------------------------------------------------------------------------
-
-
-class TestConfig:
-    def test_default_matrix(self):
-        slots = config_slots()
-        assert set(slots) == {"latency.local", "latency.remote", "peak_mem"}
-        assert len(slots["latency.local"]) == 3 * 3 * 3
-        assert len(slots["latency.remote"]) == 3 * 4 * 3
-        assert len(slots["peak_mem"]) == 3 * 3
-        assert {s["tool"] for s in slots["latency.local"]} == {LL, "activation_patching[length]", "j_lens[length]"}
-        assert {s["tool"] for s in slots["peak_mem"]} == {"logit_lens", "activation_patching", "j_lens"}
-        assert {s["model"] for s in slots["latency.remote"]} == {
-            GPT2, LLAMA, "meta-llama/Llama-3.1-70B", "meta-llama/Llama-3.1-405B-Instruct",
-        }
-        assert {s["params"]["prompt_length"] for s in slots["latency.local"]} == {10, 25, 50}
-
-    def test_j_lens_without_lens_is_unsupported(self, monkeypatch):
-        monkeypatch.setattr(bench_config.JLensTool, "get_available_lenses", classmethod(lambda cls: {}))
-
-        class Model:
-            repo_id, dispatched, tokenizer = "org/no-lens", False, None
-
-        with pytest.raises(UnsupportedTest):
-            bench_config._j_lens_length_build(Model(), {}, {"prompt_length": 10})
+def _defn(**over) -> dict:
+    d = {
+        "name": "fake_latency", "version": 1, "kind": "local", "dimension": "latency",
+        "meta_params": {"n_repeat": 1, "n_warmup": 0},
+        "models": ["org/a", "org/b"],
+        "tools": [{"tool": "fake", "name": "fake[length]", "fixed_args": {}, "sweep": {"prompt_length": [1, 2]}}],
+    }
+    d.update(over)
+    return d
 
 
 # ---------------------------------------------------------------------------
-# Runner: subset runs, placeholders, failed vs not-run, never aborting
+# Definitions
+# ---------------------------------------------------------------------------
+
+
+class TestDefinitions:
+    def test_shipped_definitions(self):
+        defs = load_definitions()
+        assert set(defs) == {"local_latency", "remote_latency", "peak_mem"}
+        assert {n: d["version"] for n, d in defs.items()} == {"local_latency": 1, "remote_latency": 1, "peak_mem": 1}
+        counts = {n: len(expand_tests(d)) for n, d in defs.items()}
+        assert counts == {"local_latency": 27, "remote_latency": 36, "peak_mem": 9}
+        assert defs["local_latency"]["models"] == [GPT2, GEMMA, LLAMA]
+        assert defs["remote_latency"]["models"] == [GPT2, LLAMA, L70, L405]
+        assert {t["tool"] for t in expand_tests(defs["local_latency"])} == {LL, "activation_patching[length]", "j_lens[length]"}
+        assert {t["params"]["prompt_length"] for t in expand_tests(defs["local_latency"])} == {10, 25, 50}
+
+    def test_optional_defaults(self):
+        defs = load_definitions()
+        assert not any(t["optional"] for n in ("local_latency", "peak_mem") for t in expand_tests(defs[n]))
+        optional = {(t["tool"], t["model"]) for t in expand_tests(defs["remote_latency"]) if t["optional"]}
+        assert optional == {(tool, L405) for tool in (LL, "activation_patching[length]", "j_lens[length]")} | {("j_lens[length]", L70)}
+
+    def test_archived_v0(self):
+        v0 = {d["name"]: d for d in load_archive()}
+        assert {n: d["version"] for n, d in v0.items()} == {"local_latency": 0, "remote_latency": 0}
+        assert len(expand_tests(v0["local_latency"])) == 12
+        assert len(expand_tests(v0["remote_latency"])) == 24
+
+    @pytest.mark.parametrize("change,match", [
+        ({"version": -1}, "version"),
+        ({"kind": "cloud"}, "kind"),
+        ({"dimension": "peak_mem", "kind": "remote"}, "local only"),
+        ({"models": []}, "models"),
+        ({"optional_models": ["org/zzz"]}, "optional model"),
+        ({"tools": [{"tool": "fake", "sweep": {"prompt_length": [1]}, "optional": ["org/zzz"]}]}, "optional"),
+        ({"tools": [{"tool": "fake"}]}, "sweep"),
+    ])
+    def test_validation(self, change, match):
+        with pytest.raises(DefinitionError, match=match):
+            validate(_defn(**change))
+        with pytest.raises(DefinitionError, match="missing"):
+            validate({k: v for k, v in _defn().items() if k != "models"})
+
+    def test_directory_checks(self, tmp_path):
+        save_json(tmp_path / "a.json", _defn(name="a"))
+        save_json(tmp_path / "b.json", _defn(name="b"))
+        with pytest.raises(DefinitionError, match="already is the local latency benchmark"):
+            load_definitions(tmp_path)
+        (tmp_path / "b.json").write_text("{nope")
+        with pytest.raises(DefinitionError, match="not valid JSON"):
+            load_definitions(tmp_path)
+
+    def test_config_hash_and_version_warning(self):
+        d = _defn()
+        assert config_hash(d) == config_hash({**d, "version": 7, "description": "x"})
+        assert config_hash(d) != config_hash({**d, "models": ["org/a"]})
+        changed = {**d, "models": ["org/a"]}
+        assert version_warnings({"fake_latency": changed}, [stamp(d)])
+        assert "version wasn't bumped" in version_warnings({"fake_latency": changed}, [stamp(d)])[0]
+        assert version_warnings({"fake_latency": {**changed, "version": 2}}, [stamp(d)]) == []
+        assert version_warnings({"fake_latency": d}, [stamp(d)]) == []
+
+    def test_optional_markers(self):
+        d = _defn(optional_models=["org/b"], tools=[
+            {"tool": "fake", "name": "x", "sweep": {"prompt_length": [1]}, "optional": True},
+            {"tool": "fake", "name": "y", "sweep": {"prompt_length": [1]}, "optional": ["org/a"]},
+            {"tool": "fake", "name": "z", "sweep": {"prompt_length": [1]}},
+        ])
+        opt = {(t["tool"], t["model"]): t["optional"] for t in expand_tests(d)}
+        assert opt == {("x", "org/a"): True, ("x", "org/b"): True, ("y", "org/a"): True, ("y", "org/b"): True,
+                       ("z", "org/a"): False, ("z", "org/b"): True}
+
+
+# ---------------------------------------------------------------------------
+# Running whole benchmarks, status, individual tests
 # ---------------------------------------------------------------------------
 
 
 class _FakeModel:
-    repo_id = "org/fake"
     dispatched = True
 
+    def __init__(self, repo_id):
+        self.repo_id = repo_id
 
-def _tool(fail_on: int | None = None):
+
+def _fake_tool(fail_on=None):
     def tool(model, n=0, **kwargs):
-        if n == fail_on:
+        if (model.repo_id, n) == fail_on:
             raise RuntimeError("boom")
         return n
 
     return tool
 
 
-def _builder(unsupported_model: str | None = None):
+def _fake_build(unsupported_model=None):
     def build(model, fixed, sweep):
         if model.repo_id == unsupported_model:
             raise UnsupportedTest("no lens")
@@ -184,105 +235,109 @@ def _builder(unsupported_model: str | None = None):
     return build
 
 
-def _cfg(name: str, **kw) -> ToolBenchmarkConfig:
-    return ToolBenchmarkConfig(name, _tool(kw.pop("fail_on", None)), sweep_params={"prompt_length": [1, 2]},
-                               build_args=_builder(kw.pop("unsupported", None)))
-
-
 @pytest.fixture
-def runner(monkeypatch):
-    r = BenchmarkRunner(n_repeat=1, n_warmup=1, autocast=False)
-    monkeypatch.setattr(r, "env", lambda: _env("run1234"))
-    return r
+def fake(monkeypatch, tmp_path):
+    """Registers a ``fake`` tool and a fixed env; returns a setter for its failure modes."""
+    monkeypatch.setattr(BenchmarkRunner, "env", lambda self: _env("run1234"))
+    monkeypatch.setattr(bench_runner, "_recorded_stamps", lambda name, path=None: [])
+
+    def setup(fail_on=None, unsupported=None):
+        monkeypatch.setitem(bench_config.TOOLS, "fake", (_fake_tool(fail_on), _fake_build(unsupported)))
+
+    setup()
+    return setup
 
 
-class TestRunner:
-    def test_subset_run_fills_placeholders(self, runner, tmp_path):
-        block_cfg = BlockConfig(["org/fake", "org/other"], [_cfg("a"), _cfg("b")])
-        slots = block_slots("latency.local", block_cfg)
-        measured = runner.run("org/fake", _FakeModel(), [block_cfg.tools[0]])
-        runner.save("latency.local", measured, slots, tmp_path / "run.json")
+def _loader(fail_model=None):
+    def load(name):
+        if name == fail_model:
+            raise OSError("cannot load")
+        return _FakeModel(name)
 
-        doc = load_run(tmp_path / "run.json")
-        runs = get_block(doc, "latency.local")["runs"]
-        assert _ids(runs) == slots
-        assert slot_counts(get_block(doc, "latency.local")) == {
-            "current": 2, "stale": 0, "failed": 0, "unsupported": 0, "not_run": 6,
-        }
-        assert get_block(doc, "latency.remote") is None and get_block(doc, "peak_mem") is None
-        assert get_block(doc, "latency.local")["env"]["git_hash"] == "run1234"
+    return load
 
-    def test_failed_and_unsupported_never_abort(self, runner, tmp_path):
-        model = _FakeModel()
-        cfgs = [_cfg("a", fail_on=2), _cfg("b", unsupported="org/fake"), _cfg("c")]
-        slots = runner.run("org/fake", model, cfgs)
-        by = {(s["tool"], s["params"]["prompt_length"]): s for s in slots}
-        assert by[("a", 1)]["status"] == "ok"
-        assert by[("a", 2)]["status"] == "failed" and "boom" in by[("a", 2)]["error"]
-        assert by[("a", 2)]["stats"] is None
-        assert {by[("b", n)]["status"] for n in (1, 2)} == {"unsupported"}
-        assert {by[("c", n)]["status"] for n in (1, 2)} == {"ok"}
 
-    def test_real_j_lens_config_without_lens_does_not_abort(self, runner, monkeypatch):
+class TestRunning:
+    def test_complete(self, fake, tmp_path):
+        result = run_benchmark(_defn(), _loader(), tmp_path / "run.json")
+        assert result["status"] == "complete"
+        assert len(result["results"]) == 4 and result["failed"] == []
+        assert result["benchmark"] == stamp(_defn())
+        assert result["env"]["git_hash"] == "run1234"
+        assert load_run(tmp_path / "run.json") == {"fake_latency": result}
+
+    def test_failed_test_makes_incomplete_without_aborting(self, fake, tmp_path):
+        fake(fail_on=("org/a", 2))
+        result = run_benchmark(_defn(), _loader(), tmp_path / "run.json")
+        assert result["status"] == "incomplete"
+        assert [(f["model"], f["params"], f["status"]) for f in result["failed"]] == [("org/a", {"prompt_length": 2}, "failed")]
+        assert "boom" in result["failed"][0]["error"]
+        assert len(result["results"]) == 3
+
+    def test_optional_failures_keep_complete(self, fake, tmp_path):
+        fake(fail_on=("org/b", 1), unsupported="org/b")
+        result = run_benchmark(_defn(optional_models=["org/b"]), _loader(), tmp_path / "run.json")
+        assert result["status"] == "complete"
+        assert result["failed"] == []
+        assert {f["status"] for f in result["optional_failed"]} == {"unsupported"}
+        assert len(result["optional_failed"]) == 2
+
+    def test_unsupported_and_load_failure_are_failures(self, fake, tmp_path):
+        fake(unsupported="org/a")
+        result = run_benchmark(_defn(), _loader(fail_model="org/b"), tmp_path / "run.json")
+        assert result["status"] == "incomplete"
+        by_model = {}
+        for f in result["failed"]:
+            by_model.setdefault(f["model"], set()).add(f["status"])
+        assert by_model == {"org/a": {"unsupported"}, "org/b": {"failed"}}
+        assert all("model load" in f["error"] for f in result["failed"] if f["model"] == "org/b")
+
+    def test_interrupted_run_is_incomplete(self):
+        result = make_result(_defn(), _env(), {}, [{"tool": "fake[length]", "model": "org/a", "params": {"prompt_length": 1},
+                                                    "status": "ok", "stats": _stats(0.1)}])
+        assert result["status"] == "incomplete"
+        assert {f["status"] for f in result["failed"]} == {"not_run"} and len(result["failed"]) == 3
+
+    def test_real_j_lens_without_lens_does_not_abort(self, fake, monkeypatch):
         monkeypatch.setattr(bench_config.JLensTool, "get_available_lenses", classmethod(lambda cls: {}))
-        j_lens_cfg = next(c for c in bench_config.default_configs() if c.tool_name == "j_lens[length]")
-        slots = runner.run("org/fake", _FakeModel(), [j_lens_cfg])
-        assert len(slots) == 3 and {s["status"] for s in slots} == {"unsupported"}
+        defn = _defn(tools=[{"tool": "j_lens", "name": "j_lens[length]", "fixed_args": {}, "sweep": {"prompt_length": [1]}}])
+        runner = BenchmarkRunner.for_definition(defn)
+        outcomes = runner.run_tests(defn, "org/a", _loader(), bench_config.tool_configs(defn))
+        assert [o["status"] for o in outcomes] == ["unsupported"]
 
-    def test_run_file_merges_per_slot(self, runner, tmp_path):
-        block_cfg = BlockConfig(["org/fake"], [_cfg("a"), _cfg("b")])
-        slots = block_slots("latency.local", block_cfg)
-        path = tmp_path / "run.json"
-        runner.save("latency.local", runner.run("org/fake", _FakeModel(), [block_cfg.tools[0]]), slots, path)
-        runner.save("latency.local", runner.run("org/fake", _FakeModel(), [block_cfg.tools[1]]), slots, path)
-        assert slot_counts(get_block(load_run(path), "latency.local"))["current"] == 4
+    def test_all_vs_subset(self, monkeypatch):
+        defs = load_definitions()
+        monkeypatch.setattr(sys, "argv", ["bench", "--all"])
+        assert [d["name"] for d in cli._selected(cli._parse_args(), defs)] == list(defs)
+        monkeypatch.setattr(sys, "argv", ["bench", "--benchmarks", "peak_mem"])
+        assert [d["name"] for d in cli._selected(cli._parse_args(), defs)] == ["peak_mem"]
+        monkeypatch.setattr(sys, "argv", ["bench", "--benchmarks", "nope"])
+        with pytest.raises(SystemExit):
+            cli._selected(cli._parse_args(), defs)
 
-    def test_run_file_replaced_on_new_identity(self):
-        old = _block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.2)])
-        new = _block(_env("b"), [_lat("t", "m", 1, 0.3), _lat("t", "m", 2)])
-        merged, did = merge_run_block(old, new)
-        assert not did and merged == new
-        new_same = _block(_env("a", day="2026-10-09"), [_lat("t", "m", 1, 0.3), _lat("t", "m", 2)])
-        merged, did = merge_run_block(old, new_same)
-        assert did
-        assert [s["stats"]["mean"] for s in merged["runs"]] == [0.3, 0.2]
-
-
-# ---------------------------------------------------------------------------
-# Staleness identity
-# ---------------------------------------------------------------------------
-
-
-class TestIdentity:
-    def test_timestamp_and_python_ignored(self):
-        assert same_identity(_env(), _env(day="2027-01-01", python="3.13"))
-
-    @pytest.mark.parametrize("change", [
-        {"git_hash": "other"},
-        {"dirty": True, "dirty_fingerprint": "f"},
-        {"nnsight": "0.9"}, {"nnterp_commit": "c"}, {"transformers": "6"}, {"torch": "3"},
-        {"gpu": "other"}, {"dtype": "float32"}, {"autocast": False},
+    @pytest.mark.parametrize("argv", [
+        ["bench"], ["bench", "--model", "gpt2", "--promote"], ["bench", "--all", "--repeat", "5"],
+        ["bench", "--all", "--show"],
     ])
-    def test_code_dependencies_and_setup_count(self, change):
-        assert not same_identity(_env(), _env(**change))
+    def test_cli_rejects(self, monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            cli._parse_args()
 
-    def test_dirty_fingerprints(self):
-        a = _env(dirty=True, dirty_fingerprint="f1")
-        assert same_identity(a, dict(a))
-        assert not same_identity(a, _env(dirty=True, dirty_fingerprint="f2"))
+    def test_param_parsing(self):
+        assert cli._parse_param("prompt_length=10,25") == ("prompt_length", [10, 25])
 
-    def test_remote_server(self):
-        a = _env(kind="remote")
-        b = _env(kind="remote", remote_server={"packages": {"ndif": "2.0"}})
-        assert not same_identity(a, b)
-        assert "gpu" not in identity(a)
-
-    def test_meta_params_only_warn(self, capsys):
-        base = _doc(local=_block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.2)]))
-        run = _doc(local=_block(_env("a", day="2026-10-09"), [_lat("t", "m", 1, 0.3)], meta={"n_repeat": 9, "n_warmup": 3}))
-        new, _ = promote(run, base)
-        assert "n_repeat changed (3 -> 9)" in capsys.readouterr().out
-        assert slot_counts(get_block(new, "latency.local"))["stale"] == 0
+    def test_individual_tests_print_and_write_nothing(self, fake, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        before = sorted(p.name for p in store.BENCH_DIR.iterdir())
+        result = run_individual(_defn(), _loader(), models=["org/a"], params={"prompt_length": [5]})
+        assert [(r["model"], r["params"]) for r in result["results"]] == [("org/a", {"prompt_length": 5})]
+        assert result["benchmark"]["individual"] is True
+        print_results({"fake_latency": {**result, "benchmark": {**result["benchmark"], "dimension": "latency", "kind": "local"}}})
+        out = capsys.readouterr().out
+        assert "[LOCAL]" in out and "fake[length]" in out
+        assert sorted(p.name for p in store.BENCH_DIR.iterdir()) == before
+        assert list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -290,127 +345,56 @@ class TestIdentity:
 # ---------------------------------------------------------------------------
 
 
-SLOTS = _ids([_lat("t", "m", n) for n in (1, 2, 3)])
-
-
 class TestPromote:
-    def test_rerun_becomes_current_and_env_moves(self):
-        base = _doc(local=_block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.2), _lat("t", "m", 3)]))
-        run = _doc(local=_block(_env("b"), [_lat("t", "m", 1, 0.5), _lat("t", "m", 2), _lat("t", "m", 3)]))
-        new, _ = promote(run, base, {"latency.local": SLOTS})
-        block = get_block(new, "latency.local")
-        assert block["env"]["git_hash"] == "b"
-        s1, s2, s3 = block["runs"]
-        assert s1["stats"]["mean"] == 0.5 and "stale" not in s1 and "env" not in s1
-        assert s2["stats"]["mean"] == 0.2 and s2["stale"] is True and s2["env"]["git_hash"] == "a"
-        assert s3 == _lat("t", "m", 3)
+    def test_promotes_complete_refuses_incomplete(self):
+        run = {
+            "local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)]),
+            "peak_mem": _result("peak_mem", dimension="peak_mem", failed=[_fail("logit_lens", GPT2, 1)]),
+        }
+        new, promoted, refused = promote(run, None)
+        assert promoted == ["local_latency"]
+        assert list(refused) == ["peak_mem"] and refused["peak_mem"][0]["error"] == "RuntimeError: boom"
+        assert new == {"local_latency": {**run["local_latency"], "previous": None}}
 
-    def test_same_identity_stays_current(self):
-        base = _doc(local=_block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.2)]))
-        run = _doc(local=_block(_env("a", day="2026-10-09"), [_lat("t", "m", 1, 0.5)]))
-        new, _ = promote(run, base)
-        assert slot_counts(get_block(new, "latency.local"))["current"] == 2
+    def test_current_moves_to_previous(self):
+        first = _result(results=[_lat(LL, GPT2, 10, 0.1)], env=_env("a"))
+        second = _result(results=[_lat(LL, GPT2, 10, 0.2)], env=_env("b"))
+        base, _, _ = promote({"local_latency": first}, None)
+        base, promoted, _ = promote({"local_latency": second}, base)
+        assert promoted == ["local_latency"]
+        assert base["local_latency"]["previous"] == first
+        assert base["local_latency"]["results"] == second["results"]
+        base, _, _ = promote({"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.3)], env=_env("c"))}, base)
+        assert base["local_latency"]["previous"]["env"]["git_hash"] == "b"
+        assert "previous" not in base["local_latency"]["previous"]
 
-    def test_stale_slot_back_to_current_when_identity_matches(self):
-        stale = {**_lat("t", "m", 2, 0.2), "stale": True, "env": _env("a")}
-        base = _doc(local=_block(_env("b"), [_lat("t", "m", 1, 0.1), stale]))
-        run = _doc(local=_block(_env("a", day="2026-11-01"), [_lat("t", "m", 3, 0.3)]))
-        new, _ = promote(run, base)
-        runs = {s["params"]["prompt_length"]: s for s in get_block(new, "latency.local")["runs"]}
-        assert "stale" not in runs[2] and "env" not in runs[2]
-        assert runs[1]["stale"] is True and runs[1]["env"]["git_hash"] == "b"
+    def test_repromote_same_result_is_a_no_op(self):
+        first = _result(env=_env("a"), results=[_lat(LL, GPT2, 10, 0.1)])
+        second = _result(env=_env("b"), results=[_lat(LL, GPT2, 10, 0.2)])
+        base, _, _ = promote({"local_latency": first}, None)
+        base, _, _ = promote({"local_latency": second}, base)
+        again, promoted, _ = promote({"local_latency": second}, base)
+        assert promoted == [] and again == base
 
-    def test_placeholder_and_failure_never_overwrite(self):
-        base = _doc(local=_block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.2), _lat("t", "m", 3)]))
-        run = _doc(local=_block(_env("b"), [
-            _lat("t", "m", 1), {**_lat("t", "m", 2, status="failed"), "error": "x"},
-            {**_lat("t", "m", 3, status="unsupported"), "error": "no lens"}, _lat("t", "m", 4, 0.4),
-        ]))
-        new, _ = promote(run, base)
-        runs = {s["params"]["prompt_length"]: s for s in get_block(new, "latency.local")["runs"]}
-        assert runs[1]["stats"]["mean"] == 0.1 and runs[2]["stats"]["mean"] == 0.2
-        assert runs[3]["status"] == "unsupported"
+    def test_other_benchmarks_untouched(self):
+        base = upgrade_baseline(_old())
+        new, _, _ = promote({"peak_mem": _result("peak_mem", dimension="peak_mem", results=[_pk(GPT2, {"10%": 17})])}, base)
+        assert new["local_latency"] == base["local_latency"] and new["remote_latency"] == base["remote_latency"]
+        assert new["peak_mem"]["previous"] is None
 
-    def test_unrun_block_untouched_except_config_sync(self):
-        remote = _block(_env("r", kind="remote"), [_lat("t", "m", 1, 1.0, remote=True), _lat("t", "gone", 1, 2.0, remote=True)])
-        base = _doc(remote=remote)
-        run = _doc(local=_block(_env("b"), [_lat("t", "m", 1, 0.5)]))
-        new, _ = promote(run, base)
-        assert get_block(new, "latency.remote") == remote
-        new, _ = promote(run, base, {"latency.remote": SLOTS, "latency.local": SLOTS})
-        remote_runs = get_block(new, "latency.remote")["runs"]
-        assert _ids(remote_runs) == SLOTS
-        assert remote_runs[0]["stats"]["mean"] == 1.0 and remote_runs[1]["status"] == "not_run"
-
-    def test_new_config_slots_start_as_placeholders(self):
-        new, _ = promote(_doc(), None, config_slots())
-        for block in ("latency.local", "latency.remote", "peak_mem"):
-            b = get_block(new, block)
-            assert b["env"] is None and b["runs"]
-            assert {s["status"] for s in b["runs"]} == {"not_run"}
-
-    def test_peak_promotes_like_latency(self):
-        base = _doc(peak=_block(_env("a"), [_peak(GPT2, {"10%": 17}), _peak(GEMMA, {"10%": 14})], PEAK_META))
-        run = _doc(peak=_block(_env("b"), [_peak(GPT2, {"10%": 18}), _peak(GEMMA)], PEAK_META))
-        new, changes = promote(run, base)
-        gpt2 = _slot(new, "peak_mem", "logit_lens", GPT2, {})
-        gemma = _slot(new, "peak_mem", "logit_lens", GEMMA, {})
-        assert gpt2["stats"]["max_prompt_length"] == {"10%": 18}
-        assert gpt2["last_change"]["delta"] == {"10%": 1}
-        assert gemma["stale"] is True and gemma["env"]["git_hash"] == "a"
-        assert [c["block"] for c in changes] == ["peak_mem"]
-
-
-class TestLastChange:
-    def test_written_on_rerun_with_both_endpoints(self):
-        base = load_baseline(OLD_RESULTS)
-        old_mean = _slot(base, "latency.local", LL, GPT2, {"prompt_length": 10})["stats"]["mean"]
-        run = _doc(local=_block(_env("new5678"), [_lat(LL, GPT2, 10, 0.0125), _lat("j_lens[length]", GPT2, 10, 0.02)]))
-        new, changes = promote(run, base)
-        change = _slot(new, "latency.local", LL, GPT2, {"prompt_length": 10})["last_change"]
-        assert change["from"] == {"value": old_mean, "git_hash": OLD_HASH, "timestamp": OLD_TS}
-        assert change["to"]["value"] == 0.0125 and change["to"]["git_hash"] == "new5678"
-        assert change["delta"] == round(0.0125 - old_mean, 6)
-        assert change["pct"] == round((0.0125 - old_mean) / old_mean * 100, 3)
-        assert "last_change" not in _slot(new, "latency.local", "j_lens[length]", GPT2, {"prompt_length": 10})
-        assert len(changes) == 1
-
-    def test_peak_null_thresholds(self):
-        base = _doc(peak=_block(_env("a"), [_peak(GEMMA, {"10%": 14, "25%": 36, "50%": None})], PEAK_META))
-        run = _doc(peak=_block(_env("b"), [_peak(GEMMA, {"10%": 15, "25%": 36, "50%": 70})], PEAK_META))
-        new, _ = promote(run, base)
-        change = _slot(new, "peak_mem", "logit_lens", GEMMA, {})["last_change"]
-        assert change["delta"] == {"10%": 1, "25%": 0, "50%": None}
-        assert change["pct"] == {"10%": round(100 / 14, 3), "25%": 0.0, "50%": None}
-
-    def test_kept_on_stale_move_and_replaced_by_next_change(self):
-        base = _doc(local=_block(_env("a"), [_lat("t", "m", 1, 0.1), _lat("t", "m", 2, 0.1)]))
-        base, _ = promote(_doc(local=_block(_env("b"), [_lat("t", "m", 1, 0.2), _lat("t", "m", 2, 0.3)])), base)
-        base, _ = promote(_doc(local=_block(_env("c"), [_lat("t", "m", 1, 0.4)])), base)
-        runs = {s["params"]["prompt_length"]: s for s in get_block(base, "latency.local")["runs"]}
-        assert (runs[1]["last_change"]["from"]["value"], runs[1]["last_change"]["to"]["value"]) == (0.2, 0.4)
-        assert runs[2]["stale"] is True
-        assert (runs[2]["last_change"]["from"]["value"], runs[2]["last_change"]["to"]["value"]) == (0.1, 0.3)
-
-    def test_repromote_same_measurement_keeps_it(self, tmp_path):
-        paths = {"run": tmp_path / "run.json", "base": tmp_path / "baseline.json"}
-        save_json(paths["base"], load_baseline(OLD_RESULTS))
-        save_json(paths["run"], _doc(local=_block(_env("new"), [_lat(LL, GPT2, 10, 0.01)])))
-        promote_files(paths["run"], paths["base"])
-        first = last_changes(load_baseline(paths["base"]))
-        assert len(first) == 1
-
-        promote_files(paths["run"], paths["base"])
-        assert last_changes(load_baseline(paths["base"])) == first
-        assert promote(load_run(paths["run"]), load_baseline(paths["base"]))[1] == []
-
-        save_json(paths["run"], _doc(local=_block(_env("new", day="2026-10-09"), [_lat(LL, GPT2, 10, 0.01)])))
-        promote_files(paths["run"], paths["base"])
-        (change,) = last_changes(load_baseline(paths["base"])).values()
-        assert change["delta"] == 0.0 and change["from"]["timestamp"] != change["to"]["timestamp"]
-
-    def test_absent_is_fine(self):
-        assert last_changes(load_baseline(OLD_RESULTS)) == {}
+    def test_promote_files(self, tmp_path, capsys):
+        save_json(tmp_path / "baseline.json", upgrade_baseline(_old()))
+        save_json(tmp_path / "run.json", {
+            "local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)], version=1),
+            "remote_latency": _result("remote_latency", kind="remote", failed=[_fail(LL, GPT2, 10)]),
+        })
+        promote_files(tmp_path / "run.json", tmp_path / "baseline.json")
+        out = capsys.readouterr().out
+        assert "REFUSED remote_latency: incomplete" in out and "promoted local_latency v1" in out
+        base = load_baseline(tmp_path / "baseline.json")
+        assert base["local_latency"]["benchmark"]["version"] == 1
+        assert base["local_latency"]["previous"]["benchmark"]["version"] == 0
+        assert base["remote_latency"]["benchmark"]["version"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -419,76 +403,57 @@ class TestLastChange:
 
 
 class TestMigration:
-    def test_v1_rows_land_in_their_block_unchanged(self):
+    def test_v1_becomes_v0_benchmarks_with_exact_values(self):
         old = _old()
-        doc = upgrade(old, as_baseline=True)
-        local, remote = get_block(doc, "latency.local"), get_block(doc, "latency.remote")
-        assert get_block(doc, "peak_mem") is None
-        assert local["env"] == {
-            "kind": "local", "git_hash": OLD_HASH, "timestamp": OLD_TS, "python": "3.12.3",
-            "nnsight": "0.6.3", "transformers": "4.55.4", "torch": "2.9.0+cpu",
-        }
-        assert remote["env"] == {
-            "kind": "remote", "git_hash": OLD_HASH, "timestamp": OLD_TS, "nnsight": "0.6.3", "remote_server": "unknown",
-        }
-        assert local["meta_params"] == remote["meta_params"] == {"n_repeat": 10, "n_warmup": 3}
-        for kind, block in (("local", local), ("remote", remote)):
-            assert len(block["runs"]) == len(old["results"][kind])
-            by_id = {slot_id(s): s for s in block["runs"]}
+        base = upgrade_baseline(old)
+        assert set(base) == {"local_latency", "remote_latency"}
+        v0 = {d["name"]: d for d in load_archive()}
+        for name, kind in (("local_latency", "local"), ("remote_latency", "remote")):
+            r = base[name]
+            assert r["benchmark"] == stamp(v0[name])
+            assert r["status"] == "complete" and r["failed"] == [] and r["previous"] is None
+            assert r["meta_params"]["n_repeat"] == 10 and r["meta_params"]["n_warmup"] == 3
+            by_id = {case_id(x): x for x in r["results"]}
+            assert len(by_id) == len(old["results"][kind])
             for row in old["results"][kind]:
                 expected = dict(row["latency"])
                 if kind == "remote":
                     expected["breakdown"] = row["latency_breakdown"]
-                slot = by_id[slot_id(row)]
-                assert slot["stats"] == expected
-                assert slot["status"] == "ok" and set(slot) == {"tool", "model", "params", "status", "stats"}
-
-    def test_promote_adds_placeholders_keeps_values(self):
-        base = load_baseline(OLD_RESULTS)
-        new, changes = promote(None, base, config_slots())
-        assert changes == []
-        local = get_block(new, "latency.local")
-        assert slot_counts(local) == {"current": 12, "stale": 0, "failed": 0, "unsupported": 0, "not_run": 15}
-        assert slot_counts(get_block(new, "latency.remote"))["current"] == 24
-        assert slot_counts(get_block(new, "peak_mem")) == {"current": 0, "stale": 0, "failed": 0, "unsupported": 0, "not_run": 9}
-        for block in ("latency.local", "latency.remote"):
-            old_by = {slot_id(s): s for s in get_block(base, block)["runs"]}
-            for slot in get_block(new, block)["runs"]:
-                if slot_id(slot) in old_by:
-                    assert slot == old_by[slot_id(slot)]
-
-    def test_kind_first_formats(self):
-        kind_first_base = {
-            "local": {
-                "current": {"env": {"git_hash": "x", "dirty": False, "gpu": "G"},
-                            "latency": {"meta_params": LAT_META, "runs": [{"tool": "t", "model": "m", "params": {"prompt_length": 1},
-                                                                           "local": {**_stats(0.1), "last_change": {"delta": 1}}}]},
-                            "peak_mem": {"meta_params": PEAK_META, "runs": [{"tool": "p", "model": "m", "params": {}, **_peak_stats({"10%": 3})}]}},
-                "stale": [{"env": {"git_hash": "old"}, "latency": {"meta_params": {}, "runs": [
-                    {"tool": "t", "model": "m", "params": {"prompt_length": 2}, "local": _stats(0.2)}]}, "peak_mem": {"meta_params": {}, "runs": []}}],
-            },
-            "remote": {"current": None, "stale": []},
+                assert by_id[case_id(row)]["stats"] == expected
+        assert base["local_latency"]["env"] == {
+            "kind": "local", "git_hash": OLD_HASH, "timestamp": OLD_TS, "python": "3.12.3",
+            "nnsight": "0.6.3", "transformers": "4.55.4", "torch": "2.9.0+cpu",
         }
-        doc = upgrade(kind_first_base, as_baseline=True)
-        local = get_block(doc, "latency.local")
-        assert local["env"] == {"kind": "local", "git_hash": "x", "dirty": False, "gpu": "G"}
-        s1 = _slot(doc, "latency.local", "t", "m", {"prompt_length": 1})
-        assert s1["stats"] == _stats(0.1) and s1["last_change"] == {"delta": 1}
-        s2 = _slot(doc, "latency.local", "t", "m", {"prompt_length": 2})
-        assert s2["stale"] is True and s2["env"] == {"kind": "local", "git_hash": "old"}
-        peak = _slot(doc, "peak_mem", "p", "m", {})
-        assert peak["stats"] == _peak_stats({"10%": 3})
-        assert get_block(doc, "peak_mem")["meta_params"] == PEAK_META
-        assert get_block(doc, "latency.remote") is None
+        assert base["remote_latency"]["env"] == {
+            "kind": "remote", "git_hash": OLD_HASH, "timestamp": OLD_TS, "nnsight": "0.6.3", "remote_server": "unknown",
+        }
 
-        kind_first_run = {"local": kind_first_base["local"]["current"], "remote": None}
-        run = upgrade(kind_first_run, as_baseline=False)
-        assert _slot(run, "latency.local", "t", "m", {"prompt_length": 1})["stats"] == _stats(0.1)
+    def test_slot_blocks_matching_v1(self):
+        defn = load_definitions()["peak_mem"]
+        slots = [{"tool": t["tool"], "model": t["model"], "params": t["params"], "status": "ok",
+                  "stats": _peak_stats({"10%": i})} for i, t in enumerate(expand_tests(defn))]
+        slots.append({"tool": "x", "model": "y", "params": {}, "status": "not_run", "stats": None})
+        doc = {"latency": {"local": None, "remote": None},
+               "peak_mem": {"env": _env(), "meta_params": {"n_repeat": 3}, "runs": slots}}
+        run = upgrade_run(doc)
+        r = run["peak_mem"]
+        assert r["benchmark"] == stamp(defn) and r["status"] == "complete"
+        assert [x["stats"] for x in r["results"]] == [s["stats"] for s in slots[:-1]]
+
+    def test_unmatched_test_set_is_unversioned(self):
+        doc = {"latency": {"local": {"env": _env(), "meta_params": {}, "runs": [
+            {"tool": LL, "model": GPT2, "params": {"prompt_length": 7}, "status": "ok", "stats": _stats(0.1)}]},
+            "remote": None}, "peak_mem": None}
+        r = upgrade_run(doc)["local_latency"]
+        assert r["benchmark"]["version"] is None and r["results"][0]["stats"] == _stats(0.1)
 
     def test_current_format_round_trips(self, tmp_path):
-        doc, _ = promote(None, load_baseline(OLD_RESULTS), config_slots())
-        save_json(tmp_path / "b.json", doc)
-        assert load_baseline(tmp_path / "b.json") == doc
+        base = upgrade_baseline(_old())
+        save_json(tmp_path / "b.json", base)
+        assert load_baseline(tmp_path / "b.json") == base
+        run = {"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)])}
+        save_json(tmp_path / "r.json", run)
+        assert load_run(tmp_path / "r.json") == run
 
     def test_old_file_names_still_load(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "BASELINE_FILE", tmp_path / "baseline.json")
@@ -497,16 +462,16 @@ class TestMigration:
         monkeypatch.setattr(store, "LEGACY_RUN_FILE", tmp_path / "latest.json")
         (tmp_path / "results.json").write_text(OLD_RESULTS.read_text())
         (tmp_path / "latest.json").write_text(OLD_RESULTS.read_text())
-        assert get_block(load_baseline(), "latency.local")["env"]["git_hash"] == OLD_HASH
-        assert get_block(load_run(), "latency.remote")["env"]["git_hash"] == OLD_HASH
+        assert load_baseline()["local_latency"]["env"]["git_hash"] == OLD_HASH
+        assert load_run()["remote_latency"]["benchmark"]["version"] == 0
 
 
 class TestCorruptFiles:
-    @pytest.mark.parametrize("bad", ['{"latency": {', "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> x\n", ""])
+    @pytest.mark.parametrize("bad", ['{"local_latency": {', "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> x\n", ""])
     def test_corrupt_baseline_aborts_and_is_untouched(self, tmp_path, bad):
         base, run = tmp_path / "baseline.json", tmp_path / "run.json"
         base.write_text(bad)
-        save_json(run, _doc(local=_block(_env("new"), [_lat("t", "m", 1, 0.1)])))
+        save_json(run, {"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)])})
         with pytest.raises(CorruptResultsError, match="baseline.json"):
             promote_files(run, base)
         with pytest.raises(CorruptResultsError):
@@ -515,14 +480,14 @@ class TestCorruptFiles:
 
     def test_corrupt_run_aborts_and_is_untouched(self, tmp_path):
         base, run = tmp_path / "baseline.json", tmp_path / "run.json"
-        save_json(base, load_baseline(OLD_RESULTS))
+        save_json(base, upgrade_baseline(_old()))
         before = base.read_text()
-        run.write_text('{"latency": {"local"')
+        run.write_text('{"local_latency": {"env"')
         with pytest.raises(CorruptResultsError, match="run.json"):
             promote_files(run, base)
         with pytest.raises(CorruptResultsError):
             print_results(run)
-        assert run.read_text() == '{"latency": {"local"' and base.read_text() == before
+        assert run.read_text() == '{"local_latency": {"env"' and base.read_text() == before
 
     def test_missing_files_still_fine(self, tmp_path):
         assert load_baseline(tmp_path / "baseline.json") is None
@@ -614,65 +579,55 @@ class TestPercent:
 
 @pytest.fixture
 def files(tmp_path):
-    """Old v1 baseline whose local block was re-promoted (old local slots went stale), and a run."""
-    base, _ = promote(
-        _doc(
-            local=_block(_env("prev123", torch="2.10"), [_lat(LL, GPT2, 50, 0.06)]),
-            peak=_block(_env("prev123", torch="2.10"), [_peak(GEMMA, {"10%": 14, "25%": 36, "50%": 72}),
-                                                        _peak(GPT2, {"10%": None, "25%": 24, "50%": 69})], PEAK_META),
-        ),
-        load_baseline(OLD_RESULTS),
-    )
-    _slot(base, "latency.local", "activation_patching[length]", GPT2, {"prompt_length": 10})["last_change"] = {
-        "from": {"value": 0.041, "git_hash": "e0e0e0e", "timestamp": "2026-01-01T00:00:00+0000"},
-        "to": {"value": 0.025, "git_hash": OLD_HASH, "timestamp": OLD_TS}, "delta": -0.016, "pct": -39.0,
-    }
-    _slot(base, "peak_mem", "logit_lens", GPT2, {})["last_change"] = {
-        "from": {"value": {"max_prompt_length": {"10%": 10}, "capped": [], "footprint_bytes": 1}, "git_hash": "a", "timestamp": "t"},
-        "to": {"value": {"max_prompt_length": {"10%": 17}, "capped": [], "footprint_bytes": 1}, "git_hash": "b", "timestamp": "t"},
-        "delta": {"10%": 7}, "pct": {"10%": 70.0},
-    }
-    run = _doc(
-        local=_block(_env("new5678"), [
+    """A baseline (v0 latency from the old fixture, a peak_mem v1 with a previous) and a v1 run."""
+    base = upgrade_baseline(_old())
+    old_peak = _result("peak_mem", dimension="peak_mem", env=_env("p0"),
+                       results=[_pk(GPT2, {"10%": 10}), _pk(GEMMA, {"10%": 12})])
+    new_peak = _result("peak_mem", dimension="peak_mem", env=_env("p1", torch="2.10"),
+                       results=[_pk(GEMMA, {"10%": 14, "25%": 36, "50%": 72}), _pk(GPT2, {"10%": 17})])
+    base, _, _ = promote({"peak_mem": old_peak}, base)
+    base, _, _ = promote({"peak_mem": new_peak}, base)
+    run = {
+        "local_latency": _result(env=_env("new5678"), results=[
             _lat(LL, GPT2, 25, 0.02), _lat(LL, GPT2, 50, 0.05), _lat("j_lens[length]", GPT2, 25, 0.03),
-            {**_lat("j_lens[length]", LLAMA, 25, status="failed"), "error": "RuntimeError: boom"},
-            _lat(LL, LLAMA, 10),
-        ]),
-        remote=_block(_env("new5678", kind="remote"), [_lat(LL, GPT2, 25, 0.4, remote=True)]),
-        peak=_block(_env("new5678"), [
-            _peak(GEMMA, {"10%": 15, "25%": 36, "50%": 4096}, capped=["50%"]),
-            _peak(LLAMA, {"10%": 190, "25%": 480, "50%": 960}),
-            _peak(GPT2),
-        ], PEAK_META),
-    )
+        ], failed=[_fail("j_lens[length]", LLAMA, 25), _fail(LL, LLAMA, 10)]),
+        "remote_latency": _result("remote_latency", kind="remote", version=0, env=_env("new5678", kind="remote"),
+                                  config_hash=base["remote_latency"]["benchmark"]["config_hash"],
+                                  results=[_lat(LL, GPT2, 25, 0.4, remote=True)]),
+    }
     paths = {"baseline": tmp_path / "baseline.json", "run": tmp_path / "run.json"}
     save_json(paths["baseline"], base)
     save_json(paths["run"], run)
     return paths
 
 
+def _add_peak_to_run(files):
+    run = json.loads(files["run"].read_text())
+    run["peak_mem"] = _result("peak_mem", dimension="peak_mem", env=_env("new5678"), results=[
+        _pk(GEMMA, {"10%": 15, "25%": 36, "50%": 4096}, capped=["50%"]), _pk(LLAMA, {"10%": 190, "25%": 480, "50%": 960}),
+    ], meta={"n_repeat": 3, "n_warmup": 1, "dtype": "bfloat16", "autocast": True, "swept": "prompt_length",
+             "thresholds": [0.1, 0.25, 0.5], "min_length": 2, "max_length": 4096})
+    save_json(files["run"], run)
+
+
 class TestRendering:
-    def test_show_both_dimensions(self, files, capsys):
+    def test_show(self, files, capsys):
+        _add_peak_to_run(files)
         print_results(files["run"], detail=True)
         out = capsys.readouterr().out
         assert "[LOCAL]" in out and "[REMOTE (unqueued)]" in out
-        assert "PEAK MEMORY" in out
-        assert ">=4096" in out and "OOM" in out and "1000.0MiB" in out
-        assert "latency.local new5678" in out and "latency.remote new5678" in out
+        assert "PEAK MEMORY" in out and ">=4096" in out and "OOM" in out and "1000.0MiB" in out
+        assert "local_latency v1 @ new5678" in out
+        assert "local_latency v1 (incomplete): 3 measured; 2 failed" in out
+        assert "failed: j_lens[length] | meta-llama/Llama-3.1-8B | prompt_length=25 — RuntimeError: boom" in out
 
-    def test_setup_line_reads_block_env(self, files, capsys):
+    def test_setup_line(self, files, capsys):
+        _add_peak_to_run(files)
         print_results(files["run"], dims=["peak_mem"])
         assert "Setup:  local, bfloat16, autocast, swept=prompt_length, repeat=3" in capsys.readouterr().out
 
-    def test_not_run_hidden_failed_summarized(self, files, capsys):
-        print_results(files["run"], dims=["latency"], remote=False)
-        out = capsys.readouterr().out
-        assert "latency.local: 3 measured; 1 not run, 1 failed" in out
-        assert "boom" not in out
-        print_results(files["run"], dims=["latency"], remote=False, detail=True)
-        assert "failed: j_lens[length] | meta-llama/Llama-3.1-8B | prompt_length=25 — RuntimeError: boom" in capsys.readouterr().out
-
     def test_show_one_dimension(self, files, capsys):
+        _add_peak_to_run(files)
         print_results(files["run"], dims=["peak_mem"])
         out = capsys.readouterr().out
         assert "PEAK MEMORY" in out and "[LOCAL]" not in out
@@ -680,69 +635,63 @@ class TestRendering:
         out = capsys.readouterr().out
         assert "PEAK MEMORY" not in out and "[REMOTE (unqueued)]" in out
 
-    def test_null_threshold_shown(self, files, capsys):
-        save_json(files["run"], _doc(peak=_block(_env(), [_peak(GPT2, {"10%": None, "25%": 24})], PEAK_META)))
-        print_results(files["run"], dims=["peak_mem"])
-        assert "<2" in capsys.readouterr().out
-
-    def test_latency_sources(self, files):
-        rows = {(r["section"], r["tool"], r["params"]["prompt_length"]): r
+    def test_different_versions_compare_shared_tests(self, files):
+        rows = {(r["section"], r["tool"], r["model"], r["params"]["prompt_length"]): r
                 for r in compute_diff(files["run"], files["baseline"])}
-        assert rows[("local", LL, 50)]["source"] == "current" and rows[("local", LL, 50)]["old_mean"] == 0.06
-        assert rows[("local", LL, 25)]["source"] == OLD_STALE
-        assert rows[("remote", LL, 25)]["source"] == "current"
-        assert rows[("local", "j_lens[length]", 25)]["status"] == "new"
-        assert len(rows) == 4
+        shared = rows[("local", LL, GPT2, 25)]
+        assert shared["status"] == "changed" and shared["source"] == "baseline v0"
+        assert rows[("local", "j_lens[length]", GPT2, 25)]["status"] == "new"
+        removed = rows[("local", LL, LLAMA, 10)]
+        assert removed["status"] == "removed" and removed["source"] == "failed in run"
+        assert rows[("local", "activation_patching[length]", GPT2, 10)]["source"] == "not in run"
+
+    def test_same_version_compares_normally(self, files):
+        rows = [r for r in compute_diff(files["run"], files["baseline"], remote=True)]
+        changed = [r for r in rows if r["status"] == "changed"]
+        assert len(changed) == 1 and changed[0]["source"] == "baseline"
+        assert sum(r["status"] == "removed" for r in rows) == 23
+
+    def test_warnings(self, files, capsys):
+        warnings = comparison_warnings(files["run"], files["baseline"])
+        assert any(w.startswith("local_latency: run v1 vs baseline v0 — comparing the 2 shared test(s)") for w in warnings)
+        local_env = next(w for w in warnings if w.startswith("local_latency vs baseline: "))
+        assert "torch: 2.9.0+cpu -> 2.11" in local_env and "git_hash" not in local_env
+        remote_env = next(w for w in warnings if w.startswith("remote_latency vs baseline: "))
+        assert "remote_server: unknown ->" in remote_env and "torch" not in remote_env
+        print_diff(files["run"], files["baseline"])
+        assert "WARNING: comparing across different environments" in capsys.readouterr().out
+        assert "> **Warning:**" in markdown_diff(files["run"], files["baseline"])
+
+    def test_same_version_changed_definition_warns(self, files):
+        run = json.loads(files["run"].read_text())
+        run["remote_latency"]["benchmark"]["config_hash"] = "changed"
+        save_json(files["run"], run)
+        assert any("same version v0 but different definitions" in w for w in comparison_warnings(files["run"], files["baseline"]))
 
     def test_with_previous(self, files):
-        rows = compute_diff(files["run"], files["baseline"], with_previous=True)
-        cached = [r for r in rows if r["source"] and r["source"].startswith("last change")]
-        assert [r["tool"] for r in cached] == ["activation_patching[length]"]
-        assert cached[0]["source"] == "last change -39.0% (e0e0e0e → f66305c)"
-        live = next(r for r in rows if r["tool"] == LL and r["params"] == {"prompt_length": 50})
-        assert live["source"] == "current" and live["old_mean"] == 0.06
-
-    def test_peak_diff(self, files, capsys):
-        rows = {r["model"]: r for r in compute_peak_diff(files["run"], files["baseline"])}
-        assert rows[GEMMA]["status"] == "changed" and rows[GEMMA]["source"] == "current"
-        assert rows[LLAMA]["status"] == "new"
-        assert GPT2 not in rows
-
+        rows = compute_peak_diff(files["run"], files["baseline"])
+        assert rows == []
         rows = {r["model"]: r for r in compute_peak_diff(files["run"], files["baseline"], with_previous=True)}
-        assert rows[GPT2]["source"] == "last change (a → b)"
+        assert rows[GPT2]["source"] == "last change (p0 → p1)"
+        assert rows[GPT2]["old"]["max_prompt_length"] == {"10%": 10}
         assert rows[GPT2]["new"]["max_prompt_length"] == {"10%": 17}
 
+    def test_live_comparison_takes_precedence(self, files, capsys):
+        _add_peak_to_run(files)
+        rows = {r["model"]: r for r in compute_peak_diff(files["run"], files["baseline"], with_previous=True)}
+        assert rows[GEMMA]["source"] == "baseline" and rows[GEMMA]["old"]["max_prompt_length"]["10%"] == 14
+        assert rows[LLAMA]["status"] == "new"
+        assert rows[GPT2]["status"] == "removed"
         print_diff(files["run"], files["baseline"])
         out = capsys.readouterr().out
         assert "14 -> 15 (+1)" in out and "72 -> >=4096 (+4024)" in out
-        assert "BENCHMARK DIFF" in out and OLD_STALE in out
 
-    def test_env_mismatch_warning_per_block(self, files, capsys):
-        warnings = comparison_warnings(files["run"], files["baseline"])
-        local_current = next(w for w in warnings if w.startswith("latency.local vs current: "))
-        assert "torch: 2.10 -> 2.11" in local_current
-        assert any(w.startswith(f"latency.local vs {OLD_STALE}: ") and "transformers: 4.55.4 -> -" in w for w in warnings)
-        remote = next(w for w in warnings if w.startswith("latency.remote vs current: "))
-        assert "nnsight: 0.6.3 -> 0.8" in remote and "remote_server: unknown ->" in remote
-        assert "torch" not in remote and "gpu" not in remote
-        assert any(w.startswith("peak_mem vs current: ") for w in warnings)
-        assert not any("git_hash" in w for w in warnings)
-
-        print_diff(files["run"], files["baseline"])
-        assert "WARNING: comparing across different environments" in capsys.readouterr().out
-        assert "> **Warning:** comparing across different environments" in markdown_diff(files["run"], files["baseline"])
-
-    def test_markdown(self, files):
+    def test_markdown_and_plots(self, files):
+        _add_peak_to_run(files)
         md = markdown_results(files["run"], detail=True)
-        assert "## PEAK MEMORY (local GPU)" in md
-        assert "| prompt_length | Peak | % footprint | Mean | Std |" in md
-        assert "## Not in the tables" in md
+        assert "## PEAK MEMORY (local GPU)" in md and "## Benchmarks" in md
         md = markdown_diff(files["run"], files["baseline"])
-        assert "| 🟢 | google/gemma-3-1b-pt |" in md
-        assert "| Params | Baseline | Current | Delta | vs |" in md
-        assert "🆕" in md
-
-    def test_plots_smoke(self, files):
+        assert "| Params | Baseline | Current | Delta | vs |" in md and "🆕" in md
         pytest.importorskip("matplotlib")
         assert "data:image/png" in markdown_results(files["run"], plots=True)
         assert "data:image/png" in markdown_diff(files["run"], files["baseline"], plots=True)

@@ -1,0 +1,62 @@
+{
+  "name": "local_latency",
+  "version": 1,
+  "kind": "local",
+  "dimension": "latency",
+  "description": "Wall-clock latency of each tool on this machine's GPU, bf16 under NDIF's autocast.",
+  "meta_params": {
+    "n_repeat": 3,
+    "n_warmup": 3,
+    "dtype": "bfloat16",
+    "autocast": true
+  },
+  "models": [
+    "openai-community/gpt2",
+    "google/gemma-3-1b-pt",
+    "meta-llama/Llama-3.1-8B"
+  ],
+  "tools": [
+    {
+      "tool": "logit_lens",
+      "name": "logit_lens[length]",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      },
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    },
+    {
+      "tool": "activation_patching",
+      "name": "activation_patching[length]",
+      "fixed_args": {},
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    },
+    {
+      "tool": "j_lens",
+      "name": "j_lens[length]",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      },
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    }
+  ]
+}

@@ -1,10 +1,12 @@
-"""Readers for the earlier results formats, upgraded to the per-kind form.
+"""Readers for the earlier results formats, upgraded to dimension blocks.
 
-Three generations are handled: v1 (``results.local`` / ``results.remote``
-rows), v2 (top-level ``git_hash`` / ``system_info`` plus dimensions) and
-the kind-first files (``{"local": {"current", "stale"}, "remote": ...}``
-and ``{"local": snapshot, "remote": snapshot}``). :mod:`store` turns the
-result into the current block format. Pure JSON logic, no torch.
+Four generations are handled: v1 (``results.local`` / ``results.remote``
+rows), v2 (top-level ``git_hash`` / ``system_info`` plus dimensions), the
+kind-first files (``{"local": {"current", "stale"}, "remote": ...}`` and
+``{"local": snapshot, "remote": snapshot}``) and the slot blocks
+(``{"latency": {"local", "remote"}, "peak_mem"}``). :func:`to_blocks`
+returns the slot-block form, which :mod:`store` turns into benchmark
+results. Pure JSON logic, no torch.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ ENV_FIELDS = {
     "remote": (*_CODE_FIELDS, *_CLIENT_FIELDS, "remote_server"),
 }
 UNKNOWN_SERVER = "unknown"
+BLOCKS = ("latency.local", "latency.remote", "peak_mem")
+_SLOT_FIELDS = ("tool", "model", "params")
+OK = "ok"
 _ENTRY_STAMPS = ("git_hash", "timestamp")
 
 
@@ -236,3 +241,99 @@ def without_tests(snap: dict[str, Any], keys: set[str]) -> dict[str, Any]:
 
 def is_empty(snap: dict[str, Any]) -> bool:
     return not any(snap.get(dim, {}).get("runs") for dim in DIMENSIONS)
+
+
+def block_kind(block: str) -> str:
+    """``latency.remote`` -> ``remote``; ``peak_mem`` is local."""
+    return "remote" if block == "latency.remote" else "local"
+
+
+def block_dim(block: str) -> str:
+    return block.split(".")[0]
+
+
+def empty_doc() -> dict[str, Any]:
+    return {"latency": {"local": None, "remote": None}, "peak_mem": None}
+
+
+def get_block(doc: dict[str, Any] | None, block: str) -> dict[str, Any] | None:
+    if not doc:
+        return None
+    if block == "peak_mem":
+        return doc.get("peak_mem")
+    return (doc.get("latency") or {}).get(block_kind(block))
+
+
+def set_block(doc: dict[str, Any], block: str, value: dict[str, Any] | None) -> None:
+    if block == "peak_mem":
+        doc["peak_mem"] = value
+    else:
+        doc.setdefault("latency", {"local": None, "remote": None})[block_kind(block)] = value
+
+
+def _is_current_format(data: dict[str, Any]) -> bool:
+    lat = data.get("latency")
+    return "peak_mem" in data and isinstance(lat, dict) and set(lat) <= set(ENV_KINDS)
+
+
+def _slot_from_legacy(run: dict[str, Any], dim: str, kind: str) -> dict[str, Any]:
+    slot = {k: run[k] for k in _SLOT_FIELDS}
+    if dim == "latency":
+        stats = dict(run[kind])
+    else:
+        stats = {k: v for k, v in run.items() if k not in _SLOT_FIELDS}
+    change = stats.pop("last_change", None)
+    slot.update(status=OK, stats=stats)
+    if change is not None:
+        slot["last_change"] = change
+    return slot
+
+
+def _blocks_from_snapshot(snap: dict[str, Any] | None, kind: str, stale: bool) -> dict[str, list[dict[str, Any]]]:
+    """A legacy kind snapshot as ``block -> slots`` (stale slots carry the snapshot env)."""
+    if not snap:
+        return {}
+    env = {"kind": kind, **snap.get("env", {})}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for _key, dim, run, run_kind in iter_tests(snap):
+        if run_kind != kind:
+            continue
+        block = f"latency.{kind}" if dim == "latency" else "peak_mem"
+        slot = _slot_from_legacy(run, dim, kind)
+        if stale:
+            slot.update(stale=True, env=env)
+        out.setdefault(block, []).append(slot)
+    return out
+
+
+def _from_kind_first(kinds: dict[str, Any], has_stale: bool) -> dict[str, Any]:
+    """Kind-first data (``{kind: {"current", "stale"}}`` or ``{kind: snapshot}``) as a current-format doc."""
+    doc = empty_doc()
+    for kind in ENV_KINDS:
+        entry = kinds.get(kind)
+        current = entry.get("current") if has_stale else entry
+        groups = entry.get("stale", []) if has_stale else []
+        if not current and not groups:
+            continue
+        blocks: dict[str, list[dict[str, Any]]] = {}
+        for snap, is_stale in [(current, False), *((g, True) for g in groups)]:
+            for block, slots in _blocks_from_snapshot(snap, kind, is_stale).items():
+                blocks.setdefault(block, []).extend(slots)
+        for block, slots in blocks.items():
+            dim = block_dim(block)
+            env = {"kind": kind, **current["env"]} if current else None
+            meta = (current or groups[0]).get(dim, {}).get("meta_params", {})
+            set_block(doc, block, {"env": env, "meta_params": dict(meta), "runs": slots})
+    return doc
+
+
+def to_blocks(data: dict[str, Any], as_baseline: bool) -> dict[str, Any]:
+    """Any older results document as slot blocks (stale slots kept, marked ``stale``)."""
+    if _is_current_format(data):
+        doc = empty_doc()
+        for block in BLOCKS:
+            set_block(doc, block, copy.deepcopy(get_block(data, block)))
+        return doc
+    if as_baseline:
+        return _from_kind_first(upgrade_baseline(data), has_stale=True)
+    return _from_kind_first(upgrade_run(data), has_stale=False)

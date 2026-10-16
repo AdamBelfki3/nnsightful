@@ -1,8 +1,9 @@
-"""Benchmark configuration: the full test matrix per dimension block.
+"""Runnable tool configs for the JSON benchmark definitions.
 
-A block (``latency.local``, ``latency.remote``, ``peak_mem``) is tools ×
-models × swept params; every combination is one *slot* in the results
-files, measured or not.
+The benchmarks themselves (models, tools, fixed args, sweeps, meta
+params) live in ``benchmarks/*.json``; this module maps each tool name to
+the nnsightful tool and the Python that builds its arguments per model
+(prompt construction, activation-patching positions, j-lens Jacobians).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from nnsightful.tools.activation_patching import activation_patching
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
 
+from .definitions import tool_label
 from .prompts import prompt_of_length
 
 if TYPE_CHECKING:
@@ -118,114 +120,46 @@ def _j_lens_length_build(
     return args
 
 
-def default_configs() -> list[ToolBenchmarkConfig]:
-    """Return the built-in latency configurations."""
-    return [
-        ToolBenchmarkConfig(
-            tool_name="logit_lens[length]",
-            tool=logit_lens,
-            fixed_args={"top_k": 5, "include_entropy": True},
-            sweep_params={"prompt_length": [10, 25, 50]},
-            build_args=_logit_lens_length_build,
-        ),
-        ToolBenchmarkConfig(
-            tool_name="activation_patching[length]",
-            tool=activation_patching,
-            fixed_args={},
-            sweep_params={"prompt_length": [10, 25, 50]},
-            build_args=_activation_patching_length_build,
-        ),
-        ToolBenchmarkConfig(
-            tool_name="j_lens[length]",
-            tool=j_lens,
-            fixed_args={"top_k": 5, "include_entropy": True},
-            sweep_params={"prompt_length": [10, 25, 50]},
-            build_args=_j_lens_length_build,
-        ),
-    ]
+TOOLS: dict[str, tuple[Tool, ArgBuilder]] = {
+    "logit_lens": (logit_lens, _logit_lens_length_build),
+    "activation_patching": (activation_patching, _activation_patching_length_build),
+    "j_lens": (j_lens, _j_lens_length_build),
+}
 
 
-def memory_configs() -> list[ToolBenchmarkConfig]:
-    """Return the built-in peak-memory configurations.
+def tool_configs(
+    defn: dict[str, Any],
+    tools: list[str] | None = None,
+    params: dict[str, list[Any]] | None = None,
+) -> list[ToolBenchmarkConfig]:
+    """The runnable configs of a benchmark definition.
 
-    ``fixed_args`` become the run's ``params``; ``sweep_axis`` is searched
-    by the runner rather than listed up front.
+    *tools* keeps only tools whose name contains one of the substrings;
+    *params* replaces the values of matching sweep parameters (latency).
     """
-    return [
-        ToolBenchmarkConfig(
-            tool_name="logit_lens",
-            tool=logit_lens,
-            fixed_args={"top_k": 5, "include_entropy": True},
-            build_args=_logit_lens_length_build,
-        ),
-        ToolBenchmarkConfig(
-            tool_name="activation_patching",
-            tool=activation_patching,
-            build_args=_activation_patching_length_build,
-        ),
-        ToolBenchmarkConfig(
-            tool_name="j_lens",
-            tool=j_lens,
-            fixed_args={"top_k": 5, "include_entropy": True},
-            build_args=_j_lens_length_build,
-        ),
-    ]
-
-
-LOCAL_MODELS = [
-    "openai-community/gpt2",
-    "google/gemma-3-1b-pt",
-    "meta-llama/Llama-3.1-8B",
-]
-REMOTE_MODELS = [
-    "openai-community/gpt2",
-    "meta-llama/Llama-3.1-8B",
-    "meta-llama/Llama-3.1-70B",
-    "meta-llama/Llama-3.1-405B-Instruct",
-]
-PEAK_MEM_MODELS = list(LOCAL_MODELS)
-
-
-@dataclass
-class BlockConfig:
-    """One dimension block's matrix: every tool config × every model."""
-
-    models: list[str]
-    tools: list[ToolBenchmarkConfig]
-
-
-def benchmark_config() -> dict[str, BlockConfig]:
-    """The full benchmark matrix, keyed by block name."""
-    return {
-        "latency.local": BlockConfig(LOCAL_MODELS, default_configs()),
-        "latency.remote": BlockConfig(REMOTE_MODELS, default_configs()),
-        "peak_mem": BlockConfig(PEAK_MEM_MODELS, memory_configs()),
-    }
+    out = []
+    for entry in defn["tools"]:
+        label = tool_label(entry)
+        if tools and not any(t in label for t in tools):
+            continue
+        if entry["tool"] not in TOOLS:
+            raise KeyError(f"{defn['name']}: no runner for tool {entry['tool']!r} (known: {sorted(TOOLS)})")
+        tool, build = TOOLS[entry["tool"]]
+        sweep = dict(entry.get("sweep", {}))
+        for key, values in (params or {}).items():
+            if key in sweep:
+                sweep[key] = values
+        out.append(ToolBenchmarkConfig(
+            tool_name=label,
+            tool=tool,
+            fixed_args=dict(entry.get("fixed_args", {})),
+            sweep_params=sweep if defn["dimension"] == "latency" else {},
+            build_args=build,
+            sweep_axis=defn["meta_params"].get("swept", "prompt_length"),
+        ))
+    return out
 
 
 def sweep_combos(config: ToolBenchmarkConfig) -> list[dict[str, Any]]:
     keys = list(config.sweep_params)
     return [dict(zip(keys, values)) for values in product(*config.sweep_params.values())]
-
-
-def slot_params(block: str, config: ToolBenchmarkConfig) -> list[dict[str, Any]]:
-    """A tool config's slot params: sweep combos for latency, the fixed args for peak_mem."""
-    if block == "peak_mem":
-        return [dict(config.fixed_args)]
-    return sweep_combos(config)
-
-
-def block_slots(block: str, config: BlockConfig) -> list[dict[str, Any]]:
-    """Every ``{tool, model, params}`` slot of a block, in config order."""
-    return [
-        {"tool": tool.tool_name, "model": model, "params": params}
-        for tool in config.tools
-        for model in config.models
-        for params in slot_params(block, tool)
-    ]
-
-
-def config_slots(config: dict[str, BlockConfig] | None = None) -> dict[str, list[dict[str, Any]]]:
-    """``block -> slots`` for the whole matrix (default: :func:`benchmark_config`)."""
-    config = config or benchmark_config()
-    return {name: block_slots(name, block) for name, block in config.items()}

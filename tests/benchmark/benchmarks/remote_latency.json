@@ -1,0 +1,67 @@
+{
+  "name": "remote_latency",
+  "version": 1,
+  "kind": "remote",
+  "dimension": "latency",
+  "description": "End-to-end latency on production NDIF (total minus queue wait, plus a per-phase breakdown).",
+  "meta_params": {
+    "n_repeat": 3,
+    "n_warmup": 3
+  },
+  "models": [
+    "openai-community/gpt2",
+    "meta-llama/Llama-3.1-8B",
+    "meta-llama/Llama-3.1-70B",
+    "meta-llama/Llama-3.1-405B-Instruct"
+  ],
+  "optional_models": [
+    "meta-llama/Llama-3.1-405B-Instruct"
+  ],
+  "tools": [
+    {
+      "tool": "logit_lens",
+      "name": "logit_lens[length]",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      },
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    },
+    {
+      "tool": "activation_patching",
+      "name": "activation_patching[length]",
+      "fixed_args": {},
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    },
+    {
+      "tool": "j_lens",
+      "name": "j_lens[length]",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      },
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      },
+      "optional": [
+        "meta-llama/Llama-3.1-70B"
+      ]
+    }
+  ]
+}

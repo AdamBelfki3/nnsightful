@@ -1,7 +1,8 @@
-"""Benchmark runner: measure latency and peak memory, one block slot at a time.
+"""Benchmark runner: run whole benchmarks (or individual tests) and record them.
 
-Results go into ``run.json`` as dimension blocks (see ``store.py``), each
-stamped with the environment it ran in.
+A benchmark run measures every test of its JSON definition, one model at
+a time, and writes one result to ``run.json`` with a single env stamp
+(see ``store.py``).
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from .config import ToolBenchmarkConfig, UnsupportedTest, sweep_combos
+from .config import ToolBenchmarkConfig, UnsupportedTest, sweep_combos, tool_configs
+from .definitions import expand_tests, stamp, version_warnings
 from .legacy import kind_env
 from .memory import search_max_lengths
 from .store import (
@@ -25,17 +27,10 @@ from .store import (
     FAILED,
     OK,
     UNSUPPORTED,
-    empty_doc,
-    env_label,
-    get_block,
-    has_results,
     load_run,
-    merge_run_block,
+    make_result,
     run_path,
     save_json,
-    set_block,
-    slot_id,
-    sync_slots,
 )
 
 if TYPE_CHECKING:
@@ -531,39 +526,115 @@ class BenchmarkRunner:
         )
         return point
 
-    def save(
+    @classmethod
+    def for_definition(cls, defn: dict[str, Any], **overrides: Any) -> "BenchmarkRunner":
+        """A runner set up from a benchmark definition's kind and ``meta_params``."""
+        meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+        return cls(
+            n_repeat=meta.get("n_repeat", 3),
+            n_warmup=meta.get("n_warmup", 1),
+            remote=defn["kind"] == "remote",
+            dtype=meta.get("dtype", "bfloat16"),
+            autocast=meta.get("autocast", True),
+            thresholds=tuple(meta.get("thresholds", DEFAULT_THRESHOLDS)),
+            min_length=meta.get("min_length", 2),
+            max_length=meta.get("max_length", 4096),
+        )
+
+    def run_tests(
         self,
-        block: str,
-        slots: list[dict[str, Any]],
-        config_slots: list[dict[str, Any]],
-        path: Path | None = None,
-    ) -> dict[str, Any]:
-        """Write measured *slots* into *block* of ``run.json``.
+        defn: dict[str, Any],
+        model_name: str,
+        load_model: Callable[[str], "StandardizedTransformer"],
+        configs: list[ToolBenchmarkConfig],
+    ) -> list[dict[str, Any]]:
+        """Outcomes of *configs* on one model; a model that fails to load fails its tests."""
+        try:
+            model = load_model(model_name)
+        except Exception as exc:
+            print(f"  FAILED to load {model_name}: {type(exc).__name__}: {exc}")
+            tests = expand_tests({**defn, "models": [model_name]})
+            names = {c.tool_name for c in configs}
+            return [
+                {**{k: t[k] for k in ("tool", "model", "params")}, "status": FAILED,
+                 "stats": None, "error": f"model load: {type(exc).__name__}: {exc}"[:500]}
+                for t in tests if t["tool"] in names
+            ]
+        try:
+            if defn["dimension"] == "peak_mem":
+                return self.run_peak_mem(model_name, model, configs)
+            return self.run(model_name, model, configs)
+        finally:
+            del model
+            free_cuda()
 
-        The block always holds every *config_slots* entry (unmeasured ones
-        as placeholders). It is merged per slot into the existing block
-        when that is from the same environment identity; otherwise
-        replaced, so a block is always one environment.
-        """
-        path = run_path(path)
-        meta = self.peak_meta() if block == "peak_mem" else self.latency_meta()
-        fresh = sync_slots({"env": self.env(), "meta_params": meta, "runs": slots}, config_slots)
-        extra = {slot_id(s) for s in slots} - {slot_id(s) for s in fresh["runs"]}
-        fresh["runs"] += [s for s in slots if slot_id(s) in extra]
 
-        doc = load_run(path) or empty_doc()
-        existing = get_block(doc, block)
-        merged_block, merged = merge_run_block(existing, fresh, block)
-        if existing is not None and not merged and has_results(existing):
-            print(
-                f"warning: replacing {block} in {path} — its environment "
-                f"({env_label(existing.get('env'))}) differs from this run's ({env_label(fresh['env'])})."
-            )
-        set_block(doc, block, merged_block)
-        save_json(path, doc)
-        action = "merged into" if merged else "written to"
-        print(f"\n  {block} results {action} {path}")
-        return merged_block
+def run_benchmark(
+    defn: dict[str, Any],
+    load_model: Callable[[str], "StandardizedTransformer"],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Run a whole benchmark and write its result to ``run.json``.
+
+    The result is rewritten after each model, so an interrupted run
+    leaves an ``incomplete`` result (its remaining tests ``not_run``).
+    """
+    path = run_path(path)
+    runner = BenchmarkRunner.for_definition(defn)
+    configs = tool_configs(defn)
+    env = runner.env()
+    for warning in version_warnings({defn["name"]: defn}, _recorded_stamps(defn["name"], path)):
+        print(f"warning: {warning}")
+    print(f"\nRunning {defn['name']} v{defn['version']} ({len(defn['models'])} model(s) × {len(configs)} tool(s))...")
+    outcomes: list[dict[str, Any]] = []
+    result = make_result(defn, env, defn["meta_params"], outcomes)
+    for model_name in defn["models"]:
+        outcomes += runner.run_tests(defn, model_name, load_model, configs)
+        result = make_result(defn, env, defn["meta_params"], outcomes)
+        run = load_run(path) or {}
+        run[defn["name"]] = result
+        save_json(path, run)
+    print(f"\n  {defn['name']}: {result['status']} ({len(result['results'])} result(s), "
+          f"{len(result['failed'])} failed, {len(result['optional_failed'])} optional failed) -> {path}")
+    return result
+
+
+def run_individual(
+    defn: dict[str, Any],
+    load_model: Callable[[str], "StandardizedTransformer"],
+    models: list[str] | None = None,
+    tools: list[str] | None = None,
+    params: dict[str, list[Any]] | None = None,
+    **overrides: Any,
+) -> dict[str, Any] | None:
+    """Run selected tests of a benchmark; returns a result that is not written anywhere.
+
+    *models* / *tools* are substring filters; *params* overrides sweep values.
+    """
+    selected = [m for m in defn["models"] if not models or any(sub in m for sub in models)]
+    if models:
+        selected += [m for m in models if "/" in m and m not in selected]
+    configs = tool_configs(defn, tools, params)
+    if not selected or not configs:
+        return None
+    runner = BenchmarkRunner.for_definition(defn, **overrides)
+    meta = {**defn["meta_params"], **{k: v for k, v in overrides.items() if v is not None}}
+    outcomes: list[dict[str, Any]] = []
+    for model_name in selected:
+        outcomes += runner.run_tests(defn, model_name, load_model, configs)
+    return make_result(None, runner.env(), meta, outcomes, benchmark={**stamp(defn), "individual": True})
+
+
+def _recorded_stamps(name: str, path: Path | None = None) -> list[dict[str, Any]]:
+    """The ``benchmark`` stamps recorded for *name* in ``run.json`` and the baseline."""
+    from .store import load_baseline
+
+    out = []
+    for doc in (load_run(path), load_baseline()):
+        entry = (doc or {}).get(name)
+        if entry and entry.get("benchmark"):
+            out.append(entry["benchmark"])
+    return out
 
 
 def _build(config: ToolBenchmarkConfig, model: "StandardizedTransformer", sweep: dict[str, Any]) -> dict[str, Any]:
