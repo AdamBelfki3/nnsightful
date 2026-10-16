@@ -223,6 +223,12 @@ def _main() -> None:
     args = _parse_args()
 
     from .definitions import load_definitions
+    from .store import partial_notice
+
+    if args.promote or args.show or args.show_diff:
+        notice = partial_notice(args.run)
+        if notice:
+            print(notice)
 
     if args.promote:
         from .store import promote_files

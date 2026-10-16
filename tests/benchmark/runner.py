@@ -27,10 +27,13 @@ from .store import (
     OK,
     UNSUPPORTED,
     kind_env,
+    clear_partial,
     load_run,
     make_result,
+    mark_in_progress,
     run_path,
     save_json,
+    save_partial,
 )
 
 if TYPE_CHECKING:
@@ -574,10 +577,12 @@ def run_benchmark(
     load_model: Callable[[str], "StandardizedTransformer"],
     path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run a whole benchmark and write its result to ``run.json``.
+    """Run a whole benchmark and write its finished result to ``run.json``.
 
-    The result is rewritten after each model, so an interrupted run
-    leaves an ``incomplete`` result (its remaining tests ``not_run``).
+    Progress goes to the in-progress file next to ``run.json`` after each
+    model (status ``in_progress``, with the models done); the benchmark's
+    entry in ``run.json`` is only replaced once it finishes, complete or
+    not. An interrupted run leaves ``run.json`` untouched.
     """
     path = run_path(path)
     runner = BenchmarkRunner.for_definition(defn)
@@ -587,13 +592,16 @@ def run_benchmark(
         print(f"warning: {warning}")
     print(f"\nRunning {defn['name']} v{defn['version']} ({len(defn['models'])} model(s) × {len(configs)} tool(s))...")
     outcomes: list[dict[str, Any]] = []
-    result = make_result(defn, env, defn["meta_params"], outcomes)
-    for model_name in defn["models"]:
+    models = list(defn["models"])
+    for i, model_name in enumerate(models):
         outcomes += runner.run_tests(defn, model_name, load_model, configs)
-        result = make_result(defn, env, defn["meta_params"], outcomes)
-        run = load_run(path) or {}
-        run[defn["name"]] = result
-        save_json(path, run)
+        partial = make_result(defn, env, defn["meta_params"], outcomes)
+        save_partial(path, defn["name"], mark_in_progress(partial, models[: i + 1], models[i + 1:]))
+    result = make_result(defn, env, defn["meta_params"], outcomes)
+    run = load_run(path) or {}
+    run[defn["name"]] = result
+    save_json(path, run)
+    clear_partial(path, defn["name"])
     print(f"\n  {defn['name']}: {result['status']} ({len(result['results'])} result(s), "
           f"{len(result['failed'])} failed, {len(result['optional_failed'])} optional failed) -> {path}")
     return result

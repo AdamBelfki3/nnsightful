@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ RUN_FILE = BENCH_DIR / "run.json"
 LEGACY_BASELINE_FILE = BENCH_DIR / "results.json"
 LEGACY_RUN_FILE = BENCH_DIR / "latest.json"
 
-COMPLETE, INCOMPLETE = "complete", "incomplete"
+COMPLETE, INCOMPLETE, IN_PROGRESS = "complete", "incomplete", "in_progress"
 OK, NOT_RUN, FAILED, UNSUPPORTED = "ok", "not_run", "failed", "unsupported"
 
 _CODE_FIELDS = ("git_hash", "dirty", "dirty_fingerprint", "timestamp")
@@ -266,9 +268,72 @@ def load_baseline(path: Path | None = None) -> dict[str, Any] | None:
 
 
 def save_json(path: Path, data: dict[str, Any]) -> None:
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    """Write *data* atomically: a temp file in the same directory, then ``os.replace``."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# In-progress file
+# ---------------------------------------------------------------------------
+
+
+def partial_path(run_file: Path | None = None) -> Path:
+    """The in-progress file next to the run file: ``run.json`` -> ``run.partial.json``."""
+    run_file = run_path(run_file)
+    return run_file.with_name(f"{run_file.stem}.partial{run_file.suffix}")
+
+
+def is_partial(path: Path | None) -> bool:
+    return path is not None and Path(path).stem.endswith(".partial")
+
+
+def mark_in_progress(result: dict[str, Any], done: list[str], remaining: list[str]) -> dict[str, Any]:
+    """*result* as an in-progress entry: status ``in_progress`` plus which models are done."""
+    return {**result, "status": IN_PROGRESS, "progress": {"models_done": list(done), "models_remaining": list(remaining)}}
+
+
+def save_partial(run_file: Path | None, name: str, result: dict[str, Any]) -> None:
+    """Record a benchmark's progress in the in-progress file."""
+    path = partial_path(run_file)
+    doc = load_run(path) or {}
+    doc[name] = result
+    save_json(path, doc)
+
+
+def clear_partial(run_file: Path | None, name: str) -> None:
+    """Drop a finished benchmark from the in-progress file; delete the file once empty."""
+    path = partial_path(run_file)
+    doc = load_run(path)
+    if doc is None:
+        return
+    doc.pop(name, None)
+    if doc:
+        save_json(path, doc)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def partial_notice(run_file: Path | None = None) -> str | None:
+    """A one-line notice naming interrupted benchmarks, if the in-progress file has any."""
+    if is_partial(run_file):
+        return None
+    path = partial_path(run_file)
+    doc = load_run(path)
+    if not doc:
+        return None
+    return (
+        f"note: interrupted benchmark(s) {', '.join(sorted(doc))}: partial results in {path} "
+        f"(not promotable; inspect with --run {path} --show)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +367,13 @@ def promote(
 
 
 def promote_files(run_file: Path | None = None, baseline_file: Path | None = None) -> dict[str, Any] | None:
-    """Promote ``run.json`` into ``baseline.json``, benchmark by benchmark."""
+    """Promote ``run.json`` into ``baseline.json``, benchmark by benchmark.
+
+    Never promotes from an in-progress file.
+    """
+    if is_partial(run_file):
+        print(f"REFUSED: {run_file} is an in-progress file; only finished results in run.json can be promoted.")
+        return None
     run = load_run(run_file)
     if run is None:
         print(f"No run found at {run_path(run_file)} — nothing to promote.")
@@ -310,6 +381,9 @@ def promote_files(run_file: Path | None = None, baseline_file: Path | None = Non
     baseline = load_baseline(baseline_file)
     new_baseline, promoted, refused = promote(run, baseline)
     for name, failed in refused.items():
+        if run[name].get("status") == IN_PROGRESS:
+            print(f"REFUSED {name}: still in progress")
+            continue
         print(f"REFUSED {name}: incomplete — {len(failed)} non-optional test(s) didn't succeed:")
         for f in failed:
             print(f"    {f['status']}: {f['tool']} | {f['model']} | {f['params']} — {f.get('error', '')}")

@@ -39,8 +39,9 @@ Gated models (gemma, Llama) need `HF_TOKEN` in the environment.
 ## Workflow
 
 1. `python -m tests.benchmark --all` → runs every benchmark into
-   `run.json` (best practice: a baseline built from one `--all` run is
-   one coherent snapshot). `--benchmarks NAME ...` runs a subset.
+   `run.json`, each written when it finishes (best practice: a baseline
+   built from one `--all` run is one coherent snapshot). `--benchmarks
+   NAME ...` runs a subset. See *Finished and interrupted runs*.
 2. `python -m tests.benchmark --show-diff` → each benchmark in
    `run.json` vs. its baseline result, test by test.
 3. Happy with the numbers? `python -m tests.benchmark --promote` →
@@ -52,7 +53,8 @@ Gated models (gemma, Llama) need `HF_TOKEN` in the environment.
 |------|-----------------|------|
 | `benchmarks/<name>.json` | **Yes** | The current definition of each benchmark |
 | `benchmarks/archive/<name>.v<N>.json` | **Yes** | Older definitions that recorded results still refer to |
-| `run.json` | **No** (gitignored) | The latest result of each benchmark run |
+| `run.json` | **No** (gitignored) | The latest **finished** result of each benchmark run |
+| `run.partial.json` | **No** (gitignored) | Progress of benchmarks still running or interrupted (same format, not promotable) |
 | `baseline.json` | **Yes** | Per benchmark, the promoted result and the one it replaced (`previous`) |
 
 ## Running
@@ -201,9 +203,10 @@ model there has a lens.
   `pct` and its own `latency`, or `oom: true`).
 - `failed` / `optional_failed`: tests that didn't succeed, with
   `status` `failed` (an exception, OOM, or the model failing to load),
-  `unsupported` (e.g. no j-lens) or `not_run` (the run was interrupted).
+  `unsupported` (e.g. no j-lens) or `not_run` (not measured yet, in an
+  in-progress entry).
 - `status`: `complete` if every non-optional test succeeded, else
-  `incomplete`.
+  `incomplete`; `in_progress` only in the in-progress file.
 - `env`: one stamp for the whole benchmark —
   - both kinds: `git_hash`, `dirty` (the working tree has changes per
     `git status --porcelain`, untracked files included, ignoring the
@@ -218,10 +221,34 @@ model there has a lens.
     key package versions; `"unknown"` for results from before it was
     recorded).
 
-A run writes its result after every model, so an interrupted run
-leaves an `incomplete` result whose remaining tests are `not_run`.
-Running a benchmark again replaces its entry in `run.json`; other
-benchmarks' entries are kept.
+### Finished and interrupted runs
+
+`run.json` only ever holds finished results. While a benchmark runs,
+its progress is written after each model to the in-progress file next
+to the run file (`run.json` → `run.partial.json`; with `--run
+PATH.json`, `PATH.partial.json`): the same format, with `status:
+"in_progress"`, the tests measured so far, the rest as `not_run`, and
+`progress: {"models_done": [...], "models_remaining": [...]}`.
+
+- When the benchmark **finishes** — complete, or incomplete because
+  some tests failed — its entry in `run.json` is replaced, its entry is
+  removed from the in-progress file, and the file is deleted once
+  empty. Other benchmarks' entries are left alone; with `--all`, each
+  benchmark is written when it finishes.
+- An **interrupted** or crashed run leaves `run.json` untouched (its
+  previous finished entry stays) and keeps the partial measurements in
+  the in-progress file. Inspect them with `--run run.partial.json
+  --show`; while the file exists, `--show`, `--show-diff` and
+  `--promote` print a notice naming the interrupted benchmark(s).
+  Running the benchmark again starts it over (resuming isn't
+  supported yet; the file records which models are done).
+- `--promote` refuses the in-progress file, and `in_progress` entries
+  are never promotable.
+- Individual tests write neither file.
+
+`run.json`, the in-progress file and `baseline.json` are written
+atomically (a temp file in the same directory, then a rename), so an
+interrupted write never leaves a half-written file.
 
 `baseline.json` has the same results, each with a `previous` field:
 the result it replaced at promotion (or `null`).

@@ -341,6 +341,109 @@ class TestRunning:
         assert list(tmp_path.iterdir()) == []
 
 
+class TestInProgress:
+    def _interrupting_loader(self, at: str):
+        def load(name):
+            if name == at:
+                raise KeyboardInterrupt
+            return _FakeModel(name)
+
+        return load
+
+    def test_interrupt_leaves_run_json_untouched(self, fake, tmp_path):
+        run_file = tmp_path / "run.json"
+        save_json(run_file, {"fake_latency": _result("fake_latency", results=[_lat("fake[length]", "org/a", 1, 9.9)]),
+                             "other": _result("other")})
+        before = run_file.read_bytes()
+        with pytest.raises(KeyboardInterrupt):
+            run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
+        assert run_file.read_bytes() == before
+        partial = load_run(store.partial_path(run_file))
+        entry = partial["fake_latency"]
+        assert entry["status"] == "in_progress"
+        assert entry["progress"] == {"models_done": ["org/a"], "models_remaining": ["org/b"]}
+        assert {(r["model"], r["params"]["prompt_length"]) for r in entry["results"]} == {("org/a", 1), ("org/a", 2)}
+        assert {f["status"] for f in entry["failed"]} == {"not_run"}
+
+    def test_finish_replaces_only_its_entry_and_clears_partial(self, fake, tmp_path):
+        run_file = tmp_path / "run.json"
+        other = _result("other", results=[_lat("t", "m", 1, 0.5)])
+        save_json(run_file, {"fake_latency": _result("fake_latency"), "other": other})
+        with pytest.raises(KeyboardInterrupt):
+            run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
+        assert store.partial_path(run_file).exists()
+        result = run_benchmark(_defn(), _loader(), run_file)
+        run = load_run(run_file)
+        assert run["fake_latency"] == result and run["other"] == other
+        assert not store.partial_path(run_file).exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["run.json"]
+
+    def test_partial_file_keeps_other_interrupted_benchmarks(self, fake, tmp_path):
+        run_file = tmp_path / "run.json"
+        with pytest.raises(KeyboardInterrupt):
+            run_benchmark(_defn(name="other_latency", kind="remote"), self._interrupting_loader("org/b"), run_file)
+        run_benchmark(_defn(), _loader(), run_file)
+        assert list(load_run(store.partial_path(run_file))) == ["other_latency"]
+
+    def test_finished_with_failures_is_written_incomplete(self, fake, tmp_path):
+        fake(fail_on=("org/b", 1))
+        run_benchmark(_defn(), _loader(), tmp_path / "run.json")
+        assert load_run(tmp_path / "run.json")["fake_latency"]["status"] == "incomplete"
+        assert not store.partial_path(tmp_path / "run.json").exists()
+
+    def test_all_writes_each_benchmark_when_it_finishes(self, fake, tmp_path):
+        run_file = tmp_path / "run.json"
+        defs = [_defn(), _defn(name="other_latency", kind="remote")]
+        loaders = [_loader(), self._interrupting_loader("org/b")]
+        with pytest.raises(KeyboardInterrupt):
+            for defn, loader in zip(defs, loaders):
+                run_benchmark(defn, loader, run_file)
+        assert list(load_run(run_file)) == ["fake_latency"]
+        assert list(load_run(store.partial_path(run_file))) == ["other_latency"]
+
+    def test_custom_run_path(self):
+        assert store.partial_path(Path("/x/scratch.json")) == Path("/x/scratch.partial.json")
+
+    def test_notice_and_show(self, fake, tmp_path, monkeypatch, capsys):
+        run_file = tmp_path / "run.json"
+        with pytest.raises(KeyboardInterrupt):
+            run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
+        capsys.readouterr()
+        monkeypatch.setattr(sys, "argv", ["bench", "--show", "--run", str(run_file)])
+        cli._main()
+        out = capsys.readouterr().out
+        partial = store.partial_path(run_file)
+        assert f"note: interrupted benchmark(s) fake_latency: partial results in {partial}" in out
+        monkeypatch.setattr(sys, "argv", ["bench", "--show", "--run", str(partial)])
+        cli._main()
+        out = capsys.readouterr().out
+        assert "note:" not in out and "fake_latency v1 (in_progress): 2 measured; 2 not run" in out
+
+    def test_promote_refuses_partial(self, fake, tmp_path, capsys):
+        run_file, base = tmp_path / "run.json", tmp_path / "baseline.json"
+        with pytest.raises(KeyboardInterrupt):
+            run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
+        assert promote_files(store.partial_path(run_file), base) is None
+        assert "REFUSED" in capsys.readouterr().out and not base.exists()
+        in_progress = load_run(store.partial_path(run_file))
+        _, promoted, refused = promote(in_progress, None)
+        assert promoted == [] and list(refused) == ["fake_latency"]
+
+    def test_atomic_save(self, tmp_path, monkeypatch):
+        target = tmp_path / "baseline.json"
+        save_json(target, {"a": 1})
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["baseline.json"]
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(store.json, "dump", boom)
+        with pytest.raises(RuntimeError):
+            save_json(target, {"a": 2})
+        assert json.loads(target.read_text()) == {"a": 1}
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["baseline.json"]
+
+
 # ---------------------------------------------------------------------------
 # Promotion
 # ---------------------------------------------------------------------------

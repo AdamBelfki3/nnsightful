@@ -8,5 +8,6 @@ build/
 .eggs/
 tests/benchmark/*.json
 !tests/benchmark/baseline.json
+tests/benchmark/.*.tmp
 .docs/
 send/
