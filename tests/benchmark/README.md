@@ -7,7 +7,7 @@ versioned **benchmarks** defined in JSON:
 |-----------|------|----------|
 | `local_latency` | local (this machine's GPU, no NDIF) | wall-clock latency of each tool, bf16 under NDIF's autocast |
 | `remote_latency` | remote (production NDIF, `https://api.ndif.us`) | end-to-end latency excluding queue wait, with a per-phase breakdown |
-| `peak_mem` | local | the largest prompt length whose peak GPU memory beyond the weights stays within 10% / 25% / 50% of the model footprint |
+| `peak_mem` | local | the largest prompt length whose peak GPU memory beyond the weights stays within 10% / 25% / 50% of the model footprint (weights + NDIF's 500 MiB padding bias) |
 
 A benchmark always runs **whole** and produces one result with one
 environment stamp. Results go to a local `run.json`, are diffed against
@@ -128,7 +128,7 @@ Each `benchmarks/<name>.json` defines one benchmark:
   (local only). There is one benchmark per (dimension, kind).
 - `meta_params`: `n_repeat`, `n_warmup`; locally `dtype` and
   `autocast`; for `peak_mem` also `swept`, `thresholds`, `min_length`,
-  `max_length` (see *Peak memory*).
+  `max_length`, `padding_bias` (see *Peak memory*).
 - `tools`: `tool` picks the nnsightful tool; `name` is what its tests
   are called (default: the tool). Latency tools sweep every combination
   of `sweep`; the test params are the sweep combo. Peak-memory tools
@@ -198,9 +198,13 @@ model there has a lens.
 
 - `stats` per test: latency mean / std / min / max / samples in
   seconds (remote adds the four-phase `breakdown`); peak memory
-  `footprint_bytes`, `context_cap`, `max_prompt_length` (per threshold
-  label), `capped` and `points` (each probed length with `peak_bytes`,
-  `pct` and its own `latency`, or `oom: true`).
+  `footprint_bytes` (the thresholds' denominator: `weights_bytes` +
+  `padding_bias`), `weights_bytes`, `padding_bias` (bytes), `context_cap`,
+  `max_prompt_length` (per threshold label), `capped` and `points`
+  (each probed length with `peak_bytes`, `pct` and its own `latency`,
+  or `oom: true`). Results recorded before `padding_bias` existed
+  have no `weights_bytes` / `padding_bias`: their footprint is the
+  weights alone.
 - `failed` / `optional_failed`: tests that didn't succeed, with
   `status` `failed` (an exception, OOM, or the model failing to load),
   `unsupported` (e.g. no j-lens) or `not_run` (not measured yet, in an
@@ -304,7 +308,9 @@ BENCHMARK DIFF
 
 For remote rows Baseline / Current are `total_unqueued`. The
 peak-memory diff shows `baseline -> current (delta)` for each
-threshold's max prompt length (higher is better); in Markdown 🟢 / 🔴
+threshold's max prompt length (higher is better), and the footprint
+as `baseline -> current` when it differs (e.g. a baseline recorded
+without a padding bias); in Markdown 🟢 / 🔴
 mark rows whose lengths only grew / any shrank.
 
 ## Showing results
@@ -321,10 +327,19 @@ errors).
   --------------------------------------------------------------------
   logit_lens[length]    gpt2   prompt_length=10     113.8ms     11.0ms
 
-  Tool        Model                    Params                          Footprint    10%    25%    50%
-  ----------------------------------------------------------------------------------------------------
-  logit_lens  google/gemma-3-1b-pt     top_k=5, include_entropy=True     1.86GiB     14     35     70
+  Setup:  local, bfloat16, autocast, swept=prompt_length, repeat=3, footprint=weights + 500.0MiB padding bias
+  Cells:  largest prompt_length whose peak stays within N% of the model footprint (weights + padding bias)
+
+  Tool        Model                 Params                             Weights   Footprint       10%       25%       50%
+  ----------------------------------------------------------------------------------------------------------------------
+  logit_lens  google/gemma-3-1b-pt  top_k=5, include_entropy=True      1.86GiB     2.35GiB        18        44        88
 ```
+
+The numbers in this example are illustrative, not measured results.
+
+The Weights column and the Setup line's `footprint=` part only appear
+for results that record a `padding_bias`; older results show the
+footprint (= weights) alone.
 
 ## Individual tests
 
@@ -338,15 +353,17 @@ to `run.json` and can't be promoted.
 - `--param` replaces a latency sweep's values (e.g. a prompt length the
   definition doesn't have).
 - `--repeat`, `--warmup`, `--dtype`, `--no-autocast`, `--thresholds`,
-  `--min-length`, `--max-length` override the definition's
-  `meta_params` — for individual tests only; benchmark runs always use
-  their definition.
+  `--min-length`, `--max-length`, `--padding-bias` (→ `padding_bias`;
+  bytes, or e.g. `500MiB`) override the definition's `meta_params` —
+  for individual tests only; benchmark runs always use their
+  definition.
 
 ## Peak memory
 
-On NDIF each model's process gets a memory budget proportional to its
-weights, so what limits a tool is the memory it needs *beyond* the
-weights. `peak_mem` measures exactly that, locally:
+On NDIF each model's process gets a memory budget of its weights ×
+1.15 plus a flat padding bias of 500 MiB, so what limits a tool is the
+memory it needs *beyond* the weights. `peak_mem` measures exactly that,
+locally:
 
 - The model is loaded on the GPU in `dtype` and each call runs under
   `torch.autocast("cuda", dtype, cache_enabled=False)`, the context
@@ -355,8 +372,16 @@ weights. `peak_mem` measures exactly that, locally:
 - **Peak** = `torch.cuda.max_memory_allocated()` during the call minus
   `memory_allocated()` before it, measured once per point after
   `n_warmup` untimed calls. It is deterministic, so there is no repeat.
-- **Footprint** = parameter + buffer bytes of the loaded model;
-  **pct** = peak / footprint × 100.
+- **Footprint** = weights (parameter + buffer bytes of the loaded
+  model) + `padding_bias` bytes (`meta_params.padding_bias`, 500 MiB:
+  NDIF's minimum padding; also the default when a definition omits it;
+  `0` = weights only); **pct** = peak / footprint × 100, and
+  the thresholds are shares of it. The bias matters most for small
+  models: it is about 2× gpt2's bf16 weights, but a few % of an 8B
+  model's. Changing it is a definition change (new `config_hash`, so
+  bump the version); `--padding-bias` tries other values in individual
+  tests. Each result records `padding_bias` and `weights_bytes`, and
+  the Setup line shows it (`footprint=weights + 500.0MiB padding bias`).
 - **Search**: prompt length doubles from `min_length` until the peak
   exceeds the largest threshold or the cap is reached; then each
   threshold is bisected between its bracketing points to the exact

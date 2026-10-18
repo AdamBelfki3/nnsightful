@@ -133,6 +133,11 @@ class BenchmarkDefinition(dict):
                 raise DefinitionError(
                     f"{source}: latency tool {tool['tool']} needs a 'sweep'"
                 )
+        bias = self["meta_params"].get("padding_bias", 0)
+        if not isinstance(bias, int) or isinstance(bias, bool) or bias < 0:
+            raise DefinitionError(
+                f"{source}: padding_bias must be a non-negative integer (bytes)"
+            )
         names = [self.tool_label(t) for t in self["tools"]]
         if len(names) != len(set(names)):
             raise DefinitionError(f"{source}: duplicate test names {names}")

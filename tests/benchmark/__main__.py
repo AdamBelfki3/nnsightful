@@ -44,6 +44,7 @@ _INDIVIDUAL_ONLY_FLAGS = {
     "--thresholds",
     "--min-length",
     "--max-length",
+    "--padding-bias",
 }
 
 
@@ -55,6 +56,22 @@ def _resolve_md_path(raw, mode: str, baseline_path: Path) -> Path | None:
         filename = "results.md" if mode == "show" else "benchmark_diff.md"
         return baseline_path.parent / filename
     return Path(raw)
+
+
+def _parse_padding_bias(text: str) -> int:
+    """``524288000`` or ``500MiB`` -> bytes (non-negative)."""
+    number, mib = text, text.lower().endswith("mib")
+    if mib:
+        number = text[:-3]
+    try:
+        value = float(number) * 2**20 if mib else int(number)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected bytes or NMiB, got {text!r}"
+        ) from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"padding bias must be >= 0, got {text!r}")
+    return int(value)
 
 
 def _parse_param(text: str) -> tuple[str, list]:
@@ -139,6 +156,16 @@ def _parse_args() -> argparse.Namespace:
     )
     ind.add_argument(
         "--max-length", type=int, default=None, help="Override the peak_mem search cap"
+    )
+    ind.add_argument(
+        "--padding-bias",
+        type=_parse_padding_bias,
+        default=None,
+        metavar="BYTES",
+        help=(
+            "Override the peak_mem padding bias added to the weights in the "
+            "footprint (bytes, or e.g. 500MiB; 0 = weights only)"
+        ),
     )
 
     show = p.add_argument_group("showing and diffing")
@@ -321,6 +348,7 @@ def _run_individual(args, defs: dict) -> None:
         "thresholds": tuple(args.thresholds) if args.thresholds else None,
         "min_length": args.min_length,
         "max_length": args.max_length,
+        "padding_bias": args.padding_bias,
     }
     results = {}
     for defn in chosen:

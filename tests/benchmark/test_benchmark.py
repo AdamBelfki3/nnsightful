@@ -78,9 +78,17 @@ def _env(
     return env
 
 
-def _peak_stats(lengths: dict, capped=(), footprint=1000 * MIB) -> dict:
+def _peak_stats(lengths: dict, capped=(), footprint=1000 * MIB, padding=None) -> dict:
+    """Peak stats; with *padding*, in the padded format (footprint = weights + it)."""
+    sizes = {"footprint_bytes": footprint}
+    if padding is not None:
+        sizes = {
+            "footprint_bytes": footprint + padding,
+            "weights_bytes": footprint,
+            "padding_bias": padding,
+        }
     return {
-        "footprint_bytes": footprint,
+        **sizes,
         "context_cap": 4096,
         "max_prompt_length": lengths,
         "capped": list(capped),
@@ -204,6 +212,8 @@ class TestDefinitions:
             "remote_latency": 1,
             "peak_mem": 1,
         }
+        assert defs["peak_mem"]["meta_params"]["padding_bias"] == 500 * MIB
+        assert BenchmarkRunner.DEFAULT_PADDING_BIAS == 500 * MIB
         counts = {n: len(BenchmarkDefinition.of(d).tests()) for n, d in defs.items()}
         assert counts == {"local_latency": 27, "remote_latency": 36, "peak_mem": 9}
         assert defs["local_latency"]["models"] == [GPT2, GEMMA, LLAMA]
@@ -245,6 +255,21 @@ class TestDefinitions:
         }
         assert len(BenchmarkDefinition.of(v0["local_latency"]).tests()) == 12
         assert len(BenchmarkDefinition.of(v0["remote_latency"]).tests()) == 24
+
+    @pytest.mark.parametrize("bias", [-1, 1.5, "500MiB", True])
+    def test_padding_bias_must_be_non_negative_bytes(self, bias):
+        defn = BenchmarkDefinition.load_all()["peak_mem"]
+        meta = {**defn["meta_params"], "padding_bias": bias}
+        with pytest.raises(DefinitionError, match="padding_bias"):
+            BenchmarkDefinition({**defn, "meta_params": meta}).validate()
+
+    def test_padding_bias_is_part_of_the_config_hash(self):
+        defn = BenchmarkDefinition.load_all()["peak_mem"]
+        meta = {**defn["meta_params"], "padding_bias": 0}
+        changed = BenchmarkDefinition({**defn, "meta_params": meta})
+        assert changed.config_hash() != defn.config_hash()
+        (warning,) = defn.version_warnings([changed.stamp()])
+        assert "but its version wasn't bumped" in warning
 
     @pytest.mark.parametrize(
         "change,match",
@@ -518,6 +543,10 @@ class TestRunning:
             ["bench"],
             ["bench", "--model", "gpt2", "--promote"],
             ["bench", "--all", "--repeat", "5"],
+            ["bench", "--all", "--padding-bias", "0"],
+            ["bench", "--benchmarks", "peak_mem", "--padding-bias", "500MiB"],
+            ["bench", "--model", "gpt2", "--padding-bias", "-1"],
+            ["bench", "--model", "gpt2", "--padding-bias", "lots"],
             ["bench", "--all", "--show"],
         ],
     )
@@ -525,6 +554,22 @@ class TestRunning:
         monkeypatch.setattr(sys, "argv", argv)
         with pytest.raises(SystemExit):
             cli._parse_args()
+
+    def test_padding_override_for_individual_tests(self, monkeypatch):
+        seen = []
+
+        def fake_run(defn, load_model, **kwargs):
+            seen.append(kwargs)
+
+        monkeypatch.setattr(bench_runner, "run_individual", fake_run)
+        argv = ["bench", "--benchmarks", "peak_mem", "--model", "gpt2"]
+        for flag, expected in (("0", 0), ("1234", 1234), ("500MiB", 500 * MIB)):
+            monkeypatch.setattr(sys, "argv", [*argv, "--padding-bias", flag])
+            cli._run_individual(cli._parse_args(), BenchmarkDefinition.load_all())
+            assert seen[-1]["padding_bias"] == expected
+        monkeypatch.setattr(sys, "argv", argv)
+        cli._run_individual(cli._parse_args(), BenchmarkDefinition.load_all())
+        assert seen[-1]["padding_bias"] is None
 
     def test_param_parsing(self):
         assert cli._parse_param("prompt_length=10,25") == ("prompt_length", [10, 25])
@@ -680,10 +725,10 @@ class _FakePeak:
 
 
 class TestRunLoop:
-    def _peak_runner(self, monkeypatch, oom_from=None, n_repeat=2):
+    def _peak_runner(self, monkeypatch, oom_from=None, n_repeat=2, padding=0):
         monkeypatch.setattr(bench_runner, "PeakMemory", _FakePeak)
         monkeypatch.setattr(
-            BenchmarkRunner, "model_footprint", staticmethod(lambda model: 1000)
+            BenchmarkRunner, "model_weights", staticmethod(lambda model: 1000)
         )
         monkeypatch.setattr(
             BenchmarkRunner, "context_length", staticmethod(lambda model: None)
@@ -695,6 +740,7 @@ class TestRunLoop:
             autocast=False,
             thresholds=(0.1, 0.5),
             max_length=256,
+            padding_bias=padding,
         )
 
     def _peak_config(self, calls):
@@ -717,6 +763,7 @@ class TestRunLoop:
         stats = outcome["stats"]
         assert stats["max_prompt_length"] == {"10%": 10, "50%": 50}
         assert stats["footprint_bytes"] == 1000 and stats["context_cap"] == 256
+        assert stats["weights_bytes"] == 1000 and stats["padding_bias"] == 0
         points = {p["prompt_length"]: p for p in stats["points"]}
         assert sorted(_FakePeak.entered) == sorted(points)
         for n, point in points.items():
@@ -725,6 +772,42 @@ class TestRunLoop:
             ] == BenchmarkRunner.peak_pct(10 * n, 1000)
             assert len(point["latency"]["samples"]) == 2
             assert calls.count(n) == 1 + 1 + 2  # warmup, peak, timed repeats
+
+    def test_peak_mem_footprint_includes_padding(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch, padding=1000)
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [self._peak_config([])]
+        )
+        stats = outcome["stats"]
+        assert (stats["weights_bytes"], stats["padding_bias"]) == (1000, 1000)
+        assert stats["footprint_bytes"] == 2000
+        assert stats["max_prompt_length"] == {"10%": 20, "50%": 100}
+        for point in stats["points"]:
+            assert point["pct"] == BenchmarkRunner.peak_pct(point["peak_bytes"], 2000)
+
+    def test_padding_from_definition(self):
+        meta = {"n_repeat": 1, "n_warmup": 0}
+        runner = BenchmarkRunner.for_definition(_defn(meta_params=meta))
+        assert runner.padding_bias == BenchmarkRunner.DEFAULT_PADDING_BIAS
+        defn = _defn(meta_params={**meta, "padding_bias": 123})
+        assert BenchmarkRunner.for_definition(defn).padding_bias == 123
+        runner = BenchmarkRunner.for_definition(defn, padding_bias=0)
+        assert runner.padding_bias == 0
+        peak_mem = BenchmarkDefinition.load_all()["peak_mem"]
+        runner = BenchmarkRunner.for_definition(peak_mem)
+        assert runner.padding_bias == 500 * MIB
+        with pytest.raises(ValueError, match="padding_bias"):
+            BenchmarkRunner(padding_bias=-1)
+
+    def test_zero_padding_bias_is_weights_only(self, monkeypatch):
+        """``padding_bias: 0`` gives the footprint of results recorded before it."""
+        runner = self._peak_runner(monkeypatch, padding=0)
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [self._peak_config([])]
+        )
+        stats = outcome["stats"]
+        assert stats["footprint_bytes"] == stats["weights_bytes"] == 1000
+        assert stats["max_prompt_length"] == {"10%": 10, "50%": 50}
 
     def test_peak_mem_oom_points(self, monkeypatch):
         runner = self._peak_runner(monkeypatch, oom_from=40)
@@ -926,7 +1009,7 @@ class TestRunLoopDetails(TestRunLoop):
         )
         monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: state["peak"])
         monkeypatch.setattr(
-            BenchmarkRunner, "model_footprint", staticmethod(lambda model: 1000)
+            BenchmarkRunner, "model_weights", staticmethod(lambda model: 1000)
         )
         monkeypatch.setattr(
             BenchmarkRunner, "context_length", staticmethod(lambda model: None)
@@ -939,7 +1022,12 @@ class TestRunLoopDetails(TestRunLoop):
             "fake", tool, build_args=lambda m, f, sw: {"n": sw["prompt_length"]}
         )
         runner = BenchmarkRunner(
-            n_repeat=1, n_warmup=1, autocast=False, thresholds=(0.1,), max_length=64
+            n_repeat=1,
+            n_warmup=1,
+            autocast=False,
+            thresholds=(0.1,),
+            max_length=64,
+            padding_bias=0,
         )
         (outcome,) = runner.run_model(
             "peak_mem", "org/a", _FakeModel("org/a"), [config]
@@ -1396,11 +1484,11 @@ class TestPercent:
         assert BenchmarkRunner.peak_pct(50, 200) == 25.0
         assert BenchmarkRunner.peak_pct(1, 3) == 33.333
 
-    def test_model_footprint_counts_params_and_buffers(self):
+    def test_model_weights_counts_params_and_buffers(self):
         torch = pytest.importorskip("torch")
         module = torch.nn.Linear(4, 8).to(torch.bfloat16)
         module.register_buffer("scale", torch.zeros(10, dtype=torch.float32))
-        assert BenchmarkRunner.model_footprint(module) == (4 * 8 + 8) * 2 + 10 * 4
+        assert BenchmarkRunner.model_weights(module) == (4 * 8 + 8) * 2 + 10 * 4
 
 
 # ---------------------------------------------------------------------------
@@ -1501,6 +1589,68 @@ class TestRendering:
             "Setup:  local, bfloat16, autocast, swept=prompt_length, repeat=3"
             in capsys.readouterr().out
         )
+
+    def test_unpadded_results_render_as_before(self, files, capsys):
+        _add_peak_to_run(files)
+        print_results(files["run"], dims=["peak_mem"])
+        out = capsys.readouterr().out
+        assert "within N% of the model footprint\n" in out
+        assert "Weights" not in out and "footprint=" not in out
+        md = markdown_results(files["run"])
+        assert "| Model | Params | Footprint |" in md and "Weights" not in md
+
+    def test_padded_results_show_weights_and_padding(self, tmp_path, capsys):
+        meta = {"n_repeat": 3, "swept": "prompt_length", "padding_bias": 500 * MIB}
+        run = {
+            "peak_mem": _result(
+                "peak_mem",
+                dimension="peak_mem",
+                meta=meta,
+                results=[_pk(GPT2, {"10%": 30}, padding=500 * MIB)],
+            )
+        }
+        print_results(run, dims=["peak_mem"])
+        out = capsys.readouterr().out
+        assert "repeat=3, footprint=weights + 500.0MiB padding bias" in out
+        assert "within N% of the model footprint (weights + padding bias)" in out
+        assert "Weights   Footprint" in out
+        assert "1000.0MiB     1.46GiB" in out
+        md = markdown_results(run)
+        assert "| Model | Params | Weights | Footprint |" in md
+        assert "| 1000.0MiB | 1.46GiB | 30 |" in md
+
+    def test_padded_run_vs_unpadded_baseline(self, tmp_path, capsys):
+        """A result recorded before padding_bias diffs with both footprints shown."""
+        meta = {"swept": "prompt_length", "padding_bias": 500 * MIB}
+        base = {
+            "peak_mem": {
+                **_result(
+                    "peak_mem",
+                    dimension="peak_mem",
+                    results=[_pk(GPT2, {"10%": 10})],
+                ),
+                "previous": None,
+            }
+        }
+        run = {
+            "peak_mem": _result(
+                "peak_mem",
+                dimension="peak_mem",
+                meta=meta,
+                results=[_pk(GPT2, {"10%": 30}, padding=500 * MIB)],
+            )
+        }
+        paths = {"baseline": tmp_path / "baseline.json", "run": tmp_path / "run.json"}
+        ResultsStore.save_json(paths["baseline"], base)
+        ResultsStore.save_json(paths["run"], run)
+        print_diff(paths["run"], paths["baseline"], dims=["peak_mem"])
+        out = capsys.readouterr().out
+        assert "Footprint: weights + padding bias" in out
+        assert "1000.0MiB -> 1.46GiB" in out and "10 -> 30 (+20)" in out
+        md = markdown_diff(paths["run"], paths["baseline"], dims=["peak_mem"])
+        assert "| Weights | Footprint |" in md
+        assert "| 1000.0MiB | 1000.0MiB -> 1.46GiB |" in md
+        assert "within N% of the model footprint (weights + padding bias)" in md
 
     def test_show_one_dimension(self, files, capsys):
         _add_peak_to_run(files)

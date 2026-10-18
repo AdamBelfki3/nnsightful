@@ -3,7 +3,7 @@
   "version": 1,
   "kind": "local",
   "dimension": "peak_mem",
-  "description": "Largest prompt length whose peak GPU memory beyond the weights stays within each threshold of the model footprint.",
+  "description": "Largest prompt length whose peak GPU memory beyond the weights stays within each threshold of the model footprint (weights + NDIF's minimum padding).",
   "meta_params": {
     "n_repeat": 3,
     "n_warmup": 1,
@@ -16,7 +16,8 @@
       0.5
     ],
     "min_length": 2,
-    "max_length": 4096
+    "max_length": 4096,
+    "padding_bias": 524288000
   },
   "models": [
     "openai-community/gpt2",

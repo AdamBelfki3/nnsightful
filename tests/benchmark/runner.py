@@ -28,7 +28,13 @@ class BenchmarkRunner:
     available (``autocast=False`` turns that off). Every test is
     isolated: a failing or unsupported test becomes a ``failed`` /
     ``unsupported`` outcome instead of aborting the run.
+
+    The peak-memory footprint is the model's weights plus
+    ``padding_bias`` bytes, NDIF's flat per-process padding (default
+    :attr:`DEFAULT_PADDING_BIAS`; 0 means weights only).
     """
+
+    DEFAULT_PADDING_BIAS = 500 * 1024 * 1024
 
     def __init__(
         self,
@@ -40,6 +46,7 @@ class BenchmarkRunner:
         thresholds: tuple[float, ...] | None = None,
         min_length: int = 2,
         max_length: int = 4096,
+        padding_bias: int = DEFAULT_PADDING_BIAS,
     ):
         self.n_repeat = n_repeat
         self.n_warmup = n_warmup
@@ -49,6 +56,9 @@ class BenchmarkRunner:
         self.thresholds = tuple(thresholds or ThresholdSearch.DEFAULT_THRESHOLDS)
         self.min_length = min_length
         self.max_length = max_length
+        if padding_bias < 0:
+            raise ValueError(f"padding_bias must be >= 0, got {padding_bias}")
+        self.padding_bias = padding_bias
         self._env_cache: dict[str, Any] | None = None
 
     @property
@@ -211,7 +221,8 @@ class BenchmarkRunner:
         measured in the same call.
         """
         axis = config.sweep_axis
-        footprint = self.model_footprint(model)
+        weights = self.model_weights(model)
+        footprint = weights + self.padding_bias
         ctx = self.context_length(model)
         cap = self.max_length if ctx is None else min(self.max_length, ctx - 1)
         search = ThresholdSearch(footprint, self.thresholds, cap, self.min_length)
@@ -229,6 +240,8 @@ class BenchmarkRunner:
         found = search.run(measure)
         return {
             "footprint_bytes": footprint,
+            "weights_bytes": weights,
+            "padding_bias": self.padding_bias,
             "context_cap": cap,
             "max_prompt_length": found.max_lengths,
             "capped": found.capped,
@@ -287,6 +300,7 @@ class BenchmarkRunner:
             thresholds=meta.get("thresholds"),
             min_length=meta.get("min_length", 2),
             max_length=meta.get("max_length", 4096),
+            padding_bias=meta.get("padding_bias", cls.DEFAULT_PADDING_BIAS),
         )
 
     def run_tests(
@@ -344,11 +358,11 @@ class BenchmarkRunner:
 
     @staticmethod
     def peak_pct(peak_bytes: int, footprint_bytes: int) -> float:
-        """Peak as a percentage of the model footprint, to 3 decimals."""
+        """Peak as a percentage of the footprint (weights + padding bias)."""
         return round(peak_bytes / footprint_bytes * 100, 3)
 
     @staticmethod
-    def model_footprint(model: "StandardizedTransformer") -> int:
+    def model_weights(model: "StandardizedTransformer") -> int:
         """Bytes of the model's parameters and buffers, in their loaded dtype."""
         return sum(
             t.numel() * t.element_size()

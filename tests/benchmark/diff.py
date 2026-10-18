@@ -444,13 +444,46 @@ class Cells:
 
     @staticmethod
     def peak_header_line(meta: dict[str, Any], env: dict[str, Any]) -> str:
-        """``local, bfloat16, autocast, swept=prompt_length, repeat=3``."""
+        """``local, bfloat16, autocast, swept=prompt_length, repeat=3[, footprint=…]``.
+
+        The footprint part is only there for results with a ``padding_bias``.
+        """
         parts = [str(env.get("kind", "?")), str(env.get("dtype", "?"))]
         if env.get("autocast"):
             parts.append("autocast")
         parts.append(f"swept={meta.get('swept', '?')}")
         parts.append(f"repeat={meta.get('n_repeat', '?')}")
+        if "padding_bias" in meta:
+            bias = Cells.size(meta["padding_bias"])
+            parts.append(f"footprint=weights + {bias} padding bias")
         return ", ".join(parts)
+
+    @staticmethod
+    def weights(run: dict[str, Any]) -> int:
+        """Weight bytes of a peak-memory run (older results: the footprint)."""
+        return run.get("weights_bytes", run["footprint_bytes"])
+
+    @staticmethod
+    def padded(runs: list[dict[str, Any] | None]) -> bool:
+        """Whether any run's footprint includes a padding bias beyond the weights."""
+        return any(run and run.get("padding_bias") for run in runs)
+
+    @staticmethod
+    def footprint_of(runs: list[dict[str, Any] | None]) -> str:
+        """``the model footprint``, plus ``(weights + padding bias)`` if padded."""
+        padded = Cells.padded(runs)
+        return "the model footprint" + (" (weights + padding bias)" if padded else "")
+
+    @staticmethod
+    def footprint_cell(row: dict[str, Any]) -> str:
+        """The footprint of a diff row, ``old -> new`` when the two differ."""
+        old, new = row["old"], row["new"]
+        if old and new and old["footprint_bytes"] != new["footprint_bytes"]:
+            return (
+                f"{Cells.size(old['footprint_bytes'])} -> "
+                f"{Cells.size(new['footprint_bytes'])}"
+            )
+        return Cells.size((new or old)["footprint_bytes"])
 
     @staticmethod
     def point_latency(point: dict[str, Any]) -> tuple[str, str]:
@@ -992,14 +1025,16 @@ class TerminalReport:
         print(f"  Run:    {ResultView.run_label(current)}")
         print(f"  Setup:  {Cells.peak_header_line(meta, ResultView.peak_env(current))}")
         print(
-            f"  Cells:  largest {axis} whose peak stays within N% of the model "
-            "footprint"
+            f"  Cells:  largest {axis} whose peak stays within N% of "
+            f"{Cells.footprint_of(runs)}"
         )
         print()
+        padded = Cells.padded(runs)
         cols = "".join(f"  {label:>8}" for label in labels)
+        weights_col = f"{'Weights':>10}  " if padded else ""
         header = (
             f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}  {'Params':<30}  "
-            f"{'Footprint':>10}{cols}"
+            f"{weights_col}{'Footprint':>10}{cols}"
         )
         print(header)
         print("  " + "-" * (len(header) - 2))
@@ -1007,9 +1042,10 @@ class TerminalReport:
             cells = "".join(
                 f"  {Cells.max_len_cell(run, lb, meta):>8}" for lb in labels
             )
+            weights = f"{Cells.size(Cells.weights(run)):>10}  " if padded else ""
             print(
                 f"  {run['tool']:<{tool_w}}  {run['model']:<{model_w}}  "
-                f"{Cells.format_params(run):<30}  "
+                f"{Cells.format_params(run):<30}  {weights}"
                 f"{Cells.size(run['footprint_bytes']):>10}{cells}"
             )
 
@@ -1053,23 +1089,30 @@ class TerminalReport:
         )
         tool_w = max(len(r["tool"]) for r in rows)
         model_w = max(len(r["model"]) for r in rows)
+        fp_w = max(10, *(len(Cells.footprint_cell(r)) for r in rows))
+        refs = [r["new"] or r["old"] for r in rows]
+        padded = Cells.padded(refs)
 
         print("=" * 80)
         print("PEAK MEMORY DIFF (max prompt length within N% of footprint)")
         print("=" * 80)
+        if Cells.padded([r[side] for r in rows for side in ("old", "new")]):
+            print("  Footprint: weights + padding bias")
+            print()
         cols = "".join(f"  {label:>20}" for label in labels)
-        header = f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}  {'Footprint':>10}"
-        header += f"{cols}  {'vs':<26}"
+        weights_col = f"  {'Weights':>10}" if padded else ""
+        header = f"  {'Tool':<{tool_w}}  {'Model':<{model_w}}{weights_col}"
+        header += f"  {'Footprint':>{fp_w}}{cols}  {'vs':<26}"
         print(header)
         print("  " + "-" * (len(header) - 2))
-        for row in rows:
-            ref = row["new"] or row["old"]
+        for row, ref in zip(rows, refs):
             cells = "".join(
                 f"  {Cells.peak_delta_cell(row, lb, meta):>20}" for lb in labels
             )
+            weights = f"  {Cells.size(Cells.weights(ref)):>10}" if padded else ""
             print(
-                f"  {row['tool']:<{tool_w}}  {row['model']:<{model_w}}  "
-                f"{Cells.size(ref['footprint_bytes']):>10}{cells}  "
+                f"  {row['tool']:<{tool_w}}  {row['model']:<{model_w}}{weights}  "
+                f"{Cells.footprint_cell(row):>{fp_w}}{cells}  "
                 f"{Cells.peak_source(row):<26}"
             )
         print("\n" + "=" * 80)
@@ -1473,22 +1516,31 @@ class MarkdownReport:
             f"- **Setup:** {Cells.peak_header_line(meta, ResultView.peak_env(current))}"
         )
         out.append(
-            f"- **Cells:** largest `{axis}` whose peak stays within N% of the "
-            "model footprint (`>=` hit the length cap, `<` already over at the "
-            "smallest length)"
+            f"- **Cells:** largest `{axis}` whose peak stays within N% of "
+            f"{Cells.footprint_of(runs)} (`>=` hit the length cap, `<` already "
+            "over at the smallest length)"
         )
         out.append("")
         plot_fn = MarkdownReport.peak_plotter(plots, "plot_peak_mem", out)
+        padded = Cells.padded(runs)
 
         def table(tool_runs: list[dict[str, Any]]) -> list[str]:
             lines = [
-                "| Model | Params | Footprint | " + " | ".join(labels) + " |",
-                "|-------|--------|----------:|" + "".join("----:|" for _ in labels),
+                "| Model | Params | "
+                + ("Weights | " if padded else "")
+                + "Footprint | "
+                + " | ".join(labels)
+                + " |",
+                "|-------|--------|"
+                + ("--------:|" if padded else "")
+                + "----------:|"
+                + "".join("----:|" for _ in labels),
             ]
             for run in tool_runs:
                 cells = " | ".join(Cells.max_len_cell(run, lb, meta) for lb in labels)
+                weights = f"{Cells.size(Cells.weights(run))} | " if padded else ""
                 lines.append(
-                    f"| {run['model']} | {Cells.md_params(run)} | "
+                    f"| {run['model']} | {Cells.md_params(run)} | {weights}"
                     f"{Cells.size(run['footprint_bytes'])} | {cells} |"
                 )
             if detail:
@@ -1537,9 +1589,11 @@ class MarkdownReport:
             [r["old"] for r in rows if r["old"]], [r["new"] for r in rows if r["new"]]
         )
 
+        sides = [r[side] for r in rows for side in ("old", "new")]
+        padded = Cells.padded([r["new"] or r["old"] for r in rows])
         out = ["## PEAK MEMORY (local GPU)", ""]
         out.append(
-            "_Largest prompt length within N% of the model footprint: "
+            f"_Largest prompt length within N% of {Cells.footprint_of(sides)}: "
             "baseline -> current._"
         )
         out.append("")
@@ -1547,8 +1601,14 @@ class MarkdownReport:
 
         def table(tool_rows: list[dict[str, Any]]) -> list[str]:
             lines = [
-                "|  | Model | Footprint | " + " | ".join(labels) + " | vs |",
-                "|:-:|-------|----------:|"
+                "|  | Model | "
+                + ("Weights | " if padded else "")
+                + "Footprint | "
+                + " | ".join(labels)
+                + " | vs |",
+                "|:-:|-------|"
+                + ("--------:|" if padded else "")
+                + "----------:|"
                 + "".join(":----|" for _ in labels)
                 + ":---|",
             ]
@@ -1557,9 +1617,10 @@ class MarkdownReport:
                 cells = " | ".join(
                     Cells.peak_delta_cell(row, lb, meta) for lb in labels
                 )
+                weights = f"{Cells.size(Cells.weights(ref))} | " if padded else ""
                 lines.append(
-                    f"| {Cells.peak_status_emoji(row)} | {row['model']} | "
-                    f"{Cells.size(ref['footprint_bytes'])} | {cells} | "
+                    f"| {Cells.peak_status_emoji(row)} | {row['model']} | {weights}"
+                    f"{Cells.footprint_cell(row)} | {cells} | "
                     f"{Cells.peak_source(row)} |"
                 )
             return lines
