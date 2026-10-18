@@ -29,10 +29,13 @@ class ResultView:
 
     @staticmethod
     def load_baseline(
-        path: Path | None,
+        path: Path | dict | None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """The baseline's results and, per benchmark, the result it replaced."""
-        base = ResultsStore(baseline=path).load_baseline()
+        if isinstance(path, dict):
+            base = path
+        else:
+            base = ResultsStore(baseline=path).load_baseline()
         if base is None:
             return None, None
         return base, {n: r["previous"] for n, r in base.items() if r.get("previous")}
@@ -40,6 +43,12 @@ class ResultView:
     @staticmethod
     def resolve(path: Path | dict | None) -> Path | dict:
         return path if isinstance(path, dict) else ResultsStore(run=path).run_path
+
+    @staticmethod
+    def resolve_baseline(path: Path | dict | None) -> Path | dict:
+        if isinstance(path, dict):
+            return path
+        return ResultsStore(baseline=path).baseline_path
 
     @staticmethod
     def file_name(path: Path | dict) -> str:
@@ -574,7 +583,7 @@ class Comparison:
     @staticmethod
     def compute_diff(
         latest_path: Path | dict | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         remote: bool | None = None,
@@ -659,7 +668,7 @@ class Comparison:
     @staticmethod
     def warnings(
         latest_path: Path | dict | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         dims: list[str] | None = None,
         remote: bool | None = None,
         tools: list[str] | None = None,
@@ -712,7 +721,7 @@ class Comparison:
     @staticmethod
     def compute_peak_diff(
         latest_path: Path | dict | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         with_previous: bool = False,
@@ -783,7 +792,7 @@ class TerminalReport:
     @staticmethod
     def diff_latency(
         latest_path: Path | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         remote: bool | None = None,
@@ -796,7 +805,7 @@ class TerminalReport:
         ``total_unqueued`` metric (the primary value stored in ``latency``).
         """
         latest_path = ResultView.resolve(latest_path)
-        baseline_path = ResultsStore(baseline=baseline_path).baseline_path
+        baseline_path = ResultView.resolve_baseline(baseline_path)
 
         all_rows = Comparison.compute_diff(
             latest_path,
@@ -833,10 +842,11 @@ class TerminalReport:
         if baseline is not None:
             print(
                 f"  Baseline:  {ResultView.baseline_summary(baseline)}  "
-                f"[{baseline_path.name}]"
+                f"[{ResultView.file_name(baseline_path)}]"
             )
         else:
-            print(f"  Baseline:  (no baseline at {baseline_path.name})")
+            name = ResultView.file_name(baseline_path)
+            print(f"  Baseline:  (no baseline at {name})")
 
         sections = ResultView.sections_to_show(remote)
         for section in sections:
@@ -1072,7 +1082,7 @@ class TerminalReport:
     @staticmethod
     def diff_peak(
         latest_path: Path | None,
-        baseline_path: Path | None,
+        baseline_path: Path | dict | None,
         tools: list[str] | None,
         models: list[str] | None,
         with_previous: bool = False,
@@ -1157,7 +1167,7 @@ class TerminalReport:
     @staticmethod
     def print_diff(
         latest_path: Path | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         remote: bool | None = None,
@@ -1209,9 +1219,14 @@ class MarkdownReport:
     """Markdown versions of the terminal tables, optionally with plots."""
 
     @staticmethod
+    def file_suffix(path: Path | dict) -> str:
+        """`` — `run.json` `` after a label, or nothing for in-memory results."""
+        return "" if isinstance(path, dict) else f" — `{path.name}`"
+
+    @staticmethod
     def diff_latency(
         latest_path: Path | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         remote: bool | None = None,
@@ -1225,7 +1240,7 @@ class MarkdownReport:
         one color per model.
         """
         latest_path = ResultView.resolve(latest_path)
-        baseline_path = ResultsStore(baseline=baseline_path).baseline_path
+        baseline_path = ResultView.resolve_baseline(baseline_path)
 
         rows = Comparison.compute_diff(
             latest_path,
@@ -1245,16 +1260,17 @@ class MarkdownReport:
         out: list[str] = ["# Benchmark Diff", ""]
         if current:
             out.append(
-                f"- **Current:** `{ResultView.run_label(current)}` — "
-                f"`{ResultView.file_name(latest_path)}`"
+                f"- **Current:** `{ResultView.run_label(current)}`"
+                f"{MarkdownReport.file_suffix(latest_path)}"
             )
         if baseline is not None:
             out.append(
-                f"- **Baseline:** {ResultView.baseline_summary(baseline)} — "
-                f"`{baseline_path.name}`"
+                f"- **Baseline:** {ResultView.baseline_summary(baseline)}"
+                f"{MarkdownReport.file_suffix(baseline_path)}"
             )
         else:
-            out.append(f"- **Baseline:** _none at `{baseline_path.name}`_")
+            name = ResultView.file_name(baseline_path)
+            out.append(f"- **Baseline:** _none at `{name}`_")
         out.append("")
 
         plot_renderer = None
@@ -1573,7 +1589,7 @@ class MarkdownReport:
     @staticmethod
     def diff_peak(
         latest_path: Path | None,
-        baseline_path: Path | None,
+        baseline_path: Path | dict | None,
         tools: list[str] | None,
         models: list[str] | None,
         plots: bool,
@@ -1681,7 +1697,7 @@ class MarkdownReport:
     @staticmethod
     def diff(
         latest_path: Path | None = None,
-        baseline_path: Path | None = None,
+        baseline_path: Path | dict | None = None,
         tools: list[str] | None = None,
         models: list[str] | None = None,
         remote: bool | None = None,

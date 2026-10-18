@@ -1313,6 +1313,30 @@ class TestPromote:
         assert base["local_latency"]["previous"]["benchmark"]["version"] == 0
         assert base["remote_latency"]["benchmark"]["version"] == 0
 
+        results_md = (tmp_path / "baseline.md").read_text()
+        diff_md = (tmp_path / "baseline_diff_with_prev.md").read_text()
+        assert results_md.startswith("# Benchmark Baseline\n")
+        assert "prompt_length=10" in results_md
+        assert diff_md.startswith("# Benchmark Baseline vs. Previous")
+        assert "local_latency v1" in diff_md and "local_latency v0" in diff_md
+
+    def test_refused_promote_writes_no_reports(self, tmp_path, capsys):
+        ResultsStore.save_json(
+            tmp_path / "run.json",
+            {"local_latency": _result(failed=[_fail(LL, GPT2, 10)])},
+        )
+        ResultsStore(tmp_path / "run.json", tmp_path / "baseline.json").promote()
+        assert "REFUSED local_latency" in capsys.readouterr().out
+        assert list(tmp_path.iterdir()) == [tmp_path / "run.json"]
+
+    def test_default_layout(self):
+        assert ResultsStore.BASELINE_FILE.parent == ResultsStore.RESULTS_DIR
+        assert ResultsStore.RUN_FILE.parent == ResultsStore.TMP_DIR
+        assert ResultsStore.baseline_report_paths(ResultsStore.BASELINE_FILE) == (
+            ResultsStore.RESULTS_DIR / "baseline.md",
+            ResultsStore.RESULTS_DIR / "baseline_diff_with_prev.md",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Migration

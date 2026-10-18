@@ -2,8 +2,10 @@
 
 Benchmarks are named, versioned JSON definitions in ``benchmarks/``
 (``local_latency``, ``remote_latency``, ``peak_mem``). A benchmark always
-runs whole and records one result in ``run.json``; ``--promote`` moves
-complete results into the committed ``baseline.json``.
+runs whole and records one result in ``results/tmp/run.json``
+(gitignored); ``--promote`` moves complete results into the committed
+``results/baseline.json`` and rewrites ``results/baseline.md`` and
+``results/baseline_diff_with_prev.md``.
 
 Usage:
     # Run every benchmark (best practice before promoting)
@@ -22,7 +24,8 @@ Usage:
     # Also show the last change of benchmarks not in run.json
     python -m tests.benchmark --show-diff --with-previous
 
-    # Promote complete benchmarks of run.json into baseline.json; commit it
+    # Promote complete benchmarks of run.json into baseline.json; commit
+    # results/ (baseline and its two reports)
     python -m tests.benchmark --promote
 """
 
@@ -48,13 +51,16 @@ _INDIVIDUAL_ONLY_FLAGS = {
 }
 
 
-def _resolve_md_path(raw, mode: str, baseline_path: Path) -> Path | None:
-    """``None`` (no ``--md``), the default file next to the baseline, or *raw*."""
+def _resolve_md_path(raw, mode: str) -> Path | None:
+    """``None`` (no ``--md``), the default file in ``results/tmp/``, or *raw*."""
+    from .store import ResultsStore
+
     if raw is None:
         return None
     if raw is _MD_DEFAULT:
-        filename = "results.md" if mode == "show" else "benchmark_diff.md"
-        return baseline_path.parent / filename
+        filename = "results.md" if mode == "show" else "diff.md"
+        ResultsStore.TMP_DIR.mkdir(parents=True, exist_ok=True)
+        return ResultsStore.TMP_DIR / filename
     return Path(raw)
 
 
@@ -222,7 +228,10 @@ def _parse_args() -> argparse.Namespace:
         nargs="?",
         default=None,
         const=_MD_DEFAULT,
-        help="Also write the output as Markdown (default file next to baseline.json)",
+        help=(
+            "Also write the output as Markdown (default: results/tmp/results.md "
+            "or diff.md)"
+        ),
     )
     show.add_argument(
         "--plots",
@@ -234,13 +243,16 @@ def _parse_args() -> argparse.Namespace:
     files.add_argument(
         "--promote",
         action="store_true",
-        help="Promote complete benchmarks of run.json into baseline.json and exit",
+        help=(
+            "Promote complete benchmarks of run.json into baseline.json, "
+            "rewrite its reports and exit"
+        ),
     )
     files.add_argument(
         "-n",
         "--name",
         default=None,
-        help="Run file tests/benchmark/NAME.json (shortcut for --run)",
+        help="Run file results/tmp/NAME.json (shortcut for --run)",
     )
     files.add_argument(
         "--run",
@@ -248,13 +260,13 @@ def _parse_args() -> argparse.Namespace:
         dest="run",
         type=Path,
         default=None,
-        help="Path to the run file (default: tests/benchmark/run.json)",
+        help="Path to the run file (default: results/tmp/run.json)",
     )
     files.add_argument(
         "--baseline",
         type=Path,
         default=None,
-        help="Path to the baseline file (default: tests/benchmark/baseline.json)",
+        help="Path to the baseline file (default: results/baseline.json)",
     )
     args = p.parse_args()
 
@@ -263,9 +275,9 @@ def _parse_args() -> argparse.Namespace:
     if args.name is not None:
         if args.run is not None:
             p.error("-n/--name and --run are mutually exclusive")
-        from .store import BENCH_DIR
+        from .store import ResultsStore
 
-        args.run = BENCH_DIR / f"{args.name}.json"
+        args.run = ResultsStore.TMP_DIR / f"{args.name}.json"
 
     args.individual = bool(args.model or args.tool or args.param)
     display = args.show or args.show_diff or args.promote
@@ -403,7 +415,6 @@ def _main() -> None:
         True if args.remote else (False if args.local else None)
     )
 
-    baseline_path = args.baseline or ResultsStore.BASELINE_FILE
     display = dict(
         tools=args.tools, models=args.models, remote=filter_remote, dims=args.dims
     )
@@ -412,7 +423,7 @@ def _main() -> None:
         from .diff import markdown_results, print_results
 
         print_results(args.run, detail=args.detail, **display)
-        md_path = _resolve_md_path(args.md, "show", baseline_path)
+        md_path = _resolve_md_path(args.md, "show")
         if md_path is not None:
             md_path.write_text(
                 markdown_results(
@@ -434,7 +445,7 @@ def _main() -> None:
 
     print()
     print_diff(args.run, args.baseline, with_previous=args.with_previous, **display)
-    md_path = _resolve_md_path(args.md, "diff", baseline_path)
+    md_path = _resolve_md_path(args.md, "diff")
     if md_path is not None:
         md_path.write_text(
             markdown_diff(

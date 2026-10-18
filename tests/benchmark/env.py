@@ -23,7 +23,7 @@ class Env:
     PRODUCTION_HOST = "https://api.ndif.us"
     CLIENT_PACKAGES = ("nnsight", "nnterp", "transformers", "torch")
     SERVER_PACKAGES = ("ndif", "nnsight", "nnterp", "torch", "transformers")
-    OUTPUT_FILES = ("baseline.json", "results.md", "benchmark_diff.md")
+    OUTPUT_FILES = ("results",)
 
     CODE_FIELDS = ("git_hash", "dirty", "dirty_fingerprint", "timestamp")
     CLIENT_FIELDS = ("nnsight", "nnsight_commit", "nnterp", "nnterp_commit")
@@ -85,8 +85,8 @@ class Env:
     def git_state(cls) -> dict[str, Any]:
         """``git_hash``, ``dirty`` and (when dirty) a ``dirty_fingerprint``.
 
-        Benchmark outputs (baseline, reports) don't count as
-        changes; ``run.json`` is gitignored. The fingerprint hashes the diff
+        Benchmark outputs (``results/``: the baseline, its reports and the
+        gitignored run) don't count as changes. The fingerprint hashes the diff
         against HEAD plus untracked files, so two dirty runs of identical code
         share it.
         """

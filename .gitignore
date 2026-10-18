@@ -6,8 +6,7 @@ __pycache__/
 *.egg-info/
 build/
 .eggs/
-tests/benchmark/*.json
-!tests/benchmark/baseline.json
-tests/benchmark/.*.tmp
+tests/benchmark/results/tmp/
+tests/benchmark/results/.*.tmp
 .docs/
 send/

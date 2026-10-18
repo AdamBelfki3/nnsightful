@@ -10,9 +10,10 @@ versioned **benchmarks** defined in JSON:
 | `peak_mem` | local | the largest prompt length whose peak GPU memory beyond the weights stays within 10% / 25% / 50% of the model footprint (weights + NDIF's 500 MiB padding bias) |
 
 A benchmark always runs **whole** and produces one result with one
-environment stamp. Results go to a local `run.json`, are diffed against
-the committed `baseline.json`, and `--promote` makes complete results
-the new baseline.
+environment stamp. Results go to a local `results/tmp/run.json`, are
+diffed against the committed `results/baseline.json`, and `--promote`
+makes complete results the new baseline and rewrites its Markdown
+reports.
 
 ## Environment
 
@@ -46,16 +47,20 @@ Gated models (gemma, Llama) need `HF_TOKEN` in the environment.
    `run.json` vs. its baseline result, test by test.
 3. Happy with the numbers? `python -m tests.benchmark --promote` →
    every **complete** benchmark in `run.json` becomes the baseline;
-   incomplete ones are refused.
-4. `git add tests/benchmark/baseline.json && git commit`.
+   incomplete ones are refused. The baseline's two reports are
+   rewritten with plots.
+4. `git add tests/benchmark/results && git commit`.
 
 | File | Tracked by git? | Role |
 |------|-----------------|------|
 | `benchmarks/<name>.json` | **Yes** | The current definition of each benchmark |
 | `benchmarks/archive/<name>.v<N>.json` | **Yes** | Older definitions that recorded results still refer to |
-| `run.json` | **No** (gitignored) | The latest **finished** result of each benchmark run |
-| `run.partial.json` | **No** (gitignored) | Progress of benchmarks still running or interrupted (same format, not promotable) |
-| `baseline.json` | **Yes** | Per benchmark, the promoted result and the one it replaced (`previous`) |
+| `results/baseline.json` | **Yes** | Per benchmark, the promoted result and the one it replaced (`previous`) |
+| `results/baseline.md` | **Yes** | The baseline as Markdown tables with plots, written by `--promote` |
+| `results/baseline_diff_with_prev.md` | **Yes** | Each benchmark's baseline result vs. its `previous`, with plots, written by `--promote` |
+| `results/tmp/run.json` | **No** (`results/tmp/` is gitignored) | The latest **finished** result of each benchmark run |
+| `results/tmp/run.partial.json` | **No** | Progress of benchmarks still running or interrupted (same format, not promotable) |
+| `results/tmp/*.md` | **No** | Ad-hoc `--md` reports |
 
 ## Running
 
@@ -83,17 +88,18 @@ python -m tests.benchmark --show-diff --with-previous
 python -m tests.benchmark --show-diff --dims latency --tools logit_lens --models gpt2 Llama
 python -m tests.benchmark --show --remote        # or --local
 
-# Markdown export (default file next to baseline.json: results.md /
-# benchmark_diff.md), optionally with plots (needs matplotlib)
+# Markdown export (default file in results/tmp/: results.md / diff.md),
+# optionally with plots (needs matplotlib)
 python -m tests.benchmark --show --md
 python -m tests.benchmark --show-diff --md diff.md --plots
 
-# Promote complete benchmarks of run.json into baseline.json
+# Promote complete benchmarks of run.json into baseline.json and rewrite
+# baseline.md / baseline_diff_with_prev.md
 python -m tests.benchmark --promote
 ```
 
 Files: `--run PATH` (alias `--latest`) or `-n NAME`
-(`tests/benchmark/NAME.json`) choose the run file, `--baseline PATH` the
+(`results/tmp/NAME.json`) choose the run file, `--baseline PATH` the
 baseline. Running and showing / promoting are separate invocations
 (`--diff` diffs right after a run).
 
@@ -214,8 +220,7 @@ model there has a lens.
 - `env`: one stamp for the whole benchmark —
   - both kinds: `git_hash`, `dirty` (the working tree has changes per
     `git status --porcelain`, untracked files included, ignoring the
-    benchmark outputs `baseline.json`, `results.md`,
-    `benchmark_diff.md`; `run.json` is gitignored), when dirty
+    benchmark outputs in `results/`), when dirty
     `dirty_fingerprint` (hash of the diff against HEAD plus untracked
     files), `timestamp`, and the nnsight / nnterp versions plus
     `<pkg>_commit` for packages installed from a git checkout;
@@ -404,8 +409,9 @@ Besides the current format, only the original results format loads
 `legacy.py`): each kind's rows become one latency result, versioned by
 the current or archived definition whose test set they equal (or
 `version: null` if none matches). Any other file is rejected with an
-error naming it. Default paths fall back to `results.json` /
-`latest.json` when `baseline.json` / `run.json` don't exist.
+error naming it. Default paths fall back to the pre-rename
+`tests/benchmark/results.json` / `latest.json` when `baseline.json` /
+`run.json` don't exist.
 
 The results recorded before definitions existed became **v0** of
 `local_latency` and `remote_latency`, defined in
@@ -456,7 +462,14 @@ command with an error naming the file instead of being overwritten.
 `--md` writes the same tables as stdout but as Markdown, in addition
 to printing; works with `--show`, `--diff`, `--show-diff`. `--md PATH`
 picks the destination; `--md` alone writes `results.md` (show) or
-`benchmark_diff.md` (diffs) next to `baseline.json`.
+`diff.md` (diffs) in the gitignored `results/tmp/`.
+
+`--promote` writes the committed reports itself, always with plots,
+next to the baseline: `baseline.md` (the baseline, like `--show`) and
+`baseline_diff_with_prev.md` (each benchmark's result vs. the one it
+replaced, like `--show-diff`; a benchmark with no `previous` shows its
+tests as new). A partial promote rewrites both in full, so the diff
+always shows the last change of every benchmark.
 
 `--plots` (requires matplotlib via `pip install -e '.[plots]'`) embeds
 one line plot per (tool, section): mean latency (with ±1 std band) vs.

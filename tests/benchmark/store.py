@@ -178,13 +178,19 @@ class Result:
 class ResultsStore:
     """The results files: ``run.json``, ``baseline.json`` and the in-progress file.
 
+    Everything lives in ``results/``: the committed baseline and its reports
+    at the top, the run, in-progress file and ad-hoc reports in the
+    gitignored ``results/tmp/``.
+
     *run* / *baseline* override the default paths. Without an override, a
     missing default falls back to its pre-rename name (``latest.json`` /
     ``results.json``) if only that exists.
     """
 
-    RUN_FILE = BENCH_DIR / "run.json"
-    BASELINE_FILE = BENCH_DIR / "baseline.json"
+    RESULTS_DIR = BENCH_DIR / "results"
+    TMP_DIR = RESULTS_DIR / "tmp"
+    RUN_FILE = TMP_DIR / "run.json"
+    BASELINE_FILE = RESULTS_DIR / "baseline.json"
     LEGACY_RUN_FILE = BENCH_DIR / "latest.json"
     LEGACY_BASELINE_FILE = BENCH_DIR / "results.json"
 
@@ -352,6 +358,7 @@ class ResultsStore:
     def save_json(path: Path, data: dict[str, Any]) -> None:
         """Write *data* atomically: temp file in the same directory + ``os.replace``."""
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
@@ -447,4 +454,60 @@ class ResultsStore:
             target = self._baseline or self.BASELINE_FILE
             self.save_json(target, new_baseline)
             print(f"baseline written to {target}")
+            self.write_baseline_reports(target, new_baseline)
         return new_baseline
+
+    @staticmethod
+    def retitle(markdown: str, title: str, intro: str) -> str:
+        """Replace a report's ``# heading`` with *title* and an *intro* line."""
+        _, _, body = markdown.partition("\n")
+        return f"# {title}\n\n{intro}\n{body}"
+
+    @staticmethod
+    def baseline_report_paths(baseline_path: Path) -> tuple[Path, Path]:
+        """``baseline.json`` -> ``baseline.md``, ``baseline_diff_with_prev.md``."""
+        base = Path(baseline_path)
+        return (
+            base.with_suffix(".md"),
+            base.with_name(f"{base.stem}_diff_with_prev.md"),
+        )
+
+    @classmethod
+    def write_baseline_reports(
+        cls, baseline_path: Path, baseline: dict[str, Any]
+    ) -> None:
+        """Write the Markdown reports committed next to the baseline, with plots.
+
+        One shows the baseline; the other diffs each benchmark's result
+        against the result it replaced, so a promote's effect can be
+        reviewed without the JSON.
+        """
+        from .diff import markdown_diff, markdown_results
+
+        current = {
+            name: {k: v for k, v in result.items() if k != "previous"}
+            for name, result in baseline.items()
+        }
+        previous = {
+            name: result["previous"]
+            for name, result in baseline.items()
+            if result.get("previous")
+        }
+        results_md, diff_md = cls.baseline_report_paths(baseline_path)
+        results_md.write_text(
+            cls.retitle(
+                markdown_results(current, plots=True),
+                "Benchmark Baseline",
+                "The promoted result of each benchmark.",
+            )
+        )
+        diff_md.write_text(
+            cls.retitle(
+                markdown_diff(current, previous, plots=True),
+                "Benchmark Baseline vs. Previous",
+                "Each benchmark's promoted result (current) against the result "
+                "it replaced (baseline); a benchmark with no previous result "
+                "shows its tests as new.",
+            )
+        )
+        print(f"reports written to {results_md} and {diff_md}")
