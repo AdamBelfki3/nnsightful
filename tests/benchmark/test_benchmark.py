@@ -687,6 +687,53 @@ class TestMeters:
         assert oom.oom and oom.peak is None
 
 
+class TestRemoteBackendCounter:
+    """The counter hooks the method nnsight routes every status update through."""
+
+    def _counter(self, monkeypatch, clock):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        from tests.benchmark import backend
+
+        monkeypatch.setattr(backend.time, "time", lambda: clock[0])
+        monkeypatch.setattr(RemoteBackend, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(RemoteBackend, "handle", lambda self, response: "result")
+        return backend.RemoteBackendCounter("model-key")
+
+    def test_overrides_nnsights_status_hook(self):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        from tests.benchmark.backend import RemoteBackendCounter
+
+        assert hasattr(RemoteBackend, "handle")
+        assert RemoteBackendCounter.handle is not RemoteBackend.handle
+
+    def test_phases_exclude_queue_time(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from nnsight.schema.response import Status
+
+        clock = [100.0]
+        counter = self._counter(monkeypatch, clock)
+        timeline = [
+            (101.0, Status.RECEIVED),
+            (102.0, Status.QUEUED),
+            (110.0, Status.DISPATCHED),
+            (111.0, Status.RUNNING),
+            (114.0, Status.COMPLETED),
+        ]
+        for t, status in timeline:
+            clock[0] = t
+            assert counter.handle(SimpleNamespace(status=status)) == "result"
+        clock[0] = 115.0
+
+        latency = counter.get_latency()
+        assert latency["total"] == pytest.approx(15.0)
+        assert latency["total_unqueued"] == pytest.approx(7.0)
+        assert latency["running"] == pytest.approx(3.0)
+        assert latency["download"] == pytest.approx(1.0)
+
+
 class TestSweeps:
     def test_grid_points(self):
         grid = GridSweep({"prompt_length": [10, 25], "top_k": [1, 5]})
