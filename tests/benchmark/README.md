@@ -139,7 +139,7 @@ Each `benchmarks/<name>.json` defines one benchmark:
   `[length]` names, which match the results recorded before definitions
   existed.
 
-The Python side (`config.py`) only maps each tool name to its
+The Python side (`config.py`'s `ToolRegistry`) only maps each tool name to its
 nnsightful tool and to how its arguments are built per model: prompts
 of exactly *n* tokens (`prompts.py`), activation patching with
 equal-length source / target prompts patching the last position
@@ -446,19 +446,40 @@ baseline (dashed). The Y-axis switches to log scale when values span
 | File | Purpose |
 |------|---------|
 | `benchmarks/*.json`, `benchmarks/archive/*.json` | Benchmark definitions (current and archived versions) |
-| `definitions.py` | Loading / validating definitions, tests, optional markers, `config_hash`, version warnings (pure) |
-| `config.py` | Tool name → nnsightful tool + argument builder; `tool_configs()` for a definition |
-| `prompts.py` | `prompt_of_length()` — prompts of an exact token count |
-| `runner.py` | `run_benchmark()`, `run_individual()`, `BenchmarkRunner` measurements, environment stamp |
-| `memory.py` | `search_max_lengths()` — coarse sweep + bisection for the threshold lengths (pure) |
-| `store.py` | Result format, status, env fields per kind, promotion, file loading (pure) |
+| `definitions.py` | `BenchmarkDefinition`: loading / validating definitions, tests, optional markers, `config_hash`, version warnings (pure) |
+| `config.py` | `ToolRegistry`: tool name → nnsightful tool + argument builder, and the runnable configs of a definition |
+| `prompts.py` | `Prompts.of_length()` — prompts of an exact token count |
+| `runner.py` | `run_benchmark()`, `run_individual()`, `BenchmarkRunner` (the shared run loop) |
+| `env.py` | `Env`: capturing the environment stamp and comparing stamps |
+| `meters.py` | Meters wrapping one tool call each: `LocalLatency`, `RemoteLatency`, `PeakMemory`; NDIF-style autocast |
+| `sweeps.py` | Sweep strategies: `GridSweep` (latency) and `ThresholdSearch` (peak memory: coarse sweep + bisection, pure) |
+| `store.py` | `Result` (format, status, promotion rules) and `ResultsStore` (run / baseline / in-progress files) (pure) |
 | `legacy.py` | Reader for the original `results.json` format (pure) |
 | `backend.py` | `RemoteBackendCounter` — per-phase latency for remote runs |
-| `diff.py` | `print_results`, `print_diff`, `markdown_results`, `markdown_diff` |
+| `diff.py` | Terminal and Markdown tables (`print_results`, `print_diff`, `markdown_results`, `markdown_diff`) |
 | `plots.py` | Latency and peak-memory plots for the Markdown export |
 | `__main__.py` | CLI entry point |
 | `test_benchmark.py` | Tests for the harness itself (no GPU / network): `pytest tests/benchmark` |
 | `fixtures/results_v1.json` | A results file in the original format, for the migration tests |
+
+## How a benchmark is measured
+
+`BenchmarkRunner` runs one loop for every benchmark: per model and
+test it builds the tool's arguments, warms up, runs a **meter** around
+each call, aggregates the stats, and turns failures into failed /
+unsupported results.
+
+- **Meters** (`meters.py`) are context managers around one tool call:
+  `LocalLatency` (synced wall clock), `RemoteLatency` (injects
+  `remote=True` and a fresh `backend=` counter, records the four
+  phases) and `PeakMemory` (peak allocated beyond what was allocated
+  before the call). An out-of-memory error is recorded on the meter
+  instead of raised. Local calls also run under NDIF's autocast.
+- **Sweeps** (`sweeps.py`): latency tests are the points of a
+  `GridSweep` over the definition's `sweep`; a peak-memory test is a
+  `ThresholdSearch`. Each probed length gets its warmup calls, one
+  `PeakMemory` call, then separate `LocalLatency` repeats — memory and
+  time are never measured in the same call.
 
 ## Notes
 

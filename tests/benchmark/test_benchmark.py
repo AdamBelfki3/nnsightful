@@ -15,47 +15,24 @@ from tests.benchmark import __main__ as cli
 from tests.benchmark import config as bench_config
 from tests.benchmark import runner as bench_runner
 from tests.benchmark import store
-from tests.benchmark.config import UnsupportedTest
-from tests.benchmark.definitions import (
-    DefinitionError,
-    config_hash,
-    expand_tests,
-    load_archive,
-    load_definitions,
-    stamp,
-    validate,
-    version_warnings,
-)
+from tests.benchmark.config import ToolRegistry, UnsupportedTest
+from tests.benchmark.definitions import BenchmarkDefinition, DefinitionError
 from tests.benchmark.diff import (
-    comparison_warnings,
-    compute_diff,
-    compute_peak_diff,
+    Comparison,
     markdown_diff,
     markdown_results,
     print_diff,
     print_results,
 )
-from tests.benchmark.memory import coarse_grid, search_max_lengths, threshold_label
-from tests.benchmark.runner import (
-    BenchmarkRunner,
-    model_footprint,
-    peak_pct,
-    run_benchmark,
-    run_individual,
-)
+from tests.benchmark.meters import LocalLatency, Meter, PeakMemory, RemoteLatency
+from tests.benchmark.runner import BenchmarkRunner, run_benchmark, run_individual
 from tests.benchmark.store import (
     CorruptResultsError,
+    Result,
+    ResultsStore,
     UnknownFormatError,
-    case_id,
-    load_baseline,
-    load_run,
-    make_result,
-    promote,
-    promote_files,
-    save_json,
-    upgrade_baseline,
-    upgrade_run,
 )
+from tests.benchmark.sweeps import GridSweep, ThresholdSearch
 
 OLD_RESULTS = Path(__file__).parent / "fixtures" / "results_v1.json"
 OLD_HASH = "f66305ccbe2b543fe3f58715e8806dcf01d0c03c"
@@ -220,36 +197,39 @@ def _defn(**over) -> dict:
 
 class TestDefinitions:
     def test_shipped_definitions(self):
-        defs = load_definitions()
+        defs = BenchmarkDefinition.load_all()
         assert set(defs) == {"local_latency", "remote_latency", "peak_mem"}
         assert {n: d["version"] for n, d in defs.items()} == {
             "local_latency": 1,
             "remote_latency": 1,
             "peak_mem": 1,
         }
-        counts = {n: len(expand_tests(d)) for n, d in defs.items()}
+        counts = {n: len(BenchmarkDefinition.of(d).tests()) for n, d in defs.items()}
         assert counts == {"local_latency": 27, "remote_latency": 36, "peak_mem": 9}
         assert defs["local_latency"]["models"] == [GPT2, GEMMA, LLAMA]
         assert defs["remote_latency"]["models"] == [GPT2, LLAMA, L70, L405]
-        assert {t["tool"] for t in expand_tests(defs["local_latency"])} == {
+        assert {
+            t["tool"] for t in BenchmarkDefinition.of(defs["local_latency"]).tests()
+        } == {
             LL,
             "activation_patching[length]",
             "j_lens[length]",
         }
         assert {
-            t["params"]["prompt_length"] for t in expand_tests(defs["local_latency"])
+            t["params"]["prompt_length"]
+            for t in BenchmarkDefinition.of(defs["local_latency"]).tests()
         } == {10, 25, 50}
 
     def test_optional_defaults(self):
-        defs = load_definitions()
+        defs = BenchmarkDefinition.load_all()
         assert not any(
             t["optional"]
             for n in ("local_latency", "peak_mem")
-            for t in expand_tests(defs[n])
+            for t in BenchmarkDefinition.of(defs[n]).tests()
         )
         optional = {
             (t["tool"], t["model"])
-            for t in expand_tests(defs["remote_latency"])
+            for t in BenchmarkDefinition.of(defs["remote_latency"]).tests()
             if t["optional"]
         }
         assert optional == {
@@ -258,13 +238,13 @@ class TestDefinitions:
         } | {("j_lens[length]", L70)}
 
     def test_archived_v0(self):
-        v0 = {d["name"]: d for d in load_archive()}
+        v0 = {d["name"]: d for d in BenchmarkDefinition.load_archive()}
         assert {n: d["version"] for n, d in v0.items()} == {
             "local_latency": 0,
             "remote_latency": 0,
         }
-        assert len(expand_tests(v0["local_latency"])) == 12
-        assert len(expand_tests(v0["remote_latency"])) == 24
+        assert len(BenchmarkDefinition.of(v0["local_latency"]).tests()) == 12
+        assert len(BenchmarkDefinition.of(v0["remote_latency"]).tests()) == 24
 
     @pytest.mark.parametrize(
         "change,match",
@@ -291,36 +271,57 @@ class TestDefinitions:
     )
     def test_validation(self, change, match):
         with pytest.raises(DefinitionError, match=match):
-            validate(_defn(**change))
+            BenchmarkDefinition(_defn(**change)).validate()
         with pytest.raises(DefinitionError, match="missing"):
-            validate({k: v for k, v in _defn().items() if k != "models"})
+            BenchmarkDefinition(
+                {k: v for k, v in _defn().items() if k != "models"}
+            ).validate()
 
     def test_directory_checks(self, tmp_path):
-        save_json(tmp_path / "a.json", _defn(name="a"))
-        save_json(tmp_path / "b.json", _defn(name="b"))
+        ResultsStore.save_json(tmp_path / "a.json", _defn(name="a"))
+        ResultsStore.save_json(tmp_path / "b.json", _defn(name="b"))
         with pytest.raises(
             DefinitionError, match="already is the local latency benchmark"
         ):
-            load_definitions(tmp_path)
+            BenchmarkDefinition.load_all(tmp_path)
         (tmp_path / "b.json").write_text("{nope")
         with pytest.raises(DefinitionError, match="not valid JSON"):
-            load_definitions(tmp_path)
+            BenchmarkDefinition.load_all(tmp_path)
 
     def test_config_hash_and_version_warning(self):
         d = _defn()
-        assert config_hash(d) == config_hash({**d, "version": 7, "description": "x"})
-        assert config_hash(d) != config_hash({**d, "models": ["org/a"]})
+        assert (
+            BenchmarkDefinition(d).config_hash()
+            == BenchmarkDefinition(
+                {**d, "version": 7, "description": "x"}
+            ).config_hash()
+        )
+        assert (
+            BenchmarkDefinition(d).config_hash()
+            != BenchmarkDefinition({**d, "models": ["org/a"]}).config_hash()
+        )
         changed = {**d, "models": ["org/a"]}
-        assert version_warnings({"fake_latency": changed}, [stamp(d)])
+        assert BenchmarkDefinition.of(changed).version_warnings(
+            [BenchmarkDefinition.of(d).stamp()]
+        )
         assert (
             "version wasn't bumped"
-            in version_warnings({"fake_latency": changed}, [stamp(d)])[0]
+            in BenchmarkDefinition.of(changed).version_warnings(
+                [BenchmarkDefinition.of(d).stamp()]
+            )[0]
         )
         assert (
-            version_warnings({"fake_latency": {**changed, "version": 2}}, [stamp(d)])
+            BenchmarkDefinition.of({**changed, "version": 2}).version_warnings(
+                [BenchmarkDefinition.of(d).stamp()]
+            )
             == []
         )
-        assert version_warnings({"fake_latency": d}, [stamp(d)]) == []
+        assert (
+            BenchmarkDefinition.of(d).version_warnings(
+                [BenchmarkDefinition.of(d).stamp()]
+            )
+            == []
+        )
 
     def test_optional_markers(self):
         d = _defn(
@@ -341,7 +342,10 @@ class TestDefinitions:
                 {"tool": "fake", "name": "z", "sweep": {"prompt_length": [1]}},
             ],
         )
-        opt = {(t["tool"], t["model"]): t["optional"] for t in expand_tests(d)}
+        opt = {
+            (t["tool"], t["model"]): t["optional"]
+            for t in BenchmarkDefinition.of(d).tests()
+        }
         assert opt == {
             ("x", "org/a"): True,
             ("x", "org/b"): True,
@@ -362,6 +366,9 @@ class _FakeModel:
 
     def __init__(self, repo_id):
         self.repo_id = repo_id
+
+    def to_model_key(self):
+        return f"key:{self.repo_id}"
 
 
 def _fake_tool(fail_on=None):
@@ -386,11 +393,11 @@ def _fake_build(unsupported_model=None):
 def fake(monkeypatch, tmp_path):
     """Registers a ``fake`` tool and a fixed env; returns a failure-mode setter."""
     monkeypatch.setattr(BenchmarkRunner, "env", lambda self: _env("run1234"))
-    monkeypatch.setattr(bench_runner, "_recorded_stamps", lambda name, path=None: [])
+    monkeypatch.setattr(ResultsStore, "recorded_stamps", lambda self, name: [])
 
     def setup(fail_on=None, unsupported=None):
         monkeypatch.setitem(
-            bench_config.TOOLS, "fake", (_fake_tool(fail_on), _fake_build(unsupported))
+            ToolRegistry.TOOLS, "fake", (_fake_tool(fail_on), _fake_build(unsupported))
         )
 
     setup()
@@ -411,9 +418,11 @@ class TestRunning:
         result = run_benchmark(_defn(), _loader(), tmp_path / "run.json")
         assert result["status"] == "complete"
         assert len(result["results"]) == 4 and result["failed"] == []
-        assert result["benchmark"] == stamp(_defn())
+        assert result["benchmark"] == BenchmarkDefinition.of(_defn()).stamp()
         assert result["env"]["git_hash"] == "run1234"
-        assert load_run(tmp_path / "run.json") == {"fake_latency": result}
+        assert ResultsStore(run=tmp_path / "run.json").load_run() == {
+            "fake_latency": result
+        }
 
     def test_failed_test_makes_incomplete_without_aborting(self, fake, tmp_path):
         fake(fail_on=("org/a", 2))
@@ -452,7 +461,7 @@ class TestRunning:
         )
 
     def test_interrupted_run_is_incomplete(self):
-        result = make_result(
+        result = Result.make(
             _defn(),
             _env(),
             {},
@@ -487,12 +496,12 @@ class TestRunning:
         )
         runner = BenchmarkRunner.for_definition(defn)
         outcomes = runner.run_tests(
-            defn, "org/a", _loader(), bench_config.tool_configs(defn)
+            defn, "org/a", _loader(), ToolRegistry.configs(defn)
         )
         assert [o["status"] for o in outcomes] == ["unsupported"]
 
     def test_all_vs_subset(self, monkeypatch):
-        defs = load_definitions()
+        defs = BenchmarkDefinition.load_all()
         monkeypatch.setattr(sys, "argv", ["bench", "--all"])
         assert [d["name"] for d in cli._selected(cli._parse_args(), defs)] == list(defs)
         monkeypatch.setattr(sys, "argv", ["bench", "--benchmarks", "peak_mem"])
@@ -550,6 +559,396 @@ class TestRunning:
         assert list(tmp_path.iterdir()) == []
 
 
+def _oom(message="CUDA out of memory. Tried to allocate 2.00 GiB"):
+    import torch
+
+    return torch.OutOfMemoryError(message)
+
+
+class _FakeCounter:
+    def __init__(self, key):
+        self.key = key
+
+    def get_latency(self):
+        return {"total": 3.0, "total_unqueued": 2.0, "running": 1.5, "download": 0.25}
+
+
+class TestMeters:
+    def test_local_latency(self):
+        meter = LocalLatency()
+        for _ in range(3):
+            with meter as extra:
+                assert extra == {}
+        assert len(meter.samples) == 3 and not meter.oom
+        assert set(meter.stats()) == {"mean", "std", "min", "max", "samples"}
+
+    def test_oom_is_recorded_and_suppressed(self):
+        meter = LocalLatency()
+        with meter:
+            raise _oom()
+        assert meter.oom and meter.samples == []
+        wrapped = LocalLatency()
+        with wrapped:
+            try:
+                raise _oom()
+            except Exception as inner:
+                raise RuntimeError("nnsight wrapper") from inner
+        assert wrapped.oom and isinstance(wrapped.oom_error, RuntimeError)
+
+    def test_other_errors_propagate(self):
+        meter = LocalLatency()
+        with pytest.raises(ValueError):
+            with meter:
+                raise ValueError("boom")
+        assert not meter.oom
+
+    def test_remote_latency_injects_backend(self):
+        meter = RemoteLatency(_FakeModel("org/a"), counter_factory=_FakeCounter)
+        with meter as extra:
+            assert extra["remote"] is True and extra["backend"].key == "key:org/a"
+        with meter as extra2:
+            assert extra2["backend"] is not extra["backend"]
+        stats = meter.stats()
+        assert stats["mean"] == 2.0 and stats["samples"] == [2.0, 2.0]
+        assert set(stats["breakdown"]) == {
+            "total",
+            "total_unqueued",
+            "running",
+            "download",
+        }
+        assert stats["breakdown"]["running"]["mean"] == 1.5
+
+    def test_peak_memory(self, monkeypatch):
+        import torch
+
+        state = {"allocated": 100, "peak": 0}
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: state["allocated"])
+        monkeypatch.setattr(
+            torch.cuda,
+            "reset_peak_memory_stats",
+            lambda: state.update(peak=state["allocated"]),
+        )
+        monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: state["peak"])
+        meter = PeakMemory()
+        with meter:
+            state["peak"] = 1100
+        assert meter.peak == 1000
+        oom = PeakMemory()
+        with oom:
+            raise _oom()
+        assert oom.oom and oom.peak is None
+
+
+class TestSweeps:
+    def test_grid_points(self):
+        grid = GridSweep({"prompt_length": [10, 25], "top_k": [1, 5]})
+        assert grid.points() == [
+            {"prompt_length": 10, "top_k": 1},
+            {"prompt_length": 10, "top_k": 5},
+            {"prompt_length": 25, "top_k": 1},
+            {"prompt_length": 25, "top_k": 5},
+        ]
+
+    def test_threshold_search(self):
+        found = ThresholdSearch(1000, (0.1, 0.5), 10_000, 2).run(lambda n: n)
+        assert found.max_lengths == {"10%": 100, "50%": 500}
+
+
+class _FakePeak:
+    """Peak = 10 bytes per prompt token; OOM from ``oom_from`` tokens on."""
+
+    entered: list[int] = []
+    oom_from: int | None = None
+
+    def __init__(self):
+        self.peak, self.oom, self.oom_error = None, False, None
+
+    def __enter__(self):
+        return {}
+
+    def __exit__(self, exc_type, exc, tb):
+        n = _FakePeak.current
+        _FakePeak.entered.append(n)
+        if _FakePeak.oom_from is not None and n >= _FakePeak.oom_from:
+            self.oom, self.oom_error = True, _oom()
+        else:
+            self.peak = 10 * n
+        return False
+
+
+class TestRunLoop:
+    def _peak_runner(self, monkeypatch, oom_from=None, n_repeat=2):
+        monkeypatch.setattr(bench_runner, "PeakMemory", _FakePeak)
+        monkeypatch.setattr(
+            BenchmarkRunner, "model_footprint", staticmethod(lambda model: 1000)
+        )
+        monkeypatch.setattr(
+            BenchmarkRunner, "context_length", staticmethod(lambda model: None)
+        )
+        _FakePeak.entered, _FakePeak.oom_from = [], oom_from
+        return BenchmarkRunner(
+            n_repeat=n_repeat,
+            n_warmup=1,
+            autocast=False,
+            thresholds=(0.1, 0.5),
+            max_length=256,
+        )
+
+    def _peak_config(self, calls):
+        def tool(model, n=0, **kwargs):
+            _FakePeak.current = n
+            calls.append(n)
+
+        def build(model, fixed, sweep):
+            return {"n": sweep["prompt_length"]}
+
+        return bench_config.ToolBenchmarkConfig("fake", tool, build_args=build)
+
+    def test_peak_mem_separate_passes(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch)
+        calls = []
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [self._peak_config(calls)]
+        )
+        assert outcome["status"] == "ok"
+        stats = outcome["stats"]
+        assert stats["max_prompt_length"] == {"10%": 10, "50%": 50}
+        assert stats["footprint_bytes"] == 1000 and stats["context_cap"] == 256
+        points = {p["prompt_length"]: p for p in stats["points"]}
+        assert sorted(_FakePeak.entered) == sorted(points)
+        for n, point in points.items():
+            assert point["peak_bytes"] == 10 * n and point[
+                "pct"
+            ] == BenchmarkRunner.peak_pct(10 * n, 1000)
+            assert len(point["latency"]["samples"]) == 2
+            assert calls.count(n) == 1 + 1 + 2  # warmup, peak, timed repeats
+
+    def test_peak_mem_oom_points(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch, oom_from=40)
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [self._peak_config([])]
+        )
+        stats = outcome["stats"]
+        oom = [p for p in stats["points"] if p.get("oom")]
+        assert oom and all(p["peak_bytes"] is None and "latency" not in p for p in oom)
+        assert stats["max_prompt_length"] == {"10%": 10, "50%": 39}
+
+    def test_latency_oom_is_a_failed_test(self, fake, monkeypatch):
+        def tool(model, n=0, **kwargs):
+            if n == 2:
+                raise _oom()
+
+        monkeypatch.setitem(ToolRegistry.TOOLS, "fake", (tool, _fake_build()))
+        runner = BenchmarkRunner.for_definition(_defn())
+        outcomes = runner.run_model(
+            "latency", "org/a", _FakeModel("org/a"), ToolRegistry.configs(_defn())
+        )
+        by_n = {o["params"]["prompt_length"]: o for o in outcomes}
+        assert by_n[1]["status"] == "ok" and len(by_n[1]["stats"]["samples"]) == 1
+        assert by_n[2]["status"] == "failed" and by_n[2]["error"].startswith(
+            "out of memory: "
+        )
+
+    def test_remote_calls_get_backend_kwargs(self, fake, monkeypatch):
+        from tests.benchmark import backend
+
+        seen = []
+
+        def tool(model, n=0, **kwargs):
+            seen.append(kwargs)
+
+        monkeypatch.setattr(backend, "RemoteBackendCounter", _FakeCounter)
+        monkeypatch.setitem(ToolRegistry.TOOLS, "fake", (tool, _fake_build()))
+        defn = _defn(kind="remote", meta_params={"n_repeat": 2, "n_warmup": 1})
+        runner = BenchmarkRunner.for_definition(defn)
+        outcomes = runner.run_model(
+            "latency", "org/a", _FakeModel("org/a"), ToolRegistry.configs(defn)
+        )
+        assert all(o["status"] == "ok" for o in outcomes)
+        assert len(seen) == 1 + 2 * 2
+        assert all(
+            k["remote"] is True and isinstance(k["backend"], _FakeCounter) for k in seen
+        )
+        assert outcomes[0]["stats"]["mean"] == 2.0
+        assert outcomes[0]["stats"]["breakdown"]["total"]["mean"] == 3.0
+
+
+class TestMeterSafety:
+    def test_oom_frames_released(self):
+        import gc
+        import weakref
+
+        class Big:
+            pass
+
+        refs = []
+
+        def fail():
+            big = Big()
+            refs.append(weakref.ref(big))
+            raise _oom()
+
+        meter = LocalLatency()
+        with meter:
+            fail()
+        gc.collect()
+        assert meter.oom and meter.oom_error.__traceback__ is None
+        assert refs[0]() is None
+        assert Meter.is_oom(meter.oom_error)
+
+    def test_interrupt_with_oom_context_propagates(self):
+        meter = LocalLatency()
+        with pytest.raises(KeyboardInterrupt):
+            with meter:
+                try:
+                    raise _oom()
+                except Exception:
+                    raise KeyboardInterrupt
+        assert not meter.oom
+
+
+class _Recorder:
+    """Meters that record which kind of call they wrap, in order."""
+
+    events: list[tuple[str, int]] = []
+    kind = ""
+
+    class Latency(LocalLatency):
+        def _start(self):
+            _Recorder.kind = "lat"
+            return super()._start()
+
+    class Peak(_FakePeak):
+        def __enter__(self):
+            _Recorder.kind = "peak"
+            return {}
+
+
+class TestRunLoopDetails(TestRunLoop):
+    def _counting_config(self, fail_on=None):
+        """A tool failing with OOM on the given ``(n, call index at that n)`` pairs."""
+        counts: dict[int, int] = {}
+
+        def tool(model, n=0, **kwargs):
+            _FakePeak.current = n
+            _Recorder.events.append((_Recorder.kind, n))
+            counts[n] = counts.get(n, 0) + 1
+            if (n, counts[n]) in (fail_on or ()) or (n, "*") in (fail_on or ()):
+                raise _oom()
+
+        def build(model, fixed, sweep):
+            return {"n": sweep["prompt_length"]}
+
+        return bench_config.ToolBenchmarkConfig("fake", tool, build_args=build), counts
+
+    def test_call_order_per_point(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch)
+        monkeypatch.setattr(bench_runner, "LocalLatency", _Recorder.Latency)
+        monkeypatch.setattr(bench_runner, "PeakMemory", _Recorder.Peak)
+        _Recorder.events = []
+        config, _ = self._counting_config()
+        runner.run_model("peak_mem", "org/a", _FakeModel("org/a"), [config])
+        for n in {n for _, n in _Recorder.events}:
+            kinds = [k for k, m in _Recorder.events if m == n]
+            assert kinds == ["lat", "peak", "lat", "lat"]
+
+    def test_oom_during_warmup_marks_point(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch)
+        config, counts = self._counting_config(
+            fail_on={(n, "*") for n in range(40, 300)}
+        )
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [config]
+        )
+        points = {p["prompt_length"]: p for p in outcome["stats"]["points"]}
+        oom = [n for n, p in points.items() if p.get("oom")]
+        assert oom and all(n >= 40 for n in oom)
+        assert all(counts[n] == 1 for n in oom)
+        assert not set(oom) & set(_FakePeak.entered)
+
+    def test_oom_in_timed_repeats_fails_the_tool(self, monkeypatch):
+        runner = self._peak_runner(monkeypatch)
+        config, _ = self._counting_config(fail_on={(8, 3)})
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [config]
+        )
+        assert outcome["status"] == "failed"
+        assert outcome["error"].startswith("out of memory: ")
+
+    def test_repeat_stops_at_first_oom(self):
+        runner = BenchmarkRunner(autocast=False)
+        calls = []
+
+        def tool(model, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise _oom()
+
+        meter = runner._repeat(tool, _FakeModel("org/a"), {}, LocalLatency(), 5)
+        assert meter.oom and len(calls) == 2 and len(meter.samples) == 1
+
+    def test_autocast_only_for_local_calls(self, monkeypatch):
+        import contextlib
+
+        import torch
+
+        seen = []
+
+        def autocast(dtype):
+            seen.append(dtype)
+            return contextlib.nullcontext()
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+        monkeypatch.setattr(Meter, "ndif_autocast", staticmethod(autocast))
+        local = BenchmarkRunner(dtype="bfloat16")
+        local._call(lambda model, **kw: None, _FakeModel("org/a"), {}, LocalLatency())
+        remote = BenchmarkRunner(remote=True, dtype="bfloat16")
+        meter = RemoteLatency(_FakeModel("org/a"), counter_factory=_FakeCounter)
+        remote._call(lambda model, **kw: None, _FakeModel("org/a"), {}, meter)
+        assert seen == ["bfloat16", None]
+
+    def test_real_peak_memory_in_the_loop(self, monkeypatch):
+        import torch
+
+        state = {"allocated": 500, "peak": 0}
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: state["allocated"])
+        monkeypatch.setattr(
+            torch.cuda,
+            "reset_peak_memory_stats",
+            lambda: state.update(peak=state["allocated"]),
+        )
+        monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: state["peak"])
+        monkeypatch.setattr(
+            BenchmarkRunner, "model_footprint", staticmethod(lambda model: 1000)
+        )
+        monkeypatch.setattr(
+            BenchmarkRunner, "context_length", staticmethod(lambda model: None)
+        )
+
+        def tool(model, n=0, **kwargs):
+            state["peak"] = max(state["peak"], state["allocated"] + 10 * n)
+
+        config = bench_config.ToolBenchmarkConfig(
+            "fake", tool, build_args=lambda m, f, sw: {"n": sw["prompt_length"]}
+        )
+        runner = BenchmarkRunner(
+            n_repeat=1, n_warmup=1, autocast=False, thresholds=(0.1,), max_length=64
+        )
+        (outcome,) = runner.run_model(
+            "peak_mem", "org/a", _FakeModel("org/a"), [config]
+        )
+        stats = outcome["stats"]
+        assert stats["max_prompt_length"] == {"10%": 10}
+        assert all(p["peak_bytes"] == 10 * p["prompt_length"] for p in stats["points"])
+
+
 class TestInProgress:
     def _interrupting_loader(self, at: str):
         def load(name):
@@ -561,7 +960,7 @@ class TestInProgress:
 
     def test_interrupt_leaves_run_json_untouched(self, fake, tmp_path):
         run_file = tmp_path / "run.json"
-        save_json(
+        ResultsStore.save_json(
             run_file,
             {
                 "fake_latency": _result(
@@ -574,7 +973,7 @@ class TestInProgress:
         with pytest.raises(KeyboardInterrupt):
             run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
         assert run_file.read_bytes() == before
-        partial = load_run(store.partial_path(run_file))
+        partial = ResultsStore(run=ResultsStore(run=run_file).partial_path).load_run()
         entry = partial["fake_latency"]
         assert entry["status"] == "in_progress"
         assert entry["progress"] == {
@@ -589,14 +988,16 @@ class TestInProgress:
     def test_finish_replaces_only_its_entry_and_clears_partial(self, fake, tmp_path):
         run_file = tmp_path / "run.json"
         other = _result("other", results=[_lat("t", "m", 1, 0.5)])
-        save_json(run_file, {"fake_latency": _result("fake_latency"), "other": other})
+        ResultsStore.save_json(
+            run_file, {"fake_latency": _result("fake_latency"), "other": other}
+        )
         with pytest.raises(KeyboardInterrupt):
             run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
-        assert store.partial_path(run_file).exists()
+        assert ResultsStore(run=run_file).partial_path.exists()
         result = run_benchmark(_defn(), _loader(), run_file)
-        run = load_run(run_file)
+        run = ResultsStore(run=run_file).load_run()
         assert run["fake_latency"] == result and run["other"] == other
-        assert not store.partial_path(run_file).exists()
+        assert not ResultsStore(run=run_file).partial_path.exists()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["run.json"]
 
     def test_partial_file_keeps_other_interrupted_benchmarks(self, fake, tmp_path):
@@ -608,13 +1009,18 @@ class TestInProgress:
                 run_file,
             )
         run_benchmark(_defn(), _loader(), run_file)
-        assert list(load_run(store.partial_path(run_file))) == ["other_latency"]
+        assert list(
+            ResultsStore(run=ResultsStore(run=run_file).partial_path).load_run()
+        ) == ["other_latency"]
 
     def test_finished_with_failures_is_written_incomplete(self, fake, tmp_path):
         fake(fail_on=("org/b", 1))
         run_benchmark(_defn(), _loader(), tmp_path / "run.json")
-        assert load_run(tmp_path / "run.json")["fake_latency"]["status"] == "incomplete"
-        assert not store.partial_path(tmp_path / "run.json").exists()
+        assert (
+            ResultsStore(run=tmp_path / "run.json").load_run()["fake_latency"]["status"]
+            == "incomplete"
+        )
+        assert not ResultsStore(run=tmp_path / "run.json").partial_path.exists()
 
     def test_all_writes_each_benchmark_when_it_finishes(self, fake, tmp_path):
         run_file = tmp_path / "run.json"
@@ -623,11 +1029,13 @@ class TestInProgress:
         with pytest.raises(KeyboardInterrupt):
             for defn, loader in zip(defs, loaders):
                 run_benchmark(defn, loader, run_file)
-        assert list(load_run(run_file)) == ["fake_latency"]
-        assert list(load_run(store.partial_path(run_file))) == ["other_latency"]
+        assert list(ResultsStore(run=run_file).load_run()) == ["fake_latency"]
+        assert list(
+            ResultsStore(run=ResultsStore(run=run_file).partial_path).load_run()
+        ) == ["other_latency"]
 
     def test_custom_run_path(self):
-        assert store.partial_path(Path("/x/scratch.json")) == Path(
+        assert ResultsStore(run=Path("/x/scratch.json")).partial_path == Path(
             "/x/scratch.partial.json"
         )
 
@@ -639,7 +1047,7 @@ class TestInProgress:
         monkeypatch.setattr(sys, "argv", ["bench", "--show", "--run", str(run_file)])
         cli._main()
         out = capsys.readouterr().out
-        partial = store.partial_path(run_file)
+        partial = ResultsStore(run=run_file).partial_path
         assert (
             f"note: interrupted benchmark(s) fake_latency: partial results in {partial}"
             in out
@@ -656,15 +1064,20 @@ class TestInProgress:
         run_file, base = tmp_path / "run.json", tmp_path / "baseline.json"
         with pytest.raises(KeyboardInterrupt):
             run_benchmark(_defn(), self._interrupting_loader("org/b"), run_file)
-        assert promote_files(store.partial_path(run_file), base) is None
+        assert (
+            ResultsStore(ResultsStore(run=run_file).partial_path, base).promote()
+            is None
+        )
         assert "REFUSED" in capsys.readouterr().out and not base.exists()
-        in_progress = load_run(store.partial_path(run_file))
-        _, promoted, refused = promote(in_progress, None)
+        in_progress = ResultsStore(
+            run=ResultsStore(run=run_file).partial_path
+        ).load_run()
+        _, promoted, refused = Result.promote(in_progress, None)
         assert promoted == [] and list(refused) == ["fake_latency"]
 
     def test_atomic_save(self, tmp_path, monkeypatch):
         target = tmp_path / "baseline.json"
-        save_json(target, {"a": 1})
+        ResultsStore.save_json(target, {"a": 1})
         assert sorted(p.name for p in tmp_path.iterdir()) == ["baseline.json"]
 
         def boom(*args, **kwargs):
@@ -672,7 +1085,7 @@ class TestInProgress:
 
         monkeypatch.setattr(store.json, "dump", boom)
         with pytest.raises(RuntimeError):
-            save_json(target, {"a": 2})
+            ResultsStore.save_json(target, {"a": 2})
         assert json.loads(target.read_text()) == {"a": 1}
         assert sorted(p.name for p in tmp_path.iterdir()) == ["baseline.json"]
 
@@ -690,7 +1103,7 @@ class TestPromote:
                 "peak_mem", dimension="peak_mem", failed=[_fail("logit_lens", GPT2, 1)]
             ),
         }
-        new, promoted, refused = promote(run, None)
+        new, promoted, refused = Result.promote(run, None)
         assert promoted == ["local_latency"]
         assert (
             list(refused) == ["peak_mem"]
@@ -701,12 +1114,12 @@ class TestPromote:
     def test_current_moves_to_previous(self):
         first = _result(results=[_lat(LL, GPT2, 10, 0.1)], env=_env("a"))
         second = _result(results=[_lat(LL, GPT2, 10, 0.2)], env=_env("b"))
-        base, _, _ = promote({"local_latency": first}, None)
-        base, promoted, _ = promote({"local_latency": second}, base)
+        base, _, _ = Result.promote({"local_latency": first}, None)
+        base, promoted, _ = Result.promote({"local_latency": second}, base)
         assert promoted == ["local_latency"]
         assert base["local_latency"]["previous"] == first
         assert base["local_latency"]["results"] == second["results"]
-        base, _, _ = promote(
+        base, _, _ = Result.promote(
             {
                 "local_latency": _result(
                     results=[_lat(LL, GPT2, 10, 0.3)], env=_env("c")
@@ -720,14 +1133,14 @@ class TestPromote:
     def test_repromote_same_result_is_a_no_op(self):
         first = _result(env=_env("a"), results=[_lat(LL, GPT2, 10, 0.1)])
         second = _result(env=_env("b"), results=[_lat(LL, GPT2, 10, 0.2)])
-        base, _, _ = promote({"local_latency": first}, None)
-        base, _, _ = promote({"local_latency": second}, base)
-        again, promoted, _ = promote({"local_latency": second}, base)
+        base, _, _ = Result.promote({"local_latency": first}, None)
+        base, _, _ = Result.promote({"local_latency": second}, base)
+        again, promoted, _ = Result.promote({"local_latency": second}, base)
         assert promoted == [] and again == base
 
     def test_other_benchmarks_untouched(self):
-        base = upgrade_baseline(_old())
-        new, _, _ = promote(
+        base = ResultsStore.upgrade_baseline(_old())
+        new, _, _ = Result.promote(
             {
                 "peak_mem": _result(
                     "peak_mem", dimension="peak_mem", results=[_pk(GPT2, {"10%": 17})]
@@ -742,8 +1155,10 @@ class TestPromote:
         assert new["peak_mem"]["previous"] is None
 
     def test_promote_files(self, tmp_path, capsys):
-        save_json(tmp_path / "baseline.json", upgrade_baseline(_old()))
-        save_json(
+        ResultsStore.save_json(
+            tmp_path / "baseline.json", ResultsStore.upgrade_baseline(_old())
+        )
+        ResultsStore.save_json(
             tmp_path / "run.json",
             {
                 "local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)], version=1),
@@ -752,13 +1167,13 @@ class TestPromote:
                 ),
             },
         )
-        promote_files(tmp_path / "run.json", tmp_path / "baseline.json")
+        ResultsStore(tmp_path / "run.json", tmp_path / "baseline.json").promote()
         out = capsys.readouterr().out
         assert (
             "REFUSED remote_latency: incomplete" in out
             and "promoted local_latency v1" in out
         )
-        base = load_baseline(tmp_path / "baseline.json")
+        base = ResultsStore(baseline=tmp_path / "baseline.json").load_baseline()
         assert base["local_latency"]["benchmark"]["version"] == 1
         assert base["local_latency"]["previous"]["benchmark"]["version"] == 0
         assert base["remote_latency"]["benchmark"]["version"] == 0
@@ -772,12 +1187,12 @@ class TestPromote:
 class TestMigration:
     def test_v1_becomes_v0_benchmarks_with_exact_values(self):
         old = _old()
-        base = upgrade_baseline(old)
+        base = ResultsStore.upgrade_baseline(old)
         assert set(base) == {"local_latency", "remote_latency"}
-        v0 = {d["name"]: d for d in load_archive()}
+        v0 = {d["name"]: d for d in BenchmarkDefinition.load_archive()}
         for name, kind in (("local_latency", "local"), ("remote_latency", "remote")):
             r = base[name]
-            assert r["benchmark"] == stamp(v0[name])
+            assert r["benchmark"] == BenchmarkDefinition.of(v0[name]).stamp()
             assert (
                 r["status"] == "complete"
                 and r["failed"] == []
@@ -786,13 +1201,13 @@ class TestMigration:
             assert (
                 r["meta_params"]["n_repeat"] == 10 and r["meta_params"]["n_warmup"] == 3
             )
-            by_id = {case_id(x): x for x in r["results"]}
+            by_id = {Result.case_id(x): x for x in r["results"]}
             assert len(by_id) == len(old["results"][kind])
             for row in old["results"][kind]:
                 expected = dict(row["latency"])
                 if kind == "remote":
                     expected["breakdown"] = row["latency_breakdown"]
-                assert by_id[case_id(row)]["stats"] == expected
+                assert by_id[Result.case_id(row)]["stats"] == expected
         assert base["local_latency"]["env"] == {
             "kind": "local",
             "git_hash": OLD_HASH,
@@ -816,7 +1231,7 @@ class TestMigration:
             dict(old["results"]["local"][0], params={"prompt_length": 7})
         ]
         old["results"]["remote"] = []
-        run = upgrade_run(old)
+        run = ResultsStore.upgrade_run(old)
         assert list(run) == ["local_latency"]
         r = run["local_latency"]
         assert r["benchmark"]["version"] is None and r["benchmark"]["kind"] == "local"
@@ -838,31 +1253,36 @@ class TestMigration:
         ],
     )
     def test_intermediate_formats_are_rejected(self, tmp_path, doc):
-        save_json(tmp_path / "baseline.json", doc)
+        ResultsStore.save_json(tmp_path / "baseline.json", doc)
         with pytest.raises(UnknownFormatError, match="baseline.json"):
-            load_baseline(tmp_path / "baseline.json")
+            ResultsStore(baseline=tmp_path / "baseline.json").load_baseline()
 
     def test_empty_files_are_valid(self, tmp_path):
-        save_json(tmp_path / "run.json", {})
-        assert load_run(tmp_path / "run.json") == {}
+        ResultsStore.save_json(tmp_path / "run.json", {})
+        assert ResultsStore(run=tmp_path / "run.json").load_run() == {}
 
     def test_current_format_round_trips(self, tmp_path):
-        base = upgrade_baseline(_old())
-        save_json(tmp_path / "b.json", base)
-        assert load_baseline(tmp_path / "b.json") == base
+        base = ResultsStore.upgrade_baseline(_old())
+        ResultsStore.save_json(tmp_path / "b.json", base)
+        assert ResultsStore(baseline=tmp_path / "b.json").load_baseline() == base
         run = {"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)])}
-        save_json(tmp_path / "r.json", run)
-        assert load_run(tmp_path / "r.json") == run
+        ResultsStore.save_json(tmp_path / "r.json", run)
+        assert ResultsStore(run=tmp_path / "r.json").load_run() == run
 
     def test_old_file_names_still_load(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "BASELINE_FILE", tmp_path / "baseline.json")
-        monkeypatch.setattr(store, "LEGACY_BASELINE_FILE", tmp_path / "results.json")
-        monkeypatch.setattr(store, "RUN_FILE", tmp_path / "run.json")
-        monkeypatch.setattr(store, "LEGACY_RUN_FILE", tmp_path / "latest.json")
+        monkeypatch.setattr(ResultsStore, "BASELINE_FILE", tmp_path / "baseline.json")
+        monkeypatch.setattr(
+            ResultsStore, "LEGACY_BASELINE_FILE", tmp_path / "results.json"
+        )
+        monkeypatch.setattr(ResultsStore, "RUN_FILE", tmp_path / "run.json")
+        monkeypatch.setattr(ResultsStore, "LEGACY_RUN_FILE", tmp_path / "latest.json")
         (tmp_path / "results.json").write_text(OLD_RESULTS.read_text())
         (tmp_path / "latest.json").write_text(OLD_RESULTS.read_text())
-        assert load_baseline()["local_latency"]["env"]["git_hash"] == OLD_HASH
-        assert load_run()["remote_latency"]["benchmark"]["version"] == 0
+        assert (
+            ResultsStore().load_baseline()["local_latency"]["env"]["git_hash"]
+            == OLD_HASH
+        )
+        assert ResultsStore().load_run()["remote_latency"]["benchmark"]["version"] == 0
 
 
 class TestCorruptFiles:
@@ -872,20 +1292,22 @@ class TestCorruptFiles:
     def test_corrupt_baseline_aborts_and_is_untouched(self, tmp_path, bad):
         base, run = tmp_path / "baseline.json", tmp_path / "run.json"
         base.write_text(bad)
-        save_json(run, {"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)])})
+        ResultsStore.save_json(
+            run, {"local_latency": _result(results=[_lat(LL, GPT2, 10, 0.1)])}
+        )
         with pytest.raises(CorruptResultsError, match="baseline.json"):
-            promote_files(run, base)
+            ResultsStore(run, base).promote()
         with pytest.raises(CorruptResultsError):
             print_diff(run, base)
         assert base.read_text() == bad
 
     def test_corrupt_run_aborts_and_is_untouched(self, tmp_path):
         base, run = tmp_path / "baseline.json", tmp_path / "run.json"
-        save_json(base, upgrade_baseline(_old()))
+        ResultsStore.save_json(base, ResultsStore.upgrade_baseline(_old()))
         before = base.read_text()
         run.write_text('{"local_latency": {"env"')
         with pytest.raises(CorruptResultsError, match="run.json"):
-            promote_files(run, base)
+            ResultsStore(run, base).promote()
         with pytest.raises(CorruptResultsError):
             print_results(run)
         assert (
@@ -893,9 +1315,12 @@ class TestCorruptFiles:
         )
 
     def test_missing_files_still_fine(self, tmp_path):
-        assert load_baseline(tmp_path / "baseline.json") is None
-        assert load_run(tmp_path / "run.json") is None
-        assert promote_files(tmp_path / "run.json", tmp_path / "baseline.json") is None
+        assert ResultsStore(baseline=tmp_path / "baseline.json").load_baseline() is None
+        assert ResultsStore(run=tmp_path / "run.json").load_run() is None
+        assert (
+            ResultsStore(tmp_path / "run.json", tmp_path / "baseline.json").promote()
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -917,59 +1342,65 @@ def _linear(slope: int, intercept: int, oom_from: int | None = None):
 
 class TestSearch:
     def test_labels_and_grid(self):
-        assert [threshold_label(t) for t in (0.1, 0.25, 0.5)] == ["10%", "25%", "50%"]
-        assert coarse_grid(2, 100) == [2, 4, 8, 16, 32, 64, 100]
-        assert coarse_grid(2, 64) == [2, 4, 8, 16, 32, 64]
+        assert [ThresholdSearch.label(t) for t in (0.1, 0.25, 0.5)] == [
+            "10%",
+            "25%",
+            "50%",
+        ]
+        assert ThresholdSearch.coarse_grid(2, 100) == [2, 4, 8, 16, 32, 64, 100]
+        assert ThresholdSearch.coarse_grid(2, 64) == [2, 4, 8, 16, 32, 64]
 
     @pytest.mark.parametrize("slope,intercept", [(13 * MIB, 5 * MIB), (MIB, 0), (7, 3)])
     def test_bisection_finds_exact_values(self, slope, intercept):
         footprint = 2000 * MIB if slope > 100 else 10_000
         measure, calls = _linear(slope, intercept)
-        result = search_max_lengths(measure, footprint, (0.1, 0.25, 0.5), cap=1_000_000)
+        result = ThresholdSearch(footprint, (0.1, 0.25, 0.5), cap=1_000_000).run(
+            measure
+        )
 
         for t in (0.1, 0.25, 0.5):
             expected = int((t * footprint - intercept) // slope)
-            assert result.max_lengths[threshold_label(t)] == expected
+            assert result.max_lengths[ThresholdSearch.label(t)] == expected
         assert result.capped == []
         assert len(calls) == len(set(calls))
         assert set(result.peaks) == set(calls)
 
     def test_keys_follow_threshold_order(self):
         measure, _ = _linear(1, 0)
-        result = search_max_lengths(measure, 1000, (0.5, 0.1), cap=10_000)
+        result = ThresholdSearch(1000, (0.5, 0.1), cap=10_000).run(measure)
         assert list(result.max_lengths) == ["50%", "10%"]
         assert result.max_lengths == {"50%": 500, "10%": 100}
 
     def test_smallest_length_already_over_is_none(self):
         measure, _ = _linear(1, 150)
-        result = search_max_lengths(
-            measure, 1000, (0.1, 0.25, 0.5), cap=10_000, start=2
+        result = ThresholdSearch(1000, (0.1, 0.25, 0.5), cap=10_000, start=2).run(
+            measure
         )
         assert result.max_lengths == {"10%": None, "25%": 100, "50%": 350}
 
     def test_cap_reached_without_crossing(self):
         measure, _ = _linear(1, 0)
-        result = search_max_lengths(measure, 1000, (0.1, 0.25, 0.5), cap=200)
+        result = ThresholdSearch(1000, (0.1, 0.25, 0.5), cap=200).run(measure)
         assert result.max_lengths == {"10%": 100, "25%": 200, "50%": 200}
         assert result.capped == ["25%", "50%"]
 
     def test_oom_counts_as_over(self):
         measure, _ = _linear(1, 0, oom_from=300)
-        result = search_max_lengths(measure, 1000, (0.1, 0.25, 0.5), cap=10_000)
+        result = ThresholdSearch(1000, (0.1, 0.25, 0.5), cap=10_000).run(measure)
         assert result.max_lengths == {"10%": 100, "25%": 250, "50%": 299}
         assert result.peaks[300] is None
 
 
 class TestPercent:
     def test_peak_pct(self):
-        assert peak_pct(50, 200) == 25.0
-        assert peak_pct(1, 3) == 33.333
+        assert BenchmarkRunner.peak_pct(50, 200) == 25.0
+        assert BenchmarkRunner.peak_pct(1, 3) == 33.333
 
     def test_model_footprint_counts_params_and_buffers(self):
         torch = pytest.importorskip("torch")
         module = torch.nn.Linear(4, 8).to(torch.bfloat16)
         module.register_buffer("scale", torch.zeros(10, dtype=torch.float32))
-        assert model_footprint(module) == (4 * 8 + 8) * 2 + 10 * 4
+        assert BenchmarkRunner.model_footprint(module) == (4 * 8 + 8) * 2 + 10 * 4
 
 
 # ---------------------------------------------------------------------------
@@ -980,7 +1411,7 @@ class TestPercent:
 @pytest.fixture
 def files(tmp_path):
     """A baseline (v0 latency from the fixture, peak_mem v1 + previous) and a v1 run."""
-    base = upgrade_baseline(_old())
+    base = ResultsStore.upgrade_baseline(_old())
     old_peak = _result(
         "peak_mem",
         dimension="peak_mem",
@@ -993,8 +1424,8 @@ def files(tmp_path):
         env=_env("p1", torch="2.10"),
         results=[_pk(GEMMA, {"10%": 14, "25%": 36, "50%": 72}), _pk(GPT2, {"10%": 17})],
     )
-    base, _, _ = promote({"peak_mem": old_peak}, base)
-    base, _, _ = promote({"peak_mem": new_peak}, base)
+    base, _, _ = Result.promote({"peak_mem": old_peak}, base)
+    base, _, _ = Result.promote({"peak_mem": new_peak}, base)
     run = {
         "local_latency": _result(
             env=_env("new5678"),
@@ -1015,8 +1446,8 @@ def files(tmp_path):
         ),
     }
     paths = {"baseline": tmp_path / "baseline.json", "run": tmp_path / "run.json"}
-    save_json(paths["baseline"], base)
-    save_json(paths["run"], run)
+    ResultsStore.save_json(paths["baseline"], base)
+    ResultsStore.save_json(paths["run"], run)
     return paths
 
 
@@ -1041,7 +1472,7 @@ def _add_peak_to_run(files):
             "max_length": 4096,
         },
     )
-    save_json(files["run"], run)
+    ResultsStore.save_json(files["run"], run)
 
 
 class TestRendering:
@@ -1083,7 +1514,7 @@ class TestRendering:
     def test_different_versions_compare_shared_tests(self, files):
         rows = {
             (r["section"], r["tool"], r["model"], r["params"]["prompt_length"]): r
-            for r in compute_diff(files["run"], files["baseline"])
+            for r in Comparison.compute_diff(files["run"], files["baseline"])
         }
         shared = rows[("local", LL, GPT2, 25)]
         assert shared["status"] == "changed" and shared["source"] == "baseline v0"
@@ -1096,13 +1527,18 @@ class TestRendering:
         )
 
     def test_same_version_compares_normally(self, files):
-        rows = [r for r in compute_diff(files["run"], files["baseline"], remote=True)]
+        rows = [
+            r
+            for r in Comparison.compute_diff(
+                files["run"], files["baseline"], remote=True
+            )
+        ]
         changed = [r for r in rows if r["status"] == "changed"]
         assert len(changed) == 1 and changed[0]["source"] == "baseline"
         assert sum(r["status"] == "removed" for r in rows) == 23
 
     def test_warnings(self, files, capsys):
-        warnings = comparison_warnings(files["run"], files["baseline"])
+        warnings = Comparison.warnings(files["run"], files["baseline"])
         assert any(
             w.startswith(
                 "local_latency: run v1 vs baseline v0 — comparing the 2 shared test(s)"
@@ -1127,18 +1563,18 @@ class TestRendering:
     def test_same_version_changed_definition_warns(self, files):
         run = json.loads(files["run"].read_text())
         run["remote_latency"]["benchmark"]["config_hash"] = "changed"
-        save_json(files["run"], run)
+        ResultsStore.save_json(files["run"], run)
         assert any(
             "same version v0 but different definitions" in w
-            for w in comparison_warnings(files["run"], files["baseline"])
+            for w in Comparison.warnings(files["run"], files["baseline"])
         )
 
     def test_with_previous(self, files):
-        rows = compute_peak_diff(files["run"], files["baseline"])
+        rows = Comparison.compute_peak_diff(files["run"], files["baseline"])
         assert rows == []
         rows = {
             r["model"]: r
-            for r in compute_peak_diff(
+            for r in Comparison.compute_peak_diff(
                 files["run"], files["baseline"], with_previous=True
             )
         }
@@ -1150,7 +1586,7 @@ class TestRendering:
         _add_peak_to_run(files)
         rows = {
             r["model"]: r
-            for r in compute_peak_diff(
+            for r in Comparison.compute_peak_diff(
                 files["run"], files["baseline"], with_previous=True
             )
         }

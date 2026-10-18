@@ -8,8 +8,8 @@ base64-encoded PNGs so they can be embedded inline in Markdown as
 ``data:`` URLs, keeping the report self-contained (no sidecar files).
 
 Matplotlib is imported lazily so the rest of the benchmark module
-works fine without it; callers should check ``matplotlib_available()``
-before invoking ``plot_tool_section()``.
+works fine without it; callers should check ``Plots.matplotlib_available()``
+before invoking ``Plots.plot_tool_section()``.
 """
 
 from __future__ import annotations
@@ -18,534 +18,546 @@ import base64
 import io
 from typing import Any
 
-_PALETTE = [
-    "#1f77b4",  # blue
-    "#ff7f0e",  # orange
-    "#2ca02c",  # green
-    "#d62728",  # red
-    "#9467bd",  # purple
-    "#8c564b",  # brown
-    "#e377c2",  # pink
-    "#7f7f7f",  # grey
-    "#bcbd22",  # olive
-    "#17becf",  # cyan
-]
-# One marker for all lines — color already disambiguates models, and
-# varying markers adds visual noise without adding information.
-_MARKER = "o"
 
+class Plots:
+    """Line plots (base64 PNG ``data:`` URLs) for the Markdown reports."""
 
-def matplotlib_available() -> bool:
-    """Return True if matplotlib can be imported."""
-    try:
-        import matplotlib  # noqa: F401
+    PALETTE = [
+        "#1f77b4",  # blue
+        "#ff7f0e",  # orange
+        "#2ca02c",  # green
+        "#d62728",  # red
+        "#9467bd",  # purple
+        "#8c564b",  # brown
+        "#e377c2",  # pink
+        "#7f7f7f",  # grey
+        "#bcbd22",  # olive
+        "#17becf",  # cyan
+    ]
+    # One marker for all lines — color already disambiguates models.
+    MARKER = "o"
 
-        return True
-    except ImportError:
-        return False
+    @staticmethod
+    def matplotlib_available() -> bool:
+        """Return True if matplotlib can be imported."""
+        try:
+            import matplotlib  # noqa: F401
 
+            return True
+        except ImportError:
+            return False
 
-def _detect_sweep_axis(rows: list[dict[str, Any]]) -> str | None:
-    """Return the single param key that varies across *rows*, or None.
+    @staticmethod
+    def _detect_sweep_axis(rows: list[dict[str, Any]]) -> str | None:
+        """Return the single param key that varies across *rows*, or None.
 
-    If multiple params keys vary, or the varying values aren't numeric,
-    we can't plot a clean line — return None and let the caller skip.
-    """
-    if not rows:
-        return None
+        If multiple params keys vary, or the varying values aren't numeric,
+        we can't plot a clean line — return None and let the caller skip.
+        """
+        if not rows:
+            return None
 
-    param_values: dict[str, set] = {}
-    for row in rows:
-        for k, v in row["params"].items():
-            param_values.setdefault(k, set()).add(v)
+        param_values: dict[str, set] = {}
+        for row in rows:
+            for k, v in row["params"].items():
+                param_values.setdefault(k, set()).add(v)
 
-    varying = [k for k, vs in param_values.items() if len(vs) > 1]
-    if len(varying) != 1:
-        return None
+        varying = [k for k, vs in param_values.items() if len(vs) > 1]
+        if len(varying) != 1:
+            return None
 
-    key = varying[0]
-    if not all(isinstance(v, (int, float)) for v in param_values[key]):
-        return None
-    return key
+        key = varying[0]
+        if not all(isinstance(v, (int, float)) for v in param_values[key]):
+            return None
+        return key
 
+    @staticmethod
+    def _group_by_model(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        """Group rows by model name, preserving encounter order."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            out.setdefault(row["model"], []).append(row)
+        return out
 
-def _group_by_model(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Group rows by model name, preserving encounter order."""
-    out: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        out.setdefault(row["model"], []).append(row)
-    return out
+    @staticmethod
+    def plot_tool_section(
+        tool_name: str,
+        section: str,
+        rows: list[dict[str, Any]],
+    ) -> str | None:
+        """Render a line plot for one ``(tool, section)`` group.
 
+        Returns a base64-encoded PNG as a ``data:`` URL string, or None if
+        the rows can't be plotted (no single varying numeric param, or
+        only one data point per model).
+        """
+        axis = Plots._detect_sweep_axis(rows)
+        if axis is None:
+            return None
 
-def plot_tool_section(
-    tool_name: str,
-    section: str,
-    rows: list[dict[str, Any]],
-) -> str | None:
-    """Render a line plot for one ``(tool, section)`` group.
+        by_model = Plots._group_by_model(rows)
+        # Skip if no model has at least 2 points — a line plot of one point
+        # is meaningless; a scatter is noise for our purposes.
+        if not any(len(v) >= 2 for v in by_model.values()):
+            return None
 
-    Returns a base64-encoded PNG as a ``data:`` URL string, or None if
-    the rows can't be plotted (no single varying numeric param, or
-    only one data point per model).
-    """
-    axis = _detect_sweep_axis(rows)
-    if axis is None:
-        return None
+        import matplotlib
 
-    by_model = _group_by_model(rows)
-    # Skip if no model has at least 2 points — a line plot of one point
-    # is meaningless; a scatter is noise for our purposes.
-    if not any(len(v) >= 2 for v in by_model.values()):
-        return None
+        matplotlib.use("Agg")  # headless backend, no display needed
+        import matplotlib.pyplot as plt
 
-    import matplotlib
+        fig, ax = plt.subplots(figsize=(8, 5))
 
-    matplotlib.use("Agg")  # headless backend, no display needed
-    import matplotlib.pyplot as plt
+        # Sort models for deterministic color assignment across runs.
+        for i, model in enumerate(sorted(by_model)):
+            model_rows = sorted(by_model[model], key=lambda r: r["params"][axis])
+            xs = [r["params"][axis] for r in model_rows]
+            means_ms = [r["latency"]["mean"] * 1000 for r in model_rows]
+            stds_ms = [r["latency"]["std"] * 1000 for r in model_rows]
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+            color = Plots.PALETTE[i % len(Plots.PALETTE)]
+            marker = Plots.MARKER
 
-    # Sort models for deterministic color assignment across runs.
-    for i, model in enumerate(sorted(by_model)):
-        model_rows = sorted(by_model[model], key=lambda r: r["params"][axis])
-        xs = [r["params"][axis] for r in model_rows]
-        means_ms = [r["latency"]["mean"] * 1000 for r in model_rows]
-        stds_ms = [r["latency"]["std"] * 1000 for r in model_rows]
-
-        color = _PALETTE[i % len(_PALETTE)]
-        marker = _MARKER
-
-        ax.plot(
-            xs,
-            means_ms,
-            marker=marker,
-            markersize=7,
-            linewidth=2,
-            color=color,
-            label=model,
-        )
-        # Error band of ±1 std, subtle but informative.
-        lows = [m - s for m, s in zip(means_ms, stds_ms)]
-        highs = [m + s for m, s in zip(means_ms, stds_ms)]
-        ax.fill_between(xs, lows, highs, color=color, alpha=0.15, linewidth=0)
-
-    all_means = [r["latency"]["mean"] * 1000 for rs in by_model.values() for r in rs]
-    _apply_latency_yaxis(ax, all_means)
-
-    section_label = "remote (unqueued)" if section == "remote" else "local"
-    ax.set_title(
-        f"{tool_name} — {section_label}",
-        fontsize=12,
-        fontweight="bold",
-        loc="left",
-    )
-    ax.set_xlabel(axis, fontsize=10)
-    ax.set_ylabel("Mean latency", fontsize=10)
-    ax.tick_params(labelsize=9)
-    ax.set_xticks(sorted({r["params"][axis] for rs in by_model.values() for r in rs}))
-
-    _place_legend(ax, n_entries=len(by_model), title="Model")
-    _clean_spines(ax)
-    fig.tight_layout()
-
-    return _encode_png(fig)
-
-
-def plot_tool_section_diff(
-    tool_name: str,
-    section: str,
-    diff_rows: list[dict[str, Any]],
-) -> str | None:
-    """Render a comparison plot: baseline (dashed) vs current (solid).
-
-    Both lines share a color per model; the style distinguishes which
-    run it came from. Rows with only baseline data show a dashed line;
-    rows with only current data show a solid line; rows with both show
-    both — visually obvious what changed.
-    """
-    axis = _detect_sweep_axis_diff(diff_rows)
-    if axis is None:
-        return None
-
-    by_model: dict[str, list[dict[str, Any]]] = {}
-    for row in diff_rows:
-        by_model.setdefault(row["model"], []).append(row)
-
-    # Need at least one model with ≥2 points across baseline+current.
-    def _total_points(model_rows: list[dict[str, Any]]) -> int:
-        n_base = sum(1 for r in model_rows if r.get("old_mean") is not None)
-        n_cur = sum(1 for r in model_rows if r.get("new_mean") is not None)
-        return max(n_base, n_cur)
-
-    if not any(_total_points(rs) >= 2 for rs in by_model.values()):
-        return None
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    all_means_ms: list[float] = []
-    n_labeled = 0
-    for i, model in enumerate(sorted(by_model)):
-        model_rows = sorted(by_model[model], key=lambda r: r["params"][axis])
-        color = _PALETTE[i % len(_PALETTE)]
-        marker = _MARKER
-
-        base_xs = [
-            r["params"][axis] for r in model_rows if r.get("old_mean") is not None
-        ]
-        base_ys = [
-            r["old_mean"] * 1000 for r in model_rows if r.get("old_mean") is not None
-        ]
-        cur_xs = [
-            r["params"][axis] for r in model_rows if r.get("new_mean") is not None
-        ]
-        cur_ys = [
-            r["new_mean"] * 1000 for r in model_rows if r.get("new_mean") is not None
-        ]
-
-        # Label whichever line the model actually has; prefer the solid
-        # "current" one. Ensures every model ends up in the legend, even
-        # ones that are "removed" (baseline-only) or "new" (current-only).
-        base_label = model if base_xs and not cur_xs else None
-        cur_label = model if cur_xs else None
-
-        if base_xs:
             ax.plot(
-                base_xs,
-                base_ys,
-                linestyle="--",
-                linewidth=1.8,
-                marker=marker,
-                markersize=6,
-                color=color,
-                alpha=0.55,
-                label=base_label,
-            )
-            all_means_ms.extend(base_ys)
-            if base_label:
-                n_labeled += 1
-
-        if cur_xs:
-            ax.plot(
-                cur_xs,
-                cur_ys,
-                linestyle="-",
-                linewidth=2,
+                xs,
+                means_ms,
                 marker=marker,
                 markersize=7,
-                color=color,
-                label=cur_label,
-            )
-            all_means_ms.extend(cur_ys)
-            if cur_label:
-                n_labeled += 1
-
-    _apply_latency_yaxis(ax, all_means_ms)
-
-    section_label = "remote (unqueued)" if section == "remote" else "local"
-    ax.set_title(
-        f"{tool_name} — {section_label}  ·  solid=current, dashed=baseline",
-        fontsize=11,
-        fontweight="bold",
-        loc="left",
-    )
-    ax.set_xlabel(axis, fontsize=10)
-    ax.set_ylabel("Mean latency", fontsize=10)
-    ax.tick_params(labelsize=9)
-    ax.set_xticks(sorted({r["params"][axis] for rs in by_model.values() for r in rs}))
-
-    _place_legend(ax, n_entries=n_labeled, title="Model")
-    _clean_spines(ax)
-    fig.tight_layout()
-
-    return _encode_png(fig)
-
-
-def _peak_series(run: dict[str, Any], axis: str) -> tuple[list, list, list, list]:
-    """``(xs, peak_mib, pct, oom_xs)`` for one peak-memory run, sorted by x."""
-    xs, mib, pct, oom = [], [], [], []
-    for point in sorted(run["points"], key=lambda p: p[axis]):
-        if point.get("oom") or point.get("peak_bytes") is None:
-            oom.append(point[axis])
-            continue
-        xs.append(point[axis])
-        mib.append(point["peak_bytes"] / 2**20)
-        pct.append(point["pct"])
-    return xs, mib, pct, oom
-
-
-def _draw_thresholds(ax, thresholds: list[float]) -> None:
-    for t in thresholds:
-        ax.axhline(t, color="#555555", linestyle=":", linewidth=1)
-        ax.annotate(
-            f"{t:g}%",
-            xy=(1, t),
-            xycoords=("axes fraction", "data"),
-            xytext=(3, 0),
-            textcoords="offset points",
-            fontsize=8,
-            color="#555555",
-            va="center",
-        )
-
-
-def _log2_xaxis(ax) -> None:
-    """Log-2 x axis labelled with plain integers (2, 4, …, 1024)."""
-    from matplotlib.ticker import FuncFormatter
-
-    ax.set_xscale("log", base=2)
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x:g}"))
-
-
-def _threshold_values(runs: list[dict[str, Any]]) -> list[float]:
-    return sorted(
-        {
-            float(label.rstrip("%"))
-            for run in runs
-            for label in run.get("max_prompt_length", {})
-        }
-    )
-
-
-def plot_peak_mem(
-    tool_name: str, runs: list[dict[str, Any]], axis: str = "prompt_length"
-) -> str | None:
-    """Peak memory (MiB) and % of footprint vs. *axis*, one line per model.
-
-    OOM points are drawn as ``x`` at the top of the % panel.
-    """
-    if not any(len(r.get("points", [])) >= 2 for r in runs):
-        return None
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, (ax_mib, ax_pct) = plt.subplots(1, 2, figsize=(12, 5))
-    by_model = {r["model"]: r for r in runs}
-    for i, model in enumerate(sorted(by_model)):
-        color = _PALETTE[i % len(_PALETTE)]
-        xs, mib, pct, oom = _peak_series(by_model[model], axis)
-        ax_mib.plot(
-            xs,
-            mib,
-            marker=_MARKER,
-            markersize=4,
-            linewidth=1.8,
-            color=color,
-            label=model,
-        )
-        ax_pct.plot(xs, pct, marker=_MARKER, markersize=4, linewidth=1.8, color=color)
-        if oom:
-            top = max(pct + _threshold_values(runs) or [100])
-            ax_pct.scatter(oom, [top] * len(oom), marker="x", color=color, s=40)
-
-    _draw_thresholds(ax_pct, _threshold_values(runs))
-    for ax, ylabel in (
-        (ax_mib, "Peak beyond weights (MiB)"),
-        (ax_pct, "% of model footprint"),
-    ):
-        _log2_xaxis(ax)
-        ax.set_xlabel(axis, fontsize=10)
-        ax.set_ylabel(ylabel, fontsize=10)
-        ax.tick_params(labelsize=9)
-        ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
-        _clean_spines(ax)
-    ax_mib.set_yscale("log")
-    ax_pct.set_yscale("log")
-    ax_mib.set_title(
-        f"{tool_name} — peak memory (local GPU)",
-        fontsize=12,
-        fontweight="bold",
-        loc="left",
-    )
-
-    _place_legend(ax_mib, n_entries=len(by_model), title="Model")
-    fig.tight_layout()
-    return _encode_png(fig)
-
-
-def plot_peak_mem_diff(
-    tool_name: str, diff_rows: list[dict[str, Any]], axis: str = "prompt_length"
-) -> str | None:
-    """% of footprint vs. *axis*: current (solid) over baseline (dashed), per model."""
-    runs = [r[k] for r in diff_rows for k in ("old", "new") if r.get(k)]
-    if not any(len(r.get("points", [])) >= 2 for r in runs):
-        return None
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    models = sorted({r["model"] for r in diff_rows})
-    for i, model in enumerate(models):
-        color = _PALETTE[i % len(_PALETTE)]
-        row = next(r for r in diff_rows if r["model"] == model)
-        if row.get("old"):
-            xs, _, pct, _ = _peak_series(row["old"], axis)
-            ax.plot(
-                xs,
-                pct,
-                linestyle="--",
-                linewidth=1.6,
-                marker=_MARKER,
-                markersize=4,
-                color=color,
-                alpha=0.55,
-                label=None if row.get("new") else model,
-            )
-        if row.get("new"):
-            xs, _, pct, _ = _peak_series(row["new"], axis)
-            ax.plot(
-                xs,
-                pct,
-                linestyle="-",
                 linewidth=2,
-                marker=_MARKER,
-                markersize=4,
                 color=color,
                 label=model,
             )
+            # Error band of ±1 std, subtle but informative.
+            lows = [m - s for m, s in zip(means_ms, stds_ms)]
+            highs = [m + s for m, s in zip(means_ms, stds_ms)]
+            ax.fill_between(xs, lows, highs, color=color, alpha=0.15, linewidth=0)
 
-    _draw_thresholds(ax, _threshold_values(runs))
-    _log2_xaxis(ax)
-    ax.set_yscale("log")
-    ax.set_xlabel(axis, fontsize=10)
-    ax.set_ylabel("% of model footprint", fontsize=10)
-    ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
-    ax.set_title(
-        f"{tool_name} — peak memory  ·  solid=current, dashed=baseline",
-        fontsize=11,
-        fontweight="bold",
-        loc="left",
-    )
-    _place_legend(ax, n_entries=len(models), title="Model")
-    _clean_spines(ax)
-    fig.tight_layout()
-    return _encode_png(fig)
+        all_means = [
+            r["latency"]["mean"] * 1000 for rs in by_model.values() for r in rs
+        ]
+        Plots._apply_latency_yaxis(ax, all_means)
 
+        section_label = "remote (unqueued)" if section == "remote" else "local"
+        ax.set_title(
+            f"{tool_name} — {section_label}",
+            fontsize=12,
+            fontweight="bold",
+            loc="left",
+        )
+        ax.set_xlabel(axis, fontsize=10)
+        ax.set_ylabel("Mean latency", fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.set_xticks(
+            sorted({r["params"][axis] for rs in by_model.values() for r in rs})
+        )
 
-# ---------------------------------------------------------------------------
-# shared helpers
-# ---------------------------------------------------------------------------
+        Plots._place_legend(ax, n_entries=len(by_model), title="Model")
+        Plots._clean_spines(ax)
+        fig.tight_layout()
 
+        return Plots._encode_png(fig)
 
-def _apply_latency_yaxis(ax, values_ms: list[float]) -> None:
-    """Format the Y axis for readable latency values.
+    @staticmethod
+    def plot_tool_section_diff(
+        tool_name: str,
+        section: str,
+        diff_rows: list[dict[str, Any]],
+    ) -> str | None:
+        """Render a comparison plot: baseline (dashed) vs current (solid).
 
-    - Switches to log scale when the data spans ≥ 10× (small + large
-      models stay visible on one plot).
-    - Major labels use human-readable units: ``ms`` below 1s, ``s`` in
-      the 1-60s range, ``min`` above. No more raw ``10^3`` scientific
-      notation.
-    - On log scale, minor ticks at 2× and 5× of each decade get a
-      faint grid, so you can eyeball intermediate values without
-      drawing extra axes.
-    """
-    from matplotlib.ticker import FuncFormatter, LogLocator
+        Both lines share a color per model; the style distinguishes which
+        run it came from. Rows with only baseline data show a dashed line;
+        rows with only current data show a solid line; rows with both show
+        both — visually obvious what changed.
+        """
+        axis = Plots._detect_sweep_axis_diff(diff_rows)
+        if axis is None:
+            return None
 
-    if not values_ms:
-        return
+        by_model: dict[str, list[dict[str, Any]]] = {}
+        for row in diff_rows:
+            by_model.setdefault(row["model"], []).append(row)
 
-    lo = max(min(values_ms), 1e-9)
-    use_log = max(values_ms) / lo >= 10
+        # Need at least one model with ≥2 points across baseline+current.
+        def _total_points(model_rows: list[dict[str, Any]]) -> int:
+            n_base = sum(1 for r in model_rows if r.get("old_mean") is not None)
+            n_cur = sum(1 for r in model_rows if r.get("new_mean") is not None)
+            return max(n_base, n_cur)
 
-    def _fmt(ms: float, _pos: int) -> str:
-        if ms <= 0:
-            return ""
-        if ms >= 60_000:
-            return f"{ms / 60_000:.1f}min"
-        if ms >= 1000:
-            v = ms / 1000
-            return f"{v:.1f}s" if v < 10 else f"{v:.0f}s"
-        if ms >= 10:
-            return f"{ms:.0f}ms"
-        return f"{ms:.1f}ms"
+        if not any(_total_points(rs) >= 2 for rs in by_model.values()):
+            return None
 
-    if use_log:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        all_means_ms: list[float] = []
+        n_labeled = 0
+        for i, model in enumerate(sorted(by_model)):
+            model_rows = sorted(by_model[model], key=lambda r: r["params"][axis])
+            color = Plots.PALETTE[i % len(Plots.PALETTE)]
+            marker = Plots.MARKER
+
+            base_xs = [
+                r["params"][axis] for r in model_rows if r.get("old_mean") is not None
+            ]
+            base_ys = [
+                r["old_mean"] * 1000
+                for r in model_rows
+                if r.get("old_mean") is not None
+            ]
+            cur_xs = [
+                r["params"][axis] for r in model_rows if r.get("new_mean") is not None
+            ]
+            cur_ys = [
+                r["new_mean"] * 1000
+                for r in model_rows
+                if r.get("new_mean") is not None
+            ]
+
+            # Label whichever line the model actually has; prefer the solid
+            # "current" one. Ensures every model ends up in the legend, even
+            # ones that are "removed" (baseline-only) or "new" (current-only).
+            base_label = model if base_xs and not cur_xs else None
+            cur_label = model if cur_xs else None
+
+            if base_xs:
+                ax.plot(
+                    base_xs,
+                    base_ys,
+                    linestyle="--",
+                    linewidth=1.8,
+                    marker=marker,
+                    markersize=6,
+                    color=color,
+                    alpha=0.55,
+                    label=base_label,
+                )
+                all_means_ms.extend(base_ys)
+                if base_label:
+                    n_labeled += 1
+
+            if cur_xs:
+                ax.plot(
+                    cur_xs,
+                    cur_ys,
+                    linestyle="-",
+                    linewidth=2,
+                    marker=marker,
+                    markersize=7,
+                    color=color,
+                    label=cur_label,
+                )
+                all_means_ms.extend(cur_ys)
+                if cur_label:
+                    n_labeled += 1
+
+        Plots._apply_latency_yaxis(ax, all_means_ms)
+
+        section_label = "remote (unqueued)" if section == "remote" else "local"
+        ax.set_title(
+            f"{tool_name} — {section_label}  ·  solid=current, dashed=baseline",
+            fontsize=11,
+            fontweight="bold",
+            loc="left",
+        )
+        ax.set_xlabel(axis, fontsize=10)
+        ax.set_ylabel("Mean latency", fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.set_xticks(
+            sorted({r["params"][axis] for rs in by_model.values() for r in rs})
+        )
+
+        Plots._place_legend(ax, n_entries=n_labeled, title="Model")
+        Plots._clean_spines(ax)
+        fig.tight_layout()
+
+        return Plots._encode_png(fig)
+
+    @staticmethod
+    def _peak_series(run: dict[str, Any], axis: str) -> tuple[list, list, list, list]:
+        """``(xs, peak_mib, pct, oom_xs)`` for one peak-memory run, sorted by x."""
+        xs, mib, pct, oom = [], [], [], []
+        for point in sorted(run["points"], key=lambda p: p[axis]):
+            if point.get("oom") or point.get("peak_bytes") is None:
+                oom.append(point[axis])
+                continue
+            xs.append(point[axis])
+            mib.append(point["peak_bytes"] / 2**20)
+            pct.append(point["pct"])
+        return xs, mib, pct, oom
+
+    @staticmethod
+    def _draw_thresholds(ax, thresholds: list[float]) -> None:
+        for t in thresholds:
+            ax.axhline(t, color="#555555", linestyle=":", linewidth=1)
+            ax.annotate(
+                f"{t:g}%",
+                xy=(1, t),
+                xycoords=("axes fraction", "data"),
+                xytext=(3, 0),
+                textcoords="offset points",
+                fontsize=8,
+                color="#555555",
+                va="center",
+            )
+
+    @staticmethod
+    def _log2_xaxis(ax) -> None:
+        """Log-2 x axis labelled with plain integers (2, 4, …, 1024)."""
+        from matplotlib.ticker import FuncFormatter
+
+        ax.set_xscale("log", base=2)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x:g}"))
+
+    @staticmethod
+    def _threshold_values(runs: list[dict[str, Any]]) -> list[float]:
+        return sorted(
+            {
+                float(label.rstrip("%"))
+                for run in runs
+                for label in run.get("max_prompt_length", {})
+            }
+        )
+
+    @staticmethod
+    def plot_peak_mem(
+        tool_name: str, runs: list[dict[str, Any]], axis: str = "prompt_length"
+    ) -> str | None:
+        """Peak memory (MiB) and % of footprint vs. *axis*, one line per model.
+
+        OOM points are drawn as ``x`` at the top of the % panel.
+        """
+        if not any(len(r.get("points", [])) >= 2 for r in runs):
+            return None
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, (ax_mib, ax_pct) = plt.subplots(1, 2, figsize=(12, 5))
+        by_model = {r["model"]: r for r in runs}
+        for i, model in enumerate(sorted(by_model)):
+            color = Plots.PALETTE[i % len(Plots.PALETTE)]
+            xs, mib, pct, oom = Plots._peak_series(by_model[model], axis)
+            ax_mib.plot(
+                xs,
+                mib,
+                marker=Plots.MARKER,
+                markersize=4,
+                linewidth=1.8,
+                color=color,
+                label=model,
+            )
+            ax_pct.plot(
+                xs, pct, marker=Plots.MARKER, markersize=4, linewidth=1.8, color=color
+            )
+            if oom:
+                top = max(pct + Plots._threshold_values(runs) or [100])
+                ax_pct.scatter(oom, [top] * len(oom), marker="x", color=color, s=40)
+
+        Plots._draw_thresholds(ax_pct, Plots._threshold_values(runs))
+        for ax, ylabel in (
+            (ax_mib, "Peak beyond weights (MiB)"),
+            (ax_pct, "% of model footprint"),
+        ):
+            Plots._log2_xaxis(ax)
+            ax.set_xlabel(axis, fontsize=10)
+            ax.set_ylabel(ylabel, fontsize=10)
+            ax.tick_params(labelsize=9)
+            ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
+            Plots._clean_spines(ax)
+        ax_mib.set_yscale("log")
+        ax_pct.set_yscale("log")
+        ax_mib.set_title(
+            f"{tool_name} — peak memory (local GPU)",
+            fontsize=12,
+            fontweight="bold",
+            loc="left",
+        )
+
+        Plots._place_legend(ax_mib, n_entries=len(by_model), title="Model")
+        fig.tight_layout()
+        return Plots._encode_png(fig)
+
+    @staticmethod
+    def plot_peak_mem_diff(
+        tool_name: str, diff_rows: list[dict[str, Any]], axis: str = "prompt_length"
+    ) -> str | None:
+        """% of footprint vs. *axis*: current (solid) over baseline (dashed)."""
+        runs = [r[k] for r in diff_rows for k in ("old", "new") if r.get(k)]
+        if not any(len(r.get("points", [])) >= 2 for r in runs):
+            return None
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        models = sorted({r["model"] for r in diff_rows})
+        for i, model in enumerate(models):
+            color = Plots.PALETTE[i % len(Plots.PALETTE)]
+            row = next(r for r in diff_rows if r["model"] == model)
+            if row.get("old"):
+                xs, _, pct, _ = Plots._peak_series(row["old"], axis)
+                ax.plot(
+                    xs,
+                    pct,
+                    linestyle="--",
+                    linewidth=1.6,
+                    marker=Plots.MARKER,
+                    markersize=4,
+                    color=color,
+                    alpha=0.55,
+                    label=None if row.get("new") else model,
+                )
+            if row.get("new"):
+                xs, _, pct, _ = Plots._peak_series(row["new"], axis)
+                ax.plot(
+                    xs,
+                    pct,
+                    linestyle="-",
+                    linewidth=2,
+                    marker=Plots.MARKER,
+                    markersize=4,
+                    color=color,
+                    label=model,
+                )
+
+        Plots._draw_thresholds(ax, Plots._threshold_values(runs))
+        Plots._log2_xaxis(ax)
         ax.set_yscale("log")
-        # Major ticks at each decade, minor at 2× and 5× within each.
-        ax.yaxis.set_major_locator(LogLocator(base=10, numticks=12))
-        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2.0, 5.0), numticks=30))
-        ax.grid(True, which="major", alpha=0.3, linewidth=0.6)
-        ax.grid(True, which="minor", alpha=0.12, linewidth=0.4)
-    else:
+        ax.set_xlabel(axis, fontsize=10)
+        ax.set_ylabel("% of model footprint", fontsize=10)
         ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
+        ax.set_title(
+            f"{tool_name} — peak memory  ·  solid=current, dashed=baseline",
+            fontsize=11,
+            fontweight="bold",
+            loc="left",
+        )
+        Plots._place_legend(ax, n_entries=len(models), title="Model")
+        Plots._clean_spines(ax)
+        fig.tight_layout()
+        return Plots._encode_png(fig)
 
-    # Apply formatter to BOTH major and minor ticks so intermediate
-    # gridlines are readable too (50ms between 10/100, 200/500 within
-    # each decade etc.). Applied AFTER set_yscale — otherwise matplotlib
-    # resets to the scientific-notation log default (``10²``).
-    ax.yaxis.set_major_formatter(FuncFormatter(_fmt))
-    if use_log:
-        ax.yaxis.set_minor_formatter(FuncFormatter(_fmt))
-        # Minor labels slightly smaller than major so the hierarchy
-        # is still visible.
-        ax.tick_params(which="minor", labelsize=8, colors="#555555")
+    @staticmethod
+    def _apply_latency_yaxis(ax, values_ms: list[float]) -> None:
+        """Format the Y axis for readable latency values.
 
+        - Switches to log scale when the data spans ≥ 10× (small + large
+          models stay visible on one plot).
+        - Major labels use human-readable units: ``ms`` below 1s, ``s`` in
+          the 1-60s range, ``min`` above. No more raw ``10^3`` scientific
+          notation.
+        - On log scale, minor ticks at 2× and 5× of each decade get a
+          faint grid, so you can eyeball intermediate values without
+          drawing extra axes.
+        """
+        from matplotlib.ticker import FuncFormatter, LogLocator
 
-def _place_legend(ax, n_entries: int, title: str) -> None:
-    """Put the legend below the axes, wrapping into multiple columns.
+        if not values_ms:
+            return
 
-    Long model names (e.g. ``meta-llama/Llama-3.1-405B-Instruct``) waste
-    horizontal space when stacked one-per-line on the right. Below the
-    axes with a 3-column cap gives the plot its full width back and
-    keeps entries readable for up to ~9 models without overflow.
-    """
-    if n_entries <= 0:
-        return
-    ncol = min(3, n_entries)
-    ax.legend(
-        title=title,
-        fontsize=8,
-        title_fontsize=8,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.18),
-        ncol=ncol,
-        frameon=False,
-        handlelength=2.2,
-        columnspacing=1.5,
-        borderaxespad=0.2,
-    )
+        lo = max(min(values_ms), 1e-9)
+        use_log = max(values_ms) / lo >= 10
 
+        def _fmt(ms: float, _pos: int) -> str:
+            if ms <= 0:
+                return ""
+            if ms >= 60_000:
+                return f"{ms / 60_000:.1f}min"
+            if ms >= 1000:
+                v = ms / 1000
+                return f"{v:.1f}s" if v < 10 else f"{v:.0f}s"
+            if ms >= 10:
+                return f"{ms:.0f}ms"
+            return f"{ms:.1f}ms"
 
-def _clean_spines(ax) -> None:
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+        if use_log:
+            ax.set_yscale("log")
+            # Major ticks at each decade, minor at 2× and 5× within each.
+            ax.yaxis.set_major_locator(LogLocator(base=10, numticks=12))
+            ax.yaxis.set_minor_locator(
+                LogLocator(base=10, subs=(2.0, 5.0), numticks=30)
+            )
+            ax.grid(True, which="major", alpha=0.3, linewidth=0.6)
+            ax.grid(True, which="minor", alpha=0.12, linewidth=0.4)
+        else:
+            ax.grid(True, which="major", alpha=0.25, linewidth=0.5)
 
+        # Apply formatter to BOTH major and minor ticks so intermediate
+        # gridlines are readable too (50ms between 10/100, 200/500 within
+        # each decade etc.). Applied AFTER set_yscale — otherwise matplotlib
+        # resets to the scientific-notation log default (``10²``).
+        ax.yaxis.set_major_formatter(FuncFormatter(_fmt))
+        if use_log:
+            ax.yaxis.set_minor_formatter(FuncFormatter(_fmt))
+            # Minor labels slightly smaller than major so the hierarchy
+            # is still visible.
+            ax.tick_params(which="minor", labelsize=8, colors="#555555")
 
-def _encode_png(fig) -> str:
-    import matplotlib.pyplot as plt
+    @staticmethod
+    def _place_legend(ax, n_entries: int, title: str) -> None:
+        """Put the legend below the axes, wrapping into multiple columns.
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+        Long model names (e.g. ``meta-llama/Llama-3.1-405B-Instruct``) waste
+        horizontal space when stacked one-per-line on the right. Below the
+        axes with a 3-column cap gives the plot its full width back and
+        keeps entries readable for up to ~9 models without overflow.
+        """
+        if n_entries <= 0:
+            return
+        ncol = min(3, n_entries)
+        ax.legend(
+            title=title,
+            fontsize=8,
+            title_fontsize=8,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            ncol=ncol,
+            frameon=False,
+            handlelength=2.2,
+            columnspacing=1.5,
+            borderaxespad=0.2,
+        )
 
+    @staticmethod
+    def _clean_spines(ax) -> None:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
-def _detect_sweep_axis_diff(rows: list[dict[str, Any]]) -> str | None:
-    """Like ``_detect_sweep_axis`` but tolerant of diff-row shape."""
-    if not rows:
-        return None
+    @staticmethod
+    def _encode_png(fig) -> str:
+        import matplotlib.pyplot as plt
 
-    param_values: dict[str, set] = {}
-    for row in rows:
-        for k, v in row["params"].items():
-            param_values.setdefault(k, set()).add(v)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
 
-    varying = [k for k, vs in param_values.items() if len(vs) > 1]
-    if len(varying) != 1:
-        return None
+    @staticmethod
+    def _detect_sweep_axis_diff(rows: list[dict[str, Any]]) -> str | None:
+        """Like ``Plots._detect_sweep_axis`` but tolerant of diff-row shape."""
+        if not rows:
+            return None
 
-    key = varying[0]
-    if not all(isinstance(v, (int, float)) for v in param_values[key]):
-        return None
-    return key
+        param_values: dict[str, set] = {}
+        for row in rows:
+            for k, v in row["params"].items():
+                param_values.setdefault(k, set()).add(v)
+
+        varying = [k for k, vs in param_values.items() if len(vs) > 1]
+        if len(varying) != 1:
+            return None
+
+        key = varying[0]
+        if not all(isinstance(v, (int, float)) for v in param_values[key]):
+            return None
+        return key

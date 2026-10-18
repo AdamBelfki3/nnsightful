@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .store import OK, kind_env
+from .env import Env
+from .store import Result
 
 
 def is_v1(data: dict[str, Any]) -> bool:
@@ -45,7 +46,7 @@ def read_v1(data: dict[str, Any]) -> list[dict[str, Any]]:
                     "tool": row["tool"],
                     "model": row["model"],
                     "params": row["params"],
-                    "status": OK,
+                    "status": Result.OK,
                     "stats": stats,
                 }
             )
@@ -53,7 +54,7 @@ def read_v1(data: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "dimension": "latency",
                 "kind": kind,
-                "env": {"kind": kind, **kind_env(env, kind)},
+                "env": {"kind": kind, **Env.for_kind(env, kind)},
                 "meta_params": dict(meta),
                 "outcomes": outcomes,
             }

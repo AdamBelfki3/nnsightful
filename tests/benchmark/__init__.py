@@ -1,14 +1,13 @@
 """Performance benchmarking for nnsightful tools."""
 
-from .definitions import load_definitions
+from .definitions import BenchmarkDefinition
 from .diff import print_diff, print_results
-from .store import load_baseline, load_run, promote_files
+from .store import Result, ResultsStore
 
 __all__ = [
-    "load_baseline",
-    "load_definitions",
-    "load_run",
+    "BenchmarkDefinition",
+    "Result",
+    "ResultsStore",
     "print_diff",
     "print_results",
-    "promote_files",
 ]

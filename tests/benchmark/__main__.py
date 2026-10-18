@@ -354,31 +354,28 @@ def main() -> None:
 def _main() -> None:
     args = _parse_args()
 
-    from .definitions import load_definitions
-    from .store import partial_notice
+    from .definitions import BenchmarkDefinition
+    from .store import ResultsStore
 
+    store = ResultsStore(run=args.run, baseline=args.baseline)
     if args.promote or args.show or args.show_diff:
-        notice = partial_notice(args.run)
+        notice = store.partial_notice()
         if notice:
             print(notice)
 
     if args.promote:
-        from .store import promote_files
-
-        promote_files(args.run, args.baseline)
+        store.promote()
         return
 
     if args.individual:
-        _run_individual(args, load_definitions())
+        _run_individual(args, BenchmarkDefinition.load_all())
         return
 
     filter_remote: bool | None = (
         True if args.remote else (False if args.local else None)
     )
 
-    from .store import BASELINE_FILE
-
-    baseline_path = args.baseline or BASELINE_FILE
+    baseline_path = args.baseline or ResultsStore.BASELINE_FILE
     display = dict(
         tools=args.tools, models=args.models, remote=filter_remote, dims=args.dims
     )
@@ -400,7 +397,7 @@ def _main() -> None:
     if not args.show_diff:
         from .runner import run_benchmark
 
-        for defn in _selected(args, load_definitions()):
+        for defn in _selected(args, BenchmarkDefinition.load_all()):
             run_benchmark(defn, _loader(defn), args.run)
         if not args.diff:
             return
