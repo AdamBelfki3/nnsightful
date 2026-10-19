@@ -6,39 +6,90 @@
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (uses gpt2 by default)
+# Run all local tests (uses openai-community/gpt2 by default)
 pytest
+
+# Also run the remote tests, which submit jobs to NDIF (needs an NDIF API key,
+# and the model must be hosted there)
+pytest --remote
 
 # Run a single test file
 pytest tests/test_logit_lens.py
 
-# Run a single test
-pytest tests/test_logit_lens.py::TestLogitLensEndToEnd::test_basic_output_structure
-
-# Use a different model
-pytest --model-names "gpt2,Maykeye/TinyLLama-v0"
+# Use different models
+pytest --model-names "openai-community/gpt2,google/gemma-3-1b-pt"
 ```
 
-## Test files
+## What is tested
 
-### `test_utils.py`
-
-Unit tests for `nnsightful.tools._utils.resolve_indices`. No model needed — these run fast and test the `IndexSpec` → sorted list conversion (None, ints, negative indices, tuple ranges, lists, deduplication, error cases).
+Each tool file tests the tool's own behaviour on a local model. The checks
+compare against an independent reference (the model's own output, another
+tool, or a run the result must not depend on) rather than only asserting
+types, so a wrong number fails, not just a wrong shape.
 
 ### `test_logit_lens.py`
 
-End-to-end tests for `nnsightful.tools.logit_lens`. Requires a model (parametrized via `--model-names`). Covers output structure, layer/position selection, top-k/top-p filtering, entropy, `logit_indices`, JSON round-trip, and the `_run`/`_format` split.
+- **Payload**: layers, positions, top-k cells, tracked trajectories and
+  entropy have the right sizes, and each position's tracked tokens are the
+  union of its top-k across layers.
+- **Matches the model**: the last layer's top-k, probabilities and entropy
+  equal those of the model's own output distribution.
+- **Options**: `top_k` sets the cell width; `include_entropy=False` drops
+  entropy without changing the rest (entropy is computed in place, last).
+- **Tool**: `raw=True` returns the `[layer, pos, vocab]` logits on CPU, whose
+  last layer is the model's logits.
+
+### `test_j_lens.py`
+
+- **Lens registry** (no model, HF mocked): lens files are keyed by model
+  name, fetched once, looked up without the org, and a model without a lens
+  raises.
+- **Jacobians**: identity Jacobians reduce j-lens to the logit lens, without
+  looking up a lens; with the real lens the last layer (which has no
+  Jacobian) equals the logit lens and the others don't.
+- **Generation**: with `max_new_tokens=n`, positions span the prompt plus
+  `n - 1` generated tokens, `completion` matches `model.generate`, and the
+  raw tensor concatenates the steps.
 
 ### `test_activation_patching.py`
 
-End-to-end tests for `nnsightful.tools.activation_patching`. Requires a model. Covers output structure, layer count, rank values, range-based `src_pos`, JSON round-trip, and the `_run`/`_format` split.
+- **Payload**: every series is tokens × layers; ranks order the
+  probabilities.
+- **Causal effect**: the first two labels are the source and clean
+  predictions; `prob_diffs` are relative to the clean run; patching the last
+  position at the last layer yields the source's probability; patching a
+  prompt into itself changes nothing.
+- **Options**: a one-wide `src_pos` range equals that position; a
+  `batch_size` that leaves a partial batch gives the same result.
+- **Tool**: `raw=True` returns the unformatted pieces.
 
-### `test_viz.py`
+### `test_execution_modes.py`
 
-Tests for `nnsightful.viz` display functions (`display_logit_lens`, `display_line_plot`). No model needed — uses mocked JS and synthetic data. Covers HTML output, unique container IDs, dark mode injection, Pydantic model input, missing-key validation, and the `.display()` passthrough.
+Every tool through every way of running it:
 
-## Fixtures
+- **Local**: `tool(...)` returns the typed payload; `_run` + `to_data_obj`
+  (how workbench runs locally) gives the same one; it survives JSON.
+- **Remote** (`--remote`): the blocking backend, the non-blocking
+  submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
+  with `non_blocking=True`, then `await` the backend) each reproduce the
+  local run's labels and top predictions.
 
-Defined in `conftest.py`:
+### `test_utils.py`, `test_viz.py`
 
-- **`model`** — session-scoped `StandardizedTransformer` fixture. Caches loaded models and skips tests if a model fails to load. Parametrized by `--model-names` (comma-separated, default `gpt2`).
+`resolve_indices` and the `nnsightful.viz` display functions; no model
+needed.
+
+### `benchmark/`
+
+The performance benchmarks and their tests; see `benchmark/README.md`.
+
+## Fixtures and helpers
+
+- **`model`** (`conftest.py`): session-scoped `StandardizedTransformer`,
+  cached, parametrized by `--model-names`; tests skip if it fails to load.
+  The same object runs locally and, in the remote tests, on NDIF.
+- **`helpers.py`**: `model_logits` (the model's own output logits) and
+  `decode_each` (per-token labels, as the tools decode them).
+
+Prompts are chosen so the predictions the tests compare have clear margins;
+a near-tie can flip between local and NDIF hardware.
