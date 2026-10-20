@@ -163,7 +163,8 @@ class TestRemote:
             time.sleep(1)
             saves = poll()
 
-        data = saves["results"]
+        assert type(saves["results"]) is dict
+        data = case.tool.load(saves["results"])
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
@@ -180,6 +181,7 @@ class TestRemote:
 
         returned, saves = asyncio.run(run())
         assert returned is None
-        data = saves["results"]
+        assert type(saves["results"]) is dict
+        data = case.tool.load(saves["results"])
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)

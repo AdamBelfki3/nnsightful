@@ -12,18 +12,26 @@ if TYPE_CHECKING:
 class ToolData(BaseModel):
     """Abstract base for nnsightful tool output data.
 
-    Each subclass also owns its tool's result formatting: a ``format``
-    classmethod turning the tool's tensors into an instance of the class. It
-    runs inside the tool's trace (server-side on NDIF), and the instance is
-    what gets saved and sent back. Torch is imported only inside those
-    methods, so reading or displaying the data does not need it.
+    Each subclass also owns its tool's result formatting: a ``payload``
+    classmethod turning the tool's tensors into the class's fields as a plain
+    dict, and :meth:`format`, which builds the instance from them. The tool
+    calls ``payload`` inside its trace (server-side on NDIF) and builds the
+    instance on the client (``Tool.load``): no pydantic object is created on
+    the server or crosses the wire, since client and server can run different
+    pydantic versions. Torch is imported only inside those methods, so
+    reading or displaying the data does not need it.
     """
 
     @classmethod
     @abstractmethod
-    def format(cls, *args, **kwargs) -> "ToolData":
-        """Format a tool run's tensors into an instance of the class."""
+    def payload(cls, *args, **kwargs) -> dict[str, Any]:
+        """The fields of the class, as a plain dict, from a tool run's tensors."""
         ...
+
+    @classmethod
+    def format(cls, *args, **kwargs) -> "ToolData":
+        """Format a tool run's tensors into an instance; see :meth:`payload`."""
+        return cls(**cls.payload(*args, **kwargs))
 
     @abstractmethod
     def display(self, **kwargs):
@@ -117,7 +125,7 @@ class LogitLensData(_LensData):
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
     @classmethod
-    def format(
+    def payload(
         cls,
         logits: "torch.Tensor",
         model: "StandardizedTransformer",
@@ -125,8 +133,8 @@ class LogitLensData(_LensData):
         positions: list[int] | None = None,
         top_k: int = 5,
         include_entropy: bool = True,
-    ) -> "LogitLensData":
-        """Build the logit-lens data from ``[layer, pos, vocab]`` logits.
+    ) -> dict[str, Any]:
+        """The logit-lens fields from ``[layer, pos, vocab]`` logits.
 
         ``logits`` holds the rows of ``positions`` (absolute, sorted prompt
         indices; ``None`` for every position) — exactly what
@@ -144,7 +152,7 @@ class LogitLensData(_LensData):
             positions = list(range(len(input_tokens)))
 
         lens = cls._format_lens(logits, model, top_k, include_entropy)
-        return cls(input=input_tokens, positions=positions, **lens)
+        return dict(input=input_tokens, positions=positions, **lens)
 
     def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
@@ -169,7 +177,7 @@ class JLensData(_LensData):
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
 
     @classmethod
-    def format(
+    def payload(
         cls,
         logits: "torch.Tensor | Sequence[torch.Tensor]",
         model: "StandardizedTransformer",
@@ -178,13 +186,13 @@ class JLensData(_LensData):
         positions: list[int] | None = None,
         top_k: int = 5,
         include_entropy: bool = True,
-    ) -> "JLensData":
-        """Build the j-lens data from ``[layer, pos, vocab]`` logits.
+    ) -> dict[str, Any]:
+        """The j-lens fields from ``[layer, pos, vocab]`` logits.
 
         ``logits`` is either one tensor per generation step (the prefill pass's
         rows, then one row per decode step) or those steps concatenated along
         the position axis, as ``j_lens._run(..., raw=True)`` returns them
-        (on the CPU; as for :meth:`LogitLensData.format`, move it to the
+        (on the CPU; as for :meth:`LogitLensData.payload`, move it to the
         model's device for the non-raw result). Each is formatted and
         overwritten in place (see :meth:`_LensData._format_lens`) and the
         steps' rows are merged, so taking the steps one at a time needs no
@@ -224,7 +232,7 @@ class JLensData(_LensData):
                     layer_ent.extend(step_ent)
 
         tokens = [str(model.tokenizer.decode(token)) for token in token_ids[:seq_len]]
-        return cls(
+        return dict(
             input=tokens[:prompt_len],
             completion=tokens[prompt_len:],
             positions=(
@@ -248,15 +256,15 @@ class ActivationPatchingData(ToolData):
     tokenLabels: list[str]  # Token text labels for each line
 
     @classmethod
-    def format(
+    def payload(
         cls,
         src_pred: "torch.Tensor",
         clean_pred: "torch.Tensor",
         patched_logits: "Sequence[torch.Tensor]",
         clean_probs: "torch.Tensor",
         tokenizer: "PreTrainedTokenizerBase",
-    ) -> "ActivationPatchingData":
-        """Build the activation-patching data.
+    ) -> dict[str, Any]:
+        """The activation-patching fields.
 
         Takes the source and clean runs' predicted token ids, the patched
         run's last-position logits (one ``[vocab]`` tensor per patched layer)
@@ -314,7 +322,7 @@ class ActivationPatchingData(ToolData):
         ]
         labels = [tokenizer.decode(int(tid)) for tid in token_ids]
 
-        return cls(
+        return dict(
             lines=probabilities, ranks=ranks, prob_diffs=prob_diffs, tokenLabels=labels
         )
 

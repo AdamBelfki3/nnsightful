@@ -14,23 +14,26 @@ class Tool():
 
     Subclasses set :attr:`data_class` to their result data class and implement
     ``_run``, which sets up the trace/session, collects the tensors and, still
-    inside the trace, formats them with :meth:`format` into a ``data_class``
-    instance. On NDIF that runs server-side, and the instance is what is saved
-    and sent back. With ``raw=True`` ``_run`` returns the tensors unformatted
-    instead; :meth:`format` can be applied to them afterwards.
+    inside the trace, turns them into the ``data_class`` fields as a plain dict
+    with :meth:`payload`. On NDIF that runs server-side, and the dict is what
+    is saved and sent back; ``_run`` builds the instance from it on the client
+    with :meth:`load`, so no pydantic object is created on the server or
+    crosses the wire. With ``raw=True`` ``_run`` returns the tensors
+    unformatted instead; :meth:`format` turns them into the instance
+    afterwards.
 
     End users call the tool directly::
 
         data = tool(model, prompt, ...)
 
     For async two-phase patterns (e.g. workbench), submit with ``_run`` and
-    read the instance from the job's results::
+    load the instance from the job's results::
 
         job_id = tool._run(
             model, prompt, remote=True, backend=backend, non_blocking=True
         )
         # ... later, from a backend polling that job ...
-        data = backend()["results"]
+        data = tool.load(backend()["results"])
     """
 
     data_class: type[ToolData]
@@ -90,12 +93,27 @@ class Tool():
             return slice(selected[0], selected[-1] + 1)
         return selected
 
+    def load(self, results: dict[str, Any]) -> ToolData:
+        """Build the :attr:`data_class` instance from a run's saved results.
+
+        The results are the :meth:`payload` dict, as a non-blocking or async
+        remote job returns them.
+        """
+        return self.data_class.model_validate(results)
+
+    def payload(self, *args, **kwargs) -> dict[str, Any]:
+        """A run's tensors as the :attr:`data_class` fields, in a plain dict.
+
+        Delegates to ``data_class.payload`` (e.g.
+        :meth:`~nnsightful.types.LogitLensData.payload`), which documents the
+        arguments.
+        """
+        return self.data_class.payload(*args, **kwargs)
+
     def format(self, *args, **kwargs) -> ToolData:
         """Format a run's tensors into a :attr:`data_class` instance.
 
-        Delegates to ``data_class.format`` (e.g.
-        :meth:`~nnsightful.types.LogitLensData.format`), which documents the
-        arguments.
+        Takes the arguments of :meth:`payload`.
         """
         return self.data_class.format(*args, **kwargs)
 

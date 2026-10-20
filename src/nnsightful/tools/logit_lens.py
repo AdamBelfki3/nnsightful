@@ -62,7 +62,7 @@ class LogitLensTool(Tool):
                 if raw:
                     results = all_logits.to('cpu').save()
                 else:
-                    results = self.format(
+                    results = self.payload(
                         all_logits, model, prompt, selected, **kwargs
                     )
 
@@ -71,7 +71,7 @@ class LogitLensTool(Tool):
         if remote and non_blocking:
             return backend.job_id
 
-        return results
+        return results if raw else self.load(results)
 
 
 logit_lens = LogitLensTool()
