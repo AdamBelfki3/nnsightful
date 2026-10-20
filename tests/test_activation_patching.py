@@ -111,7 +111,7 @@ class TestOptions:
 
 class TestTool:
     def test_raw_returns_the_unformatted_pieces(self, model, setup):
-        raw = activation_patching._run(
+        raw = activation_patching(
             model, SRC_PROMPT, TGT_PROMPT, raw=True, **setup["kwargs"]
         )
         assert set(raw) == {
@@ -126,9 +126,9 @@ class TestTool:
         assert int(raw["clean_pred"]) == int(setup["tgt_logits"].argmax())
 
     def test_formatting_raw_output_gives_the_payload(self, model, setup):
-        raw = activation_patching._run(
+        raw = activation_patching(
             model, SRC_PROMPT, TGT_PROMPT, raw=True, **setup["kwargs"]
         )
-        assert activation_patching.format(**raw) == activation_patching._run(
+        assert activation_patching.format(**raw) == activation_patching(
             model, SRC_PROMPT, TGT_PROMPT, **setup["kwargs"]
         )

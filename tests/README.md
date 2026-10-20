@@ -85,8 +85,7 @@ types, so a wrong number fails, not just a wrong shape.
 
 Every tool through every way of running it:
 
-- **Local**: `tool(...)` returns the typed payload; `_run` (how workbench
-  runs locally) gives the same one; it survives JSON.
+- **Local**: `tool(...)` returns the typed payload, and it survives JSON.
 - **Remote** (`--remote`): the blocking backend, the non-blocking
   submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
   with `non_blocking=True`, then `await` the backend) each return the typed

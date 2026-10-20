@@ -94,7 +94,7 @@ class TestOptions:
 
 class TestTool:
     def test_raw_returns_the_per_layer_logits_on_cpu(self, model, reference):
-        raw = logit_lens._run(model, PROMPT, raw=True)
+        raw = logit_lens(model, PROMPT, raw=True)
         n_pos = len(model.tokenizer.encode(PROMPT))
 
         assert isinstance(raw, torch.Tensor)
@@ -108,12 +108,12 @@ class TestTool:
     def test_formatting_raw_output_gives_the_payload(self, model, positions):
         n_pos = len(model.tokenizer.encode(PROMPT))
         selected = None if positions is None else [p % n_pos for p in positions]
-        raw = logit_lens._run(model, PROMPT, raw=True, positions=positions)
+        raw = logit_lens(model, PROMPT, raw=True, positions=positions)
         raw = raw.to(model.lm_head.weight.device)
 
         assert logit_lens.format(
             raw, model, PROMPT, selected, top_k=3
-        ) == logit_lens._run(model, PROMPT, top_k=3, positions=positions)
+        ) == logit_lens(model, PROMPT, top_k=3, positions=positions)
 
 
 class TestPositions:
@@ -145,8 +145,8 @@ class TestPositions:
 
     def test_raw_holds_only_the_selected_rows(self, model):
         """The raw tensor is the lens buffer, allocated at the selection's size."""
-        full = logit_lens._run(model, PROMPT, raw=True)
-        raw = logit_lens._run(model, PROMPT, raw=True, positions=[1, -1])
+        full = logit_lens(model, PROMPT, raw=True)
+        raw = logit_lens(model, PROMPT, raw=True, positions=[1, -1])
 
         assert raw.shape == (model.num_layers, 2, model.vocab_size)
         torch.testing.assert_close(raw, full[:, [1, -1]])

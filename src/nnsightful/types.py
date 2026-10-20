@@ -130,7 +130,7 @@ class LogitLensData(_LensData):
 
         ``logits`` holds the rows of ``positions`` (absolute, sorted prompt
         indices; ``None`` for every position) — exactly what
-        ``logit_lens._run(..., raw=True)`` returns, so formatting that output
+        ``logit_lens(..., raw=True)`` returns, so formatting that output
         with the same arguments gives the non-raw result (move it back to the
         model's device first: the raw tensor is on the CPU, whose reductions
         can round an entropy differently). ``logits`` is overwritten in place
@@ -183,7 +183,7 @@ class JLensData(_LensData):
 
         ``logits`` is either one tensor per generation step (the prefill pass's
         rows, then one row per decode step) or those steps concatenated along
-        the position axis, as ``j_lens._run(..., raw=True)`` returns them
+        the position axis, as ``j_lens(..., raw=True)`` returns them
         (on the CPU; as for :meth:`LogitLensData.format`, move it to the
         model's device for the non-raw result). Each is formatted and
         overwritten in place (see :meth:`_LensData._format_lens`) and the
@@ -261,7 +261,7 @@ class ActivationPatchingData(ToolData):
         Takes the source and clean runs' predicted token ids, the patched
         run's last-position logits (one ``[vocab]`` tensor per patched layer)
         and the clean run's probabilities — the pieces
-        ``activation_patching._run(..., raw=True)`` returns, so
+        ``activation_patching(..., raw=True)`` returns, so
         ``format(**raw)`` gives the non-raw result.
 
         The tokens are the source and clean predictions, then the union of
