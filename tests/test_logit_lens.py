@@ -104,6 +104,17 @@ class TestTool:
             raw[-1].float(), reference["logits"], atol=1e-3, rtol=1e-3
         )
 
+    @pytest.mark.parametrize("positions", [None, [1, -1]], ids=["all", "selected"])
+    def test_formatting_raw_output_gives_the_payload(self, model, positions):
+        n_pos = len(model.tokenizer.encode(PROMPT))
+        selected = None if positions is None else [p % n_pos for p in positions]
+        raw = logit_lens._run(model, PROMPT, raw=True, positions=positions)
+        raw = raw.to(model.lm_head.weight.device)
+
+        assert logit_lens.format(
+            raw, model, PROMPT, selected, top_k=3
+        ) == logit_lens._run(model, PROMPT, top_k=3, positions=positions)
+
 
 class TestPositions:
     """``positions`` projects only the selected rows, equal to the full run's."""

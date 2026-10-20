@@ -12,19 +12,28 @@ if TYPE_CHECKING:
 class Tool():
     """Abstract base for nnsightful tools.
 
-    Subclasses implement ``_run`` (trace/session setup) and ``_format``
-    (result processing).  End users call the tool directly::
+    Subclasses set :attr:`data_class` to their result data class and implement
+    ``_run``, which sets up the trace/session, collects the tensors and, still
+    inside the trace, formats them with :meth:`format` into a ``data_class``
+    instance. On NDIF that runs server-side, and the instance is what is saved
+    and sent back. With ``raw=True`` ``_run`` returns the tensors unformatted
+    instead; :meth:`format` can be applied to them afterwards.
+
+    End users call the tool directly::
 
         data = tool(model, prompt, ...)
 
-    For async two-phase patterns (e.g. workbench), call ``_run`` and
-    ``_format`` separately::
+    For async two-phase patterns (e.g. workbench), submit with ``_run`` and
+    read the instance from the job's results::
 
-        raw = tool._run(model, prompt, remote=True, backend=backend)
-        job_id = raw["job_id"]
-        # ... later, after fetching results from backend ...
-        data = tool._format(raw_results, ...)
+        job_id = tool._run(
+            model, prompt, remote=True, backend=backend, non_blocking=True
+        )
+        # ... later, from a backend polling that job ...
+        data = backend()["results"]
     """
+
+    data_class: type[ToolData]
 
     def _run(
         self,
@@ -33,11 +42,11 @@ class Tool():
         remote: bool = False,
         backend=None,
         **kwargs,
-    ) -> dict[str, Any]:
-        """Run the trace/session and collect raw results.
+    ) -> ToolData | Any:
+        """Run the trace/session and return the formatted data.
 
-        Returns a dict of raw results.  When *remote* and *backend* are
-        set, the dict includes a ``"job_id"`` key.
+        With ``raw=True`` returns the unformatted tensors instead, and with
+        ``remote`` and ``non_blocking`` the NDIF job id to poll.
         """
         ...
 
@@ -81,9 +90,14 @@ class Tool():
             return slice(selected[0], selected[-1] + 1)
         return selected
 
-    def _format(self, raw: dict[str, Any], **kwargs) -> ToolData:
-        """Format raw results into structured output data."""
-        ...
+    def format(self, *args, **kwargs) -> ToolData:
+        """Format a run's tensors into a :attr:`data_class` instance.
+
+        Delegates to ``data_class.format`` (e.g.
+        :meth:`~nnsightful.types.LogitLensData.format`), which documents the
+        arguments.
+        """
+        return self.data_class.format(*args, **kwargs)
 
     def __call__(
         self,
@@ -94,12 +108,14 @@ class Tool():
         non_blocking=False,
         raw=False,
         **kwargs,
-    ) -> ToolData:
-        """Run the tool end-to-end: trace + format."""
-
-        output = self._run(model, *args, remote=remote, backend=backend, non_blocking=non_blocking, raw=raw, **kwargs)
-
-        if not (non_blocking or raw):
-            output = self.__class__.to_data_obj(**output)
-
-        return output
+    ) -> ToolData | Any:
+        """Run the tool; same as ``_run``."""
+        return self._run(
+            model,
+            *args,
+            remote=remote,
+            backend=backend,
+            non_blocking=non_blocking,
+            raw=raw,
+            **kwargs,
+        )

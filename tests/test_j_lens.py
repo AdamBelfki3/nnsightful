@@ -132,6 +132,35 @@ class TestGeneration:
         assert raw.device.type == "cpu"
         assert raw.shape == (model.num_layers, n_pos, model.vocab_size)
 
+    @pytest.mark.parametrize(
+        ("max_new_tokens", "positions"),
+        [(1, None), (MAX_NEW_TOKENS, None), (MAX_NEW_TOKENS, [1, -1])],
+        ids=["prompt", "generated", "selected"],
+    )
+    def test_formatting_raw_output_gives_the_payload(
+        self, model, has_lens, max_new_tokens, positions
+    ):
+        """The steps, concatenated in the raw tensor, format as they do one by one."""
+        n_prompt = len(model.tokenizer.encode(PROMPT))
+        selected = None if positions is None else [p % n_prompt for p in positions]
+        token_ids = None
+        if max_new_tokens > 1:
+            with (
+                torch.no_grad(),
+                model.generate(
+                    PROMPT, max_new_tokens=max_new_tokens, min_new_tokens=max_new_tokens
+                ) as tracer,
+            ):
+                output = tracer.result.save()
+            token_ids = output[0].tolist()
+        kwargs = dict(max_new_tokens=max_new_tokens, positions=positions)
+        raw = j_lens._run(model, PROMPT, raw=True, **kwargs)
+        raw = raw.to(model.lm_head.weight.device)
+
+        assert j_lens.format(
+            raw, model, PROMPT, token_ids, selected, top_k=3
+        ) == j_lens._run(model, PROMPT, top_k=3, **kwargs)
+
 
 @pytest.fixture(scope="module")
 def full(model, has_lens):

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 class ActivationPatchingTool(Tool):
     """Activation patching: causal intervention across all layers."""
 
+    data_class = ActivationPatchingData
+
     def _run(
         self,
         model: "StandardizedTransformer",
@@ -31,80 +33,7 @@ class ActivationPatchingTool(Tool):
         non_blocking: bool=False,
         raw: bool = False,
         **kwargs,
-    ) -> dict[str, Any]:
-
-        def format(
-            src_pred,
-            clean_pred,
-            patched_logits,
-            clean_probs,
-            tokenizer,
-        ) -> dict[str, Any]:
-
-            # [L, V]
-            patched_logits = torch.stack([t.detach() for t in patched_logits], dim=0)
-            patched_probs = F.softmax(patched_logits, dim=-1)
-            L, V = patched_probs.shape
-
-            # ---- 1) Candidate token ids: src/clean + union of topk across layers ----
-            topk_idx = patched_probs.topk(k=10, dim=1).indices  # [L, 10]
-            cand = torch.unique(topk_idx.flatten())          # [K]
-
-            # remove src/clean if present, then prepend them in order
-            cand = cand[(cand != src_pred.item()) & (cand != clean_pred.item())]
-            dev = patched_probs.device
-            fixed = torch.tensor(
-                [src_pred, clean_pred], device=dev, dtype=cand.dtype
-            )
-            token_ids = torch.cat([fixed, cand], dim=0)  # [T]
-
-            # ---- 2) Per-token per-layer probs ----
-            probs_mat = patched_probs.index_select(1, token_ids)  # [L, T]
-
-            # ---- 3) Exact ranks via inverted permutation ----
-            sorted_idx = patched_probs.argsort(dim=1, descending=True)
-            inv_rank = torch.empty_like(sorted_idx)
-            arange_V = torch.arange(V, device=dev).expand(L, V)
-            inv_rank.scatter_(1, sorted_idx, arange_V)
-            ranks_mat = inv_rank.index_select(1, token_ids)  # [L, T]
-
-            # ---- 4) Probability difference from clean ----
-            clean_probs = clean_probs.to(token_ids.device)
-            clean_probs_T = clean_probs.index_select(0, token_ids)
-            prob_diff_mat = probs_mat - clean_probs_T.unsqueeze(0)
-
-            # ---- 5) Sort: keep src, clean first; rest by total_rank ----
-            total_rank = ranks_mat.sum(dim=0)  # [T]
-            rem_order = torch.argsort(total_rank[2:]) + 2
-            order = torch.cat(
-                [torch.tensor([0, 1], device=dev), rem_order], dim=0
-            )
-
-            token_ids = token_ids[order]
-            probs_mat = probs_mat[:, order]
-            ranks_mat = ranks_mat[:, order]
-            prob_diff_mat = prob_diff_mat[:, order]
-
-            # ---- 6) Build return structure ----
-            probs_T = probs_mat.transpose(0, 1).tolist()
-            probabilities = [
-                [round(p, 4) for p in row] for row in probs_T
-            ]
-            ranks = ranks_mat.transpose(0, 1).tolist()
-            diffs_T = prob_diff_mat.transpose(0, 1).tolist()
-            prob_diffs = [
-                [round(d, 4) for d in row] for row in diffs_T
-            ]
-            labels = [tokenizer.decode(int(tid)) for tid in token_ids]
-
-            return {
-                "lines": probabilities,
-                "ranks": ranks,
-                "prob_diffs": prob_diffs,
-                "tokenLabels": labels
-            }
-
-
+    ) -> ActivationPatchingData | dict[str, Any] | str:
         with torch.no_grad():
             with model.session(remote=remote, backend=backend):
                 src_acts = list()
@@ -161,7 +90,7 @@ class ActivationPatchingTool(Tool):
                         "clean_probs": clean_probs,
                     }
                 else:
-                    results = format(
+                    results = self.format(
                         src_pred=src_pred, 
                         clean_pred=clean_pred, 
                         patched_logits=patched_logits, 
@@ -175,10 +104,6 @@ class ActivationPatchingTool(Tool):
             return backend.job_id
 
         return results
-
-    @staticmethod
-    def to_data_obj(**kwargs):
-        return ActivationPatchingData(**kwargs)
 
 
 activation_patching = ActivationPatchingTool()

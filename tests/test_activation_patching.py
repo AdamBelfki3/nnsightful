@@ -124,3 +124,11 @@ class TestTool:
         assert len(raw["patched_logits"]) == model.num_layers
         assert int(raw["src_pred"]) == int(setup["src_logits"].argmax())
         assert int(raw["clean_pred"]) == int(setup["tgt_logits"].argmax())
+
+    def test_formatting_raw_output_gives_the_payload(self, model, setup):
+        raw = activation_patching._run(
+            model, SRC_PROMPT, TGT_PROMPT, raw=True, **setup["kwargs"]
+        )
+        assert activation_patching.format(**raw) == activation_patching._run(
+            model, SRC_PROMPT, TGT_PROMPT, **setup["kwargs"]
+        )

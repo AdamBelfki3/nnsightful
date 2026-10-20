@@ -69,7 +69,7 @@ nnsightful/
 │   │   └── types/           # TypeScript type definitions
 │   └── nnsightful/          # Python package
 │       ├── tools/           # Interpretability methods (logit lens, activation patching)
-│       ├── types.py         # Pydantic data models
+│       ├── types.py         # Pydantic data models, each formatting its tool's results
 │       └── viz/             # Jupyter display helpers (includes bundled charts.js)
 ├── examples/                # Example notebooks
 ├── dist/                    # JS build output (ESM for React/Next.js apps)

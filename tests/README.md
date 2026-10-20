@@ -37,7 +37,8 @@ types, so a wrong number fails, not just a wrong shape.
 - **Options**: `top_k` sets the cell width; `include_entropy=False` drops
   entropy without changing the rest (entropy is computed in place, last).
 - **Tool**: `raw=True` returns the `[layer, pos, vocab]` logits on CPU, whose
-  last layer is the model's logits.
+  last layer is the model's logits; `logit_lens.format` turns them (all
+  positions or a selection) into exactly the non-raw payload.
 - **Positions**: each `positions` form (negative, range, list, list of
   ranges) gives exactly the full run's rows for those positions, with
   `positions` listing them and `input` still every token; `raw=True` holds
@@ -54,7 +55,9 @@ types, so a wrong number fails, not just a wrong shape.
   Jacobian) equals the logit lens and the others don't.
 - **Generation**: with `max_new_tokens=n`, positions span the prompt plus
   `n - 1` generated tokens, `completion` matches `model.generate`, and the
-  raw tensor concatenates the steps.
+  raw tensor concatenates the steps; `j_lens.format` turns it into exactly
+  the non-raw payload (formatted step by step), with and without generated
+  tokens or a position selection.
 - **Positions**: selecting prompt positions keeps every generated one, and
   the rows equal the full run's; `positions` is the selected prompt indices
   followed by the generated ones, which the viz densifies back onto the
@@ -72,18 +75,20 @@ types, so a wrong number fails, not just a wrong shape.
   prompt into itself changes nothing.
 - **Options**: a one-wide `src_pos` range equals that position; a
   `batch_size` that leaves a partial batch gives the same result.
-- **Tool**: `raw=True` returns the unformatted pieces.
+- **Tool**: `raw=True` returns the unformatted pieces, which
+  `activation_patching.format(**raw)` turns into exactly the non-raw
+  payload.
 
 ### `test_execution_modes.py`
 
 Every tool through every way of running it:
 
-- **Local**: `tool(...)` returns the typed payload; `_run` + `to_data_obj`
-  (how workbench runs locally) gives the same one; it survives JSON.
+- **Local**: `tool(...)` returns the typed payload; `_run` (how workbench
+  runs locally) gives the same one; it survives JSON.
 - **Remote** (`--remote`): the blocking backend, the non-blocking
   submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
-  with `non_blocking=True`, then `await` the backend) each reproduce the
-  local run's labels and top predictions. The lenses also run with
+  with `non_blocking=True`, then `await` the backend) each return the typed
+  payload, built on NDIF, with the local run's labels and top predictions. The lenses also run with
   `positions` set (a list, and a range), so both indexing forms run on NDIF.
 
 ### `test_utils.py`, `test_viz.py`

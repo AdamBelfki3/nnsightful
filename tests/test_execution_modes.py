@@ -1,8 +1,7 @@
 """Every tool through every way of running it, locally and on NDIF.
 
-Local: ``tool(...)`` returns the typed payload, and ``_run`` + ``to_data_obj``
-(how workbench runs tools locally) gives the same one, which survives the
-JSON trip to the frontend.
+Local: ``tool(...)`` and ``_run`` (how workbench runs tools locally) return
+the typed payload, which survives the JSON trip to the frontend.
 
 Remote (``--remote``): the blocking backend, the non-blocking submit-then-poll
 flow workbench uses, and nnsight's ``AsyncRemoteBackend`` each return the
@@ -129,10 +128,9 @@ class TestLocal:
     def test_call_returns_the_typed_payload(self, case, local_payload):
         assert type(local_payload) is case.data_type
 
-    def test_run_then_to_data_obj_matches_call(self, model, case, local_payload):
+    def test_run_matches_call(self, model, case, local_payload):
         args, kwargs = case.call_args(model)
-        output = case.tool._run(model, *args, **kwargs)
-        assert case.tool.to_data_obj(**output) == local_payload
+        assert case.tool._run(model, *args, **kwargs) == local_payload
 
     def test_payload_survives_json(self, case, local_payload):
         restored = case.data_type.model_validate_json(local_payload.model_dump_json())
@@ -165,7 +163,8 @@ class TestRemote:
             time.sleep(1)
             saves = poll()
 
-        data = case.tool.to_data_obj(**saves["results"])
+        data = saves["results"]
+        assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
     def test_async_backend(self, model, case, local_payload):
@@ -181,5 +180,6 @@ class TestRemote:
 
         returned, saves = asyncio.run(run())
         assert returned is None
-        data = case.tool.to_data_obj(**saves["results"])
+        data = saves["results"]
+        assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
