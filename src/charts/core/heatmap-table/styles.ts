@@ -166,6 +166,13 @@ export function generateHeatmapStyles(uid: string): string {
             content: ""; position: absolute; left: 0; top: 0; bottom: 0;
             width: 3px; background: var(--hmx-hl, #f59e0b);
         }
+        /* Locked band: a static, faintly hatched seam — no hover, no pointer. */
+        ${root} .hmx-collapsed-locked,
+        ${root} .hmx-collapsed-locked:hover {
+            cursor: default; color: var(--hmx-text-muted);
+            background: repeating-linear-gradient(135deg,
+                var(--hmx-surface-2) 0 5px, var(--hmx-surface) 5px 10px);
+        }
         /* Match the collapsed band (.hmx-collapsed / COLLAPSED_BAND_H) exactly —
            same 16px height, 9.5px sans, and sentence case (no uppercase). */
         ${root} .hmx-expanded-toggle {

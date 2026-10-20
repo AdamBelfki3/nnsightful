@@ -14,84 +14,87 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
 
-# Two base texts of roughly similar structure; longer prompts continue
-# with _FILLER.
-_BASE_SRC = (
-    "The Eiffel Tower is a famous landmark located in the heart of France. "
-    "It was built in 1889 for the World's Fair and stands over three hundred "
-    "meters tall. Every year millions of tourists travel to see it, making "
-    "it one of the most visited monuments in the world. The tower is in"
-)
+class Prompts:
+    """Prompts of an exact token count, cut from two structurally similar texts.
 
-_BASE_TGT = (
-    "The Colosseum is a famous landmark located in the heart of Italy. "
-    "It was built in the first century as a grand amphitheater and stands "
-    "nearly fifty meters tall. Every year millions of tourists travel to "
-    "see it, making it one of the most visited monuments in the world. "
-    "The amphitheater is in"
-)
-
-_FILLER = (
-    "The quick brown fox jumps over the lazy dog. " * 100
-)
-
-
-def _truncate_to_length(
-    tokenizer: "PreTrainedTokenizerBase", text: str, n: int
-) -> str:
-    """Return a string that re-encodes to exactly ``n`` tokens.
-
-    The source ids are encoded without special tokens and padded with
-    filler to at least ``2n`` ids, so any length works and a BOS is never
-    decoded into the text; ``n`` counts the special tokens the tokenizer
-    adds when the tool re-encodes the prompt.
-
-    Naive ``decode(encode(text)[:n])`` doesn't guarantee an N-token output
-    because BPE decode→re-encode can drift by a token or two at boundaries
-    (special tokens, whitespace normalization, merges). Since the tools we
-    feed this into re-tokenize the string, the sweep axis would be off by
-    the drift amount without correction. We iterate: decode a prefix,
-    measure the re-encoded length, shift the prefix boundary, retry.
+    ``SRC`` / ``TGT`` are the base texts; longer prompts continue with
+    ``FILLER``.
     """
-    ids = tokenizer.encode(text, add_special_tokens=False)
-    filler = tokenizer.encode(_FILLER, add_special_tokens=False)
-    while len(ids) < n * 2:
-        ids = ids + filler
 
-    k = n  # number of source token ids to decode from
-    decoded = tokenizer.decode(ids[:k])
-    for _ in range(16):
-        actual = len(tokenizer.encode(decoded))
-        if actual == n:
-            return decoded
-        # Shift k toward the target. Treating the source→decoded→re-encoded
-        # length as roughly monotonic lets this converge in 2-3 iterations
-        # for typical BPE drift.
-        k = max(1, min(k + (n - actual), len(ids)))
+    SRC = (
+        "The Eiffel Tower is a famous landmark located in the heart of France. "
+        "It was built in 1889 for the World's Fair and stands over three hundred "
+        "meters tall. Every year millions of tourists travel to see it, making "
+        "it one of the most visited monuments in the world. The tower is in"
+    )
+
+    TGT = (
+        "The Colosseum is a famous landmark located in the heart of Italy. "
+        "It was built in the first century as a grand amphitheater and stands "
+        "nearly fifty meters tall. Every year millions of tourists travel to "
+        "see it, making it one of the most visited monuments in the world. "
+        "The amphitheater is in"
+    )
+
+    FILLER = "The quick brown fox jumps over the lazy dog. " * 100
+
+    @classmethod
+    def _truncate_to_length(
+        cls, tokenizer: "PreTrainedTokenizerBase", text: str, n: int
+    ) -> str:
+        """Return a string that re-encodes to exactly ``n`` tokens.
+
+        The source ids are encoded without special tokens and padded with
+        filler to at least ``2n`` ids, so any length works and a BOS is never
+        decoded into the text; ``n`` counts the special tokens the tokenizer
+        adds when the tool re-encodes the prompt.
+
+        Naive ``decode(encode(text)[:n])`` doesn't guarantee an N-token output
+        because BPE decode→re-encode can drift by a token or two at boundaries
+        (special tokens, whitespace normalization, merges). Since the tools we
+        feed this into re-tokenize the string, the sweep axis would be off by
+        the drift amount without correction. We iterate: decode a prefix,
+        measure the re-encoded length, shift the prefix boundary, retry.
+        """
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        filler = tokenizer.encode(cls.FILLER, add_special_tokens=False)
+        while len(ids) < n * 2:
+            ids = ids + filler
+
+        k = n  # number of source token ids to decode from
         decoded = tokenizer.decode(ids[:k])
+        for _ in range(16):
+            actual = len(tokenizer.encode(decoded))
+            if actual == n:
+                return decoded
+            # Shift k toward the target. Treating the source→decoded→re-encoded
+            # length as roughly monotonic lets this converge in 2-3 iterations
+            # for typical BPE drift.
+            k = max(1, min(k + (n - actual), len(ids)))
+            decoded = tokenizer.decode(ids[:k])
 
-    # Give up after 16 iterations; return best effort and warn. In practice
-    # this shouldn't fire for mainstream tokenizers at the sweep sizes we use.
-    actual = len(tokenizer.encode(decoded))
-    if actual != n:
-        print(
-            f"warning: prompt_of_length could not converge to exactly {n} "
-            f"tokens (got {actual}); latency sweep axis may be slightly off."
-        )
-    return decoded
+        # Give up after 16 iterations; return best effort and warn. In practice
+        # this shouldn't fire for mainstream tokenizers at the sweep sizes we use.
+        actual = len(tokenizer.encode(decoded))
+        if actual != n:
+            print(
+                f"warning: Prompts.of_length could not converge to exactly {n} "
+                f"tokens (got {actual}); latency sweep axis may be slightly off."
+            )
+        return decoded
 
+    @classmethod
+    def of_length(
+        cls, tokenizer: "PreTrainedTokenizerBase", n: int, *, variant: str = "src"
+    ) -> str:
+        """Return a prompt of exactly *n* tokens for the given tokenizer.
 
-def prompt_of_length(
-    tokenizer: "PreTrainedTokenizerBase", n: int, *, variant: str = "src"
-) -> str:
-    """Return a prompt of exactly *n* tokens for the given tokenizer.
-
-    Args:
-        tokenizer: The model's tokenizer.
-        n: Target token count.
-        variant: ``"src"`` or ``"tgt"`` — selects which base text is used.
-            Used by activation patching to get two distinct-but-structurally-
-            similar prompts.
-    """
-    base = _BASE_SRC if variant == "src" else _BASE_TGT
-    return _truncate_to_length(tokenizer, base, n)
+        Args:
+            tokenizer: The model's tokenizer.
+            n: Target token count.
+            variant: ``"src"`` or ``"tgt"`` — selects which base text is used.
+                Used by activation patching to get two distinct-but-structurally-
+                similar prompts.
+        """
+        base = cls.SRC if variant == "src" else cls.TGT
+        return cls._truncate_to_length(tokenizer, base, n)

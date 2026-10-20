@@ -64,11 +64,22 @@ export interface HeatmapColumnWindow {
  *  the rows with a re-collapse handle. The host owns the collapsed/expanded
  *  state (the core renders it and fires onToggleCollapse when a band/handle is
  *  clicked). Row indices always refer to original data rows, never visible
- *  positions. */
+ *  positions.
+ *
+ *  A `locked` section is always collapsed: its band has no expand affordance,
+ *  ignores clicks and fires no callbacks. Locked rows win over any other
+ *  section overlapping them — a section lying entirely within locked rows is
+ *  dropped, and expanding a partially overlapping one still leaves its locked
+ *  rows behind their bands. */
 export interface HeatmapCollapsedSection {
     start: number;
     end: number;
     collapsed?: boolean;
+    /** Always collapsed, not expandable or removable. */
+    locked?: boolean;
+    /** Replaces "hidden" in the band's "… N rows hidden" text (e.g.
+     *  "not computed"). */
+    label?: string;
 }
 
 /** A labelled tracker for a contiguous run of rows (inclusive, ORIGINAL
@@ -143,7 +154,9 @@ export interface HeatmapTableOptions {
     rowHighlights?: HeatmapRowHighlight[];
     /** Row ranges (original indices) hidden behind a collapsed band unless
      *  expanded. The host owns collapsed/expanded state; array index identifies
-     *  a section in onToggleCollapse. */
+     *  a section in onToggleCollapse / onRemoveCollapse (locked sections never
+     *  fire either). Non-locked sections are assumed not to overlap each
+     *  other. */
     collapsedSections?: HeatmapCollapsedSection[];
     /** Labelled trackers over row ranges (rail + rotated label in the left
      *  gutter). Collapse-responsive; the host should widen rowHeaderWidth to

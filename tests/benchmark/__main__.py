@@ -2,8 +2,10 @@
 
 Benchmarks are named, versioned JSON definitions in ``benchmarks/``
 (``local_latency``, ``remote_latency``, ``peak_mem``). A benchmark always
-runs whole and records one result in ``run.json``; ``--promote`` moves
-complete results into the committed ``baseline.json``.
+runs whole and records one result in ``results/tmp/run.json``
+(gitignored); ``--promote`` moves complete results into the committed
+``results/baseline.json`` and rewrites ``results/baseline.md`` and
+``results/baseline_diff_with_prev.md``.
 
 Usage:
     # Run every benchmark (best practice before promoting)
@@ -22,7 +24,8 @@ Usage:
     # Also show the last change of benchmarks not in run.json
     python -m tests.benchmark --show-diff --with-previous
 
-    # Promote complete benchmarks of run.json into baseline.json; commit it
+    # Promote complete benchmarks of run.json into baseline.json; commit
+    # results/ (baseline and its two reports)
     python -m tests.benchmark --promote
 """
 
@@ -37,26 +40,53 @@ from pathlib import Path
 _MD_DEFAULT = object()
 
 _INDIVIDUAL_ONLY_FLAGS = {
-    "--repeat", "--warmup", "--dtype", "--no-autocast", "--thresholds",
-    "--min-length", "--max-length",
+    "--repeat",
+    "--warmup",
+    "--dtype",
+    "--no-autocast",
+    "--thresholds",
+    "--min-length",
+    "--max-length",
+    "--padding-bias",
 }
 
 
-def _resolve_md_path(raw, mode: str, baseline_path: Path) -> Path | None:
-    """``None`` (no ``--md``), the default file next to the baseline, or the given path."""
+def _resolve_md_path(raw, mode: str) -> Path | None:
+    """``None`` (no ``--md``), the default file in ``results/tmp/``, or *raw*."""
+    from .store import ResultsStore
+
     if raw is None:
         return None
     if raw is _MD_DEFAULT:
-        filename = "results.md" if mode == "show" else "benchmark_diff.md"
-        return baseline_path.parent / filename
+        filename = "results.md" if mode == "show" else "diff.md"
+        ResultsStore.TMP_DIR.mkdir(parents=True, exist_ok=True)
+        return ResultsStore.TMP_DIR / filename
     return Path(raw)
 
 
+def _parse_padding_bias(text: str) -> int:
+    """``524288000`` or ``500MiB`` -> bytes (non-negative)."""
+    number, mib = text, text.lower().endswith("mib")
+    if mib:
+        number = text[:-3]
+    try:
+        value = float(number) * 2**20 if mib else int(number)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected bytes or NMiB, got {text!r}"
+        ) from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"padding bias must be >= 0, got {text!r}")
+    return int(value)
+
+
 def _parse_param(text: str) -> tuple[str, list]:
-    """``prompt_length=25`` or ``prompt_length=10,25`` -> ``("prompt_length", [10, 25])``."""
+    """``prompt_length=10,25`` -> ``("prompt_length", [10, 25])``."""
     key, _, value = text.partition("=")
     if not key or not value:
-        raise argparse.ArgumentTypeError(f"expected NAME=VALUE[,VALUE...], got {text!r}")
+        raise argparse.ArgumentTypeError(
+            f"expected NAME=VALUE[,VALUE...], got {text!r}"
+        )
     values = []
     for v in value.split(","):
         try:
@@ -70,53 +100,174 @@ def _parse_param(text: str) -> tuple[str, list]:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run performance benchmarks for nnsightful tools.")
+    p = argparse.ArgumentParser(
+        description="Run performance benchmarks for nnsightful tools."
+    )
 
     run = p.add_argument_group("running benchmarks")
-    run.add_argument("--all", action="store_true", help="Run every benchmark (best practice before --promote)")
-    run.add_argument("--benchmarks", nargs="+", default=None, metavar="NAME",
-                     help="Run these benchmarks (whole), e.g. local_latency peak_mem")
+    run.add_argument(
+        "--all",
+        action="store_true",
+        help="Run every benchmark (best practice before --promote)",
+    )
+    run.add_argument(
+        "--benchmarks",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="Run these benchmarks (whole), e.g. local_latency peak_mem",
+    )
 
-    ind = p.add_argument_group("individual tests (printed only, never written to run.json)")
-    ind.add_argument("--model", nargs="+", default=None, metavar="MODEL",
-                     help="Model substring(s) of the benchmark definitions, or a full HF name")
-    ind.add_argument("--tool", nargs="+", default=None, metavar="TOOL", help="Tool name substring(s)")
-    ind.add_argument("--param", action="append", type=_parse_param, default=None, metavar="NAME=V[,V]",
-                     help="Override a sweep parameter's values (latency), e.g. prompt_length=25")
+    ind = p.add_argument_group(
+        "individual tests (printed only, never written to run.json)"
+    )
+    ind.add_argument(
+        "--model",
+        nargs="+",
+        default=None,
+        metavar="MODEL",
+        help="Model substring(s) of the benchmark definitions, or a full HF name",
+    )
+    ind.add_argument(
+        "--tool", nargs="+", default=None, metavar="TOOL", help="Tool name substring(s)"
+    )
+    ind.add_argument(
+        "--param",
+        action="append",
+        type=_parse_param,
+        default=None,
+        metavar="NAME=V[,V]",
+        help="Override a sweep parameter's values (latency), e.g. prompt_length=25",
+    )
     ind.add_argument("--repeat", type=int, default=None, help="Override n_repeat")
     ind.add_argument("--warmup", type=int, default=None, help="Override n_warmup")
     ind.add_argument("--dtype", default=None, help="Override the local dtype")
-    ind.add_argument("--no-autocast", action="store_true", help="Run without NDIF's torch.autocast context")
-    ind.add_argument("--thresholds", nargs="+", type=float, default=None, help="Override peak_mem thresholds")
-    ind.add_argument("--min-length", type=int, default=None, help="Override the peak_mem search start")
-    ind.add_argument("--max-length", type=int, default=None, help="Override the peak_mem search cap")
+    ind.add_argument(
+        "--no-autocast",
+        action="store_true",
+        help="Run without NDIF's torch.autocast context",
+    )
+    ind.add_argument(
+        "--thresholds",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Override peak_mem thresholds",
+    )
+    ind.add_argument(
+        "--min-length",
+        type=int,
+        default=None,
+        help="Override the peak_mem search start",
+    )
+    ind.add_argument(
+        "--max-length", type=int, default=None, help="Override the peak_mem search cap"
+    )
+    ind.add_argument(
+        "--padding-bias",
+        type=_parse_padding_bias,
+        default=None,
+        metavar="BYTES",
+        help=(
+            "Override the peak_mem padding bias added to the weights in the "
+            "footprint (bytes, or e.g. 500MiB; 0 = weights only)"
+        ),
+    )
 
     show = p.add_argument_group("showing and diffing")
     show.add_argument("--show", action="store_true", help="Print run.json as tables")
-    show.add_argument("--show-diff", action="store_true", help="Print the diff of run.json vs baseline.json")
-    show.add_argument("--diff", action="store_true", help="After running, diff run.json against baseline.json")
-    show.add_argument("--with-previous", action="store_true",
-                      help="In diffs, also show each benchmark not in run.json vs. its previous baseline result")
-    show.add_argument("--detail", action="store_true",
-                      help="Full latency columns, every peak-memory point, and failed tests with errors")
-    show.add_argument("--dims", nargs="+", choices=["latency", "peak_mem"], default=None,
-                      help="Show only these dimensions")
-    show.add_argument("--tools", nargs="+", default=None, help="Show only rows whose tool contains any of these")
-    show.add_argument("--models", nargs="+", default=None, help="Show only rows whose model contains any of these")
+    show.add_argument(
+        "--show-diff",
+        action="store_true",
+        help="Print the diff of run.json vs baseline.json",
+    )
+    show.add_argument(
+        "--diff",
+        action="store_true",
+        help="After running, diff run.json against baseline.json",
+    )
+    show.add_argument(
+        "--with-previous",
+        action="store_true",
+        help=(
+            "In diffs, also show each benchmark not in run.json vs. its previous "
+            "baseline result"
+        ),
+    )
+    show.add_argument(
+        "--detail",
+        action="store_true",
+        help=(
+            "Full latency columns, every peak-memory point, and failed tests with "
+            "errors"
+        ),
+    )
+    show.add_argument(
+        "--dims",
+        nargs="+",
+        choices=["latency", "peak_mem"],
+        default=None,
+        help="Show only these dimensions",
+    )
+    show.add_argument(
+        "--tools",
+        nargs="+",
+        default=None,
+        help="Show only rows whose tool contains any of these",
+    )
+    show.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        help="Show only rows whose model contains any of these",
+    )
     show.add_argument("--remote", action="store_true", help="Show only remote latency")
     show.add_argument("--local", action="store_true", help="Show only local results")
-    show.add_argument("--md", nargs="?", default=None, const=_MD_DEFAULT,
-                      help="Also write the output as Markdown (default file next to baseline.json)")
-    show.add_argument("--plots", action="store_true", help="Embed plots in the Markdown (needs matplotlib)")
+    show.add_argument(
+        "--md",
+        nargs="?",
+        default=None,
+        const=_MD_DEFAULT,
+        help=(
+            "Also write the output as Markdown (default: results/tmp/results.md "
+            "or diff.md)"
+        ),
+    )
+    show.add_argument(
+        "--plots",
+        action="store_true",
+        help="Embed plots in the Markdown (needs matplotlib)",
+    )
 
     files = p.add_argument_group("files")
-    files.add_argument("--promote", action="store_true",
-                       help="Promote complete benchmarks of run.json into baseline.json and exit")
-    files.add_argument("-n", "--name", default=None, help="Run file tests/benchmark/NAME.json (shortcut for --run)")
-    files.add_argument("--run", "--latest", dest="run", type=Path, default=None,
-                       help="Path to the run file (default: tests/benchmark/run.json)")
-    files.add_argument("--baseline", type=Path, default=None,
-                       help="Path to the baseline file (default: tests/benchmark/baseline.json)")
+    files.add_argument(
+        "--promote",
+        action="store_true",
+        help=(
+            "Promote complete benchmarks of run.json into baseline.json, "
+            "rewrite its reports and exit"
+        ),
+    )
+    files.add_argument(
+        "-n",
+        "--name",
+        default=None,
+        help="Run file results/tmp/NAME.json (shortcut for --run)",
+    )
+    files.add_argument(
+        "--run",
+        "--latest",
+        dest="run",
+        type=Path,
+        default=None,
+        help="Path to the run file (default: results/tmp/run.json)",
+    )
+    files.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Path to the baseline file (default: results/baseline.json)",
+    )
     args = p.parse_args()
 
     if args.remote and args.local:
@@ -124,22 +275,34 @@ def _parse_args() -> argparse.Namespace:
     if args.name is not None:
         if args.run is not None:
             p.error("-n/--name and --run are mutually exclusive")
-        from .store import BENCH_DIR
+        from .store import ResultsStore
 
-        args.run = BENCH_DIR / f"{args.name}.json"
+        args.run = ResultsStore.TMP_DIR / f"{args.name}.json"
 
     args.individual = bool(args.model or args.tool or args.param)
     display = args.show or args.show_diff or args.promote
     if args.individual and (display or args.diff):
-        p.error("individual tests (--model / --tool / --param) aren't recorded; they can't be shown, diffed or promoted")
+        p.error(
+            "individual tests (--model / --tool / --param) aren't recorded; they "
+            "can't be shown, diffed or promoted"
+        )
     if not args.individual:
         provided = sorted(a for a in sys.argv[1:] if a in _INDIVIDUAL_ONLY_FLAGS)
         if provided:
-            p.error(f"{', '.join(provided)} only apply to individual tests; benchmarks use their definition's meta_params")
+            p.error(
+                f"{', '.join(provided)} only apply to individual tests; benchmarks "
+                "use their definition's meta_params"
+            )
     if not (display or args.individual or args.all or args.benchmarks):
-        p.error("nothing to do: pass --all, --benchmarks NAME..., individual-test flags, or --show / --show-diff / --promote")
+        p.error(
+            "nothing to do: pass --all, --benchmarks NAME..., individual-test flags, "
+            "or --show / --show-diff / --promote"
+        )
     if (args.all or args.benchmarks) and display:
-        p.error("run benchmarks and show / promote in separate invocations (use --diff to diff right after a run)")
+        p.error(
+            "run benchmarks and show / promote in separate invocations (use --diff "
+            "to diff right after a run)"
+        )
     return args
 
 
@@ -190,15 +353,24 @@ def _run_individual(args, defs: dict) -> None:
         chosen = [d for d in defs.values() if d["kind"] == "local"]
     params = dict(args.param or [])
     overrides = {
-        "n_repeat": args.repeat, "n_warmup": args.warmup, "dtype": args.dtype,
+        "n_repeat": args.repeat,
+        "n_warmup": args.warmup,
+        "dtype": args.dtype,
         "autocast": False if args.no_autocast else None,
         "thresholds": tuple(args.thresholds) if args.thresholds else None,
-        "min_length": args.min_length, "max_length": args.max_length,
+        "min_length": args.min_length,
+        "max_length": args.max_length,
+        "padding_bias": args.padding_bias,
     }
     results = {}
     for defn in chosen:
         result = run_individual(
-            defn, _loader(defn, args.dtype), models=args.model, tools=args.tool, params=params, **overrides,
+            defn,
+            _loader(defn, args.dtype),
+            models=args.model,
+            tools=args.tool,
+            params=params,
+            **overrides,
         )
         if result is not None:
             results[defn["name"]] = result
@@ -222,45 +394,49 @@ def main() -> None:
 def _main() -> None:
     args = _parse_args()
 
-    from .definitions import load_definitions
-    from .store import partial_notice
+    from .definitions import BenchmarkDefinition
+    from .store import ResultsStore
 
+    store = ResultsStore(run=args.run, baseline=args.baseline)
     if args.promote or args.show or args.show_diff:
-        notice = partial_notice(args.run)
+        notice = store.partial_notice()
         if notice:
             print(notice)
 
     if args.promote:
-        from .store import promote_files
-
-        promote_files(args.run, args.baseline)
+        store.promote()
         return
 
     if args.individual:
-        _run_individual(args, load_definitions())
+        _run_individual(args, BenchmarkDefinition.load_all())
         return
 
-    filter_remote: bool | None = True if args.remote else (False if args.local else None)
+    filter_remote: bool | None = (
+        True if args.remote else (False if args.local else None)
+    )
 
-    from .store import BASELINE_FILE
-
-    baseline_path = args.baseline or BASELINE_FILE
-    display = dict(tools=args.tools, models=args.models, remote=filter_remote, dims=args.dims)
+    display = dict(
+        tools=args.tools, models=args.models, remote=filter_remote, dims=args.dims
+    )
 
     if args.show:
         from .diff import markdown_results, print_results
 
         print_results(args.run, detail=args.detail, **display)
-        md_path = _resolve_md_path(args.md, "show", baseline_path)
+        md_path = _resolve_md_path(args.md, "show")
         if md_path is not None:
-            md_path.write_text(markdown_results(args.run, detail=args.detail, plots=args.plots, **display))
+            md_path.write_text(
+                markdown_results(
+                    args.run, detail=args.detail, plots=args.plots, **display
+                )
+            )
             print(f"\n  markdown written to {md_path}")
         return
 
     if not args.show_diff:
         from .runner import run_benchmark
 
-        for defn in _selected(args, load_definitions()):
+        for defn in _selected(args, BenchmarkDefinition.load_all()):
             run_benchmark(defn, _loader(defn), args.run)
         if not args.diff:
             return
@@ -269,11 +445,17 @@ def _main() -> None:
 
     print()
     print_diff(args.run, args.baseline, with_previous=args.with_previous, **display)
-    md_path = _resolve_md_path(args.md, "diff", baseline_path)
+    md_path = _resolve_md_path(args.md, "diff")
     if md_path is not None:
-        md_path.write_text(markdown_diff(
-            args.run, args.baseline, plots=args.plots, with_previous=args.with_previous, **display
-        ))
+        md_path.write_text(
+            markdown_diff(
+                args.run,
+                args.baseline,
+                plots=args.plots,
+                with_previous=args.with_previous,
+                **display,
+            )
+        )
         print(f"\n  markdown written to {md_path}")
 
 

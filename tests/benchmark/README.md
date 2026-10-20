@@ -7,12 +7,13 @@ versioned **benchmarks** defined in JSON:
 |-----------|------|----------|
 | `local_latency` | local (this machine's GPU, no NDIF) | wall-clock latency of each tool, bf16 under NDIF's autocast |
 | `remote_latency` | remote (production NDIF, `https://api.ndif.us`) | end-to-end latency excluding queue wait, with a per-phase breakdown |
-| `peak_mem` | local | the largest prompt length whose peak GPU memory beyond the weights stays within 10% / 25% / 50% of the model footprint |
+| `peak_mem` | local | the largest prompt length whose peak GPU memory beyond the weights stays within 10% / 25% / 50% of the model footprint (weights + NDIF's 500 MiB padding bias) |
 
 A benchmark always runs **whole** and produces one result with one
-environment stamp. Results go to a local `run.json`, are diffed against
-the committed `baseline.json`, and `--promote` makes complete results
-the new baseline.
+environment stamp. Results go to a local `results/tmp/run.json`, are
+diffed against the committed `results/baseline.json`, and `--promote`
+makes complete results the new baseline and rewrites its Markdown
+reports.
 
 ## Environment
 
@@ -46,16 +47,20 @@ Gated models (gemma, Llama) need `HF_TOKEN` in the environment.
    `run.json` vs. its baseline result, test by test.
 3. Happy with the numbers? `python -m tests.benchmark --promote` →
    every **complete** benchmark in `run.json` becomes the baseline;
-   incomplete ones are refused.
-4. `git add tests/benchmark/baseline.json && git commit`.
+   incomplete ones are refused. The baseline's two reports are
+   rewritten with plots.
+4. `git add tests/benchmark/results && git commit`.
 
 | File | Tracked by git? | Role |
 |------|-----------------|------|
 | `benchmarks/<name>.json` | **Yes** | The current definition of each benchmark |
 | `benchmarks/archive/<name>.v<N>.json` | **Yes** | Older definitions that recorded results still refer to |
-| `run.json` | **No** (gitignored) | The latest **finished** result of each benchmark run |
-| `run.partial.json` | **No** (gitignored) | Progress of benchmarks still running or interrupted (same format, not promotable) |
-| `baseline.json` | **Yes** | Per benchmark, the promoted result and the one it replaced (`previous`) |
+| `results/baseline.json` | **Yes** | Per benchmark, the promoted result and the one it replaced (`previous`) |
+| `results/baseline.md` | **Yes** | The baseline as Markdown tables with plots, written by `--promote` |
+| `results/baseline_diff_with_prev.md` | **Yes** | Each benchmark's baseline result vs. its `previous`, with plots, written by `--promote` |
+| `results/tmp/run.json` | **No** (`results/tmp/` is gitignored) | The latest **finished** result of each benchmark run |
+| `results/tmp/run.partial.json` | **No** | Progress of benchmarks still running or interrupted (same format, not promotable) |
+| `results/tmp/*.md` | **No** | Ad-hoc `--md` reports |
 
 ## Running
 
@@ -83,17 +88,18 @@ python -m tests.benchmark --show-diff --with-previous
 python -m tests.benchmark --show-diff --dims latency --tools logit_lens --models gpt2 Llama
 python -m tests.benchmark --show --remote        # or --local
 
-# Markdown export (default file next to baseline.json: results.md /
-# benchmark_diff.md), optionally with plots (needs matplotlib)
+# Markdown export (default file in results/tmp/: results.md / diff.md),
+# optionally with plots (needs matplotlib)
 python -m tests.benchmark --show --md
 python -m tests.benchmark --show-diff --md diff.md --plots
 
-# Promote complete benchmarks of run.json into baseline.json
+# Promote complete benchmarks of run.json into baseline.json and rewrite
+# baseline.md / baseline_diff_with_prev.md
 python -m tests.benchmark --promote
 ```
 
 Files: `--run PATH` (alias `--latest`) or `-n NAME`
-(`tests/benchmark/NAME.json`) choose the run file, `--baseline PATH` the
+(`results/tmp/NAME.json`) choose the run file, `--baseline PATH` the
 baseline. Running and showing / promoting are separate invocations
 (`--diff` diffs right after a run).
 
@@ -128,7 +134,7 @@ Each `benchmarks/<name>.json` defines one benchmark:
   (local only). There is one benchmark per (dimension, kind).
 - `meta_params`: `n_repeat`, `n_warmup`; locally `dtype` and
   `autocast`; for `peak_mem` also `swept`, `thresholds`, `min_length`,
-  `max_length` (see *Peak memory*).
+  `max_length`, `padding_bias` (see *Peak memory*).
 - `tools`: `tool` picks the nnsightful tool; `name` is what its tests
   are called (default: the tool). Latency tools sweep every combination
   of `sweep`; the test params are the sweep combo. Peak-memory tools
@@ -139,7 +145,7 @@ Each `benchmarks/<name>.json` defines one benchmark:
   `[length]` names, which match the results recorded before definitions
   existed.
 
-The Python side (`config.py`) only maps each tool name to its
+The Python side (`config.py`'s `ToolRegistry`) only maps each tool name to its
 nnsightful tool and to how its arguments are built per model: prompts
 of exactly *n* tokens (`prompts.py`), activation patching with
 equal-length source / target prompts patching the last position
@@ -198,9 +204,13 @@ model there has a lens.
 
 - `stats` per test: latency mean / std / min / max / samples in
   seconds (remote adds the four-phase `breakdown`); peak memory
-  `footprint_bytes`, `context_cap`, `max_prompt_length` (per threshold
-  label), `capped` and `points` (each probed length with `peak_bytes`,
-  `pct` and its own `latency`, or `oom: true`).
+  `footprint_bytes` (the thresholds' denominator: `weights_bytes` +
+  `padding_bias`), `weights_bytes`, `padding_bias` (bytes), `context_cap`,
+  `max_prompt_length` (per threshold label), `capped` and `points`
+  (each probed length with `peak_bytes`, `pct` and its own `latency`,
+  or `oom: true`). Results recorded before `padding_bias` existed
+  have no `weights_bytes` / `padding_bias`: their footprint is the
+  weights alone.
 - `failed` / `optional_failed`: tests that didn't succeed, with
   `status` `failed` (an exception, OOM, or the model failing to load),
   `unsupported` (e.g. no j-lens) or `not_run` (not measured yet, in an
@@ -210,8 +220,7 @@ model there has a lens.
 - `env`: one stamp for the whole benchmark —
   - both kinds: `git_hash`, `dirty` (the working tree has changes per
     `git status --porcelain`, untracked files included, ignoring the
-    benchmark outputs `baseline.json`, `results.md`,
-    `benchmark_diff.md`; `run.json` is gitignored), when dirty
+    benchmark outputs in `results/`), when dirty
     `dirty_fingerprint` (hash of the diff against HEAD plus untracked
     files), `timestamp`, and the nnsight / nnterp versions plus
     `<pkg>_commit` for packages installed from a git checkout;
@@ -304,7 +313,9 @@ BENCHMARK DIFF
 
 For remote rows Baseline / Current are `total_unqueued`. The
 peak-memory diff shows `baseline -> current (delta)` for each
-threshold's max prompt length (higher is better); in Markdown 🟢 / 🔴
+threshold's max prompt length (higher is better), and the footprint
+as `baseline -> current` when it differs (e.g. a baseline recorded
+without a padding bias); in Markdown 🟢 / 🔴
 mark rows whose lengths only grew / any shrank.
 
 ## Showing results
@@ -321,10 +332,19 @@ errors).
   --------------------------------------------------------------------
   logit_lens[length]    gpt2   prompt_length=10     113.8ms     11.0ms
 
-  Tool        Model                    Params                          Footprint    10%    25%    50%
-  ----------------------------------------------------------------------------------------------------
-  logit_lens  google/gemma-3-1b-pt     top_k=5, include_entropy=True     1.86GiB     14     35     70
+  Setup:  local, bfloat16, autocast, swept=prompt_length, repeat=3, footprint=weights + 500.0MiB padding bias
+  Cells:  largest prompt_length whose peak stays within N% of the model footprint (weights + padding bias)
+
+  Tool        Model                 Params                             Weights   Footprint       10%       25%       50%
+  ----------------------------------------------------------------------------------------------------------------------
+  logit_lens  google/gemma-3-1b-pt  top_k=5, include_entropy=True      1.86GiB     2.35GiB        18        44        88
 ```
+
+The numbers in this example are illustrative, not measured results.
+
+The Weights column and the Setup line's `footprint=` part only appear
+for results that record a `padding_bias`; older results show the
+footprint (= weights) alone.
 
 ## Individual tests
 
@@ -338,15 +358,17 @@ to `run.json` and can't be promoted.
 - `--param` replaces a latency sweep's values (e.g. a prompt length the
   definition doesn't have).
 - `--repeat`, `--warmup`, `--dtype`, `--no-autocast`, `--thresholds`,
-  `--min-length`, `--max-length` override the definition's
-  `meta_params` — for individual tests only; benchmark runs always use
-  their definition.
+  `--min-length`, `--max-length`, `--padding-bias` (→ `padding_bias`;
+  bytes, or e.g. `500MiB`) override the definition's `meta_params` —
+  for individual tests only; benchmark runs always use their
+  definition.
 
 ## Peak memory
 
-On NDIF each model's process gets a memory budget proportional to its
-weights, so what limits a tool is the memory it needs *beyond* the
-weights. `peak_mem` measures exactly that, locally:
+On NDIF each model's process gets a memory budget of its weights ×
+1.15 plus a flat padding bias of 500 MiB, so what limits a tool is the
+memory it needs *beyond* the weights. `peak_mem` measures exactly that,
+locally:
 
 - The model is loaded on the GPU in `dtype` and each call runs under
   `torch.autocast("cuda", dtype, cache_enabled=False)`, the context
@@ -355,8 +377,16 @@ weights. `peak_mem` measures exactly that, locally:
 - **Peak** = `torch.cuda.max_memory_allocated()` during the call minus
   `memory_allocated()` before it, measured once per point after
   `n_warmup` untimed calls. It is deterministic, so there is no repeat.
-- **Footprint** = parameter + buffer bytes of the loaded model;
-  **pct** = peak / footprint × 100.
+- **Footprint** = weights (parameter + buffer bytes of the loaded
+  model) + `padding_bias` bytes (`meta_params.padding_bias`, 500 MiB:
+  NDIF's minimum padding; also the default when a definition omits it;
+  `0` = weights only); **pct** = peak / footprint × 100, and
+  the thresholds are shares of it. The bias matters most for small
+  models: it is about 2× gpt2's bf16 weights, but a few % of an 8B
+  model's. Changing it is a definition change (new `config_hash`, so
+  bump the version); `--padding-bias` tries other values in individual
+  tests. Each result records `padding_bias` and `weights_bytes`, and
+  the Setup line shows it (`footprint=weights + 500.0MiB padding bias`).
 - **Search**: prompt length doubles from `min_length` until the peak
   exceeds the largest threshold or the cap is reached; then each
   threshold is bisected between its bracketing points to the exact
@@ -379,8 +409,9 @@ Besides the current format, only the original results format loads
 `legacy.py`): each kind's rows become one latency result, versioned by
 the current or archived definition whose test set they equal (or
 `version: null` if none matches). Any other file is rejected with an
-error naming it. Default paths fall back to `results.json` /
-`latest.json` when `baseline.json` / `run.json` don't exist.
+error naming it. Default paths fall back to the pre-rename
+`tests/benchmark/results.json` / `latest.json` when `baseline.json` /
+`run.json` don't exist.
 
 The results recorded before definitions existed became **v0** of
 `local_latency` and `remote_latency`, defined in
@@ -431,7 +462,14 @@ command with an error naming the file instead of being overwritten.
 `--md` writes the same tables as stdout but as Markdown, in addition
 to printing; works with `--show`, `--diff`, `--show-diff`. `--md PATH`
 picks the destination; `--md` alone writes `results.md` (show) or
-`benchmark_diff.md` (diffs) next to `baseline.json`.
+`diff.md` (diffs) in the gitignored `results/tmp/`.
+
+`--promote` writes the committed reports itself, always with plots,
+next to the baseline: `baseline.md` (the baseline, like `--show`) and
+`baseline_diff_with_prev.md` (each benchmark's result vs. the one it
+replaced, like `--show-diff`; a benchmark with no `previous` shows its
+tests as new). A partial promote rewrites both in full, so the diff
+always shows the last change of every benchmark.
 
 `--plots` (requires matplotlib via `pip install -e '.[plots]'`) embeds
 one line plot per (tool, section): mean latency (with ±1 std band) vs.
@@ -446,19 +484,40 @@ baseline (dashed). The Y-axis switches to log scale when values span
 | File | Purpose |
 |------|---------|
 | `benchmarks/*.json`, `benchmarks/archive/*.json` | Benchmark definitions (current and archived versions) |
-| `definitions.py` | Loading / validating definitions, tests, optional markers, `config_hash`, version warnings (pure) |
-| `config.py` | Tool name → nnsightful tool + argument builder; `tool_configs()` for a definition |
-| `prompts.py` | `prompt_of_length()` — prompts of an exact token count |
-| `runner.py` | `run_benchmark()`, `run_individual()`, `BenchmarkRunner` measurements, environment stamp |
-| `memory.py` | `search_max_lengths()` — coarse sweep + bisection for the threshold lengths (pure) |
-| `store.py` | Result format, status, env fields per kind, promotion, file loading (pure) |
+| `definitions.py` | `BenchmarkDefinition`: loading / validating definitions, tests, optional markers, `config_hash`, version warnings (pure) |
+| `config.py` | `ToolRegistry`: tool name → nnsightful tool + argument builder, and the runnable configs of a definition |
+| `prompts.py` | `Prompts.of_length()` — prompts of an exact token count |
+| `runner.py` | `run_benchmark()`, `run_individual()`, `BenchmarkRunner` (the shared run loop) |
+| `env.py` | `Env`: capturing the environment stamp and comparing stamps |
+| `meters.py` | Meters wrapping one tool call each: `LocalLatency`, `RemoteLatency`, `PeakMemory`; NDIF-style autocast |
+| `sweeps.py` | Sweep strategies: `GridSweep` (latency) and `ThresholdSearch` (peak memory: coarse sweep + bisection, pure) |
+| `store.py` | `Result` (format, status, promotion rules) and `ResultsStore` (run / baseline / in-progress files) (pure) |
 | `legacy.py` | Reader for the original `results.json` format (pure) |
 | `backend.py` | `RemoteBackendCounter` — per-phase latency for remote runs |
-| `diff.py` | `print_results`, `print_diff`, `markdown_results`, `markdown_diff` |
+| `diff.py` | Terminal and Markdown tables (`print_results`, `print_diff`, `markdown_results`, `markdown_diff`) |
 | `plots.py` | Latency and peak-memory plots for the Markdown export |
 | `__main__.py` | CLI entry point |
 | `test_benchmark.py` | Tests for the harness itself (no GPU / network): `pytest tests/benchmark` |
 | `fixtures/results_v1.json` | A results file in the original format, for the migration tests |
+
+## How a benchmark is measured
+
+`BenchmarkRunner` runs one loop for every benchmark: per model and
+test it builds the tool's arguments, warms up, runs a **meter** around
+each call, aggregates the stats, and turns failures into failed /
+unsupported results.
+
+- **Meters** (`meters.py`) are context managers around one tool call:
+  `LocalLatency` (synced wall clock), `RemoteLatency` (injects
+  `remote=True` and a fresh `backend=` counter, records the four
+  phases) and `PeakMemory` (peak allocated beyond what was allocated
+  before the call). An out-of-memory error is recorded on the meter
+  instead of raised. Local calls also run under NDIF's autocast.
+- **Sweeps** (`sweeps.py`): latency tests are the points of a
+  `GridSweep` over the definition's `sweep`; a peak-memory test is a
+  `ThresholdSearch`. Each probed length gets its warmup calls, one
+  `PeakMemory` call, then separate `LocalLatency` repeats — memory and
+  time are never measured in the same call.
 
 ## Notes
 

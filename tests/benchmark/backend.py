@@ -29,7 +29,13 @@ class RemoteBackendCounter(RemoteBackend):
 
         super().__init__(*args, **kwargs)
 
-    def handle_response(self, response, tracer=None):
+    def handle(self, response):
+        """Record the phase timestamps, then let ``RemoteBackend`` process the update.
+
+        nnsight routes every status update through ``handle``, and on
+        COMPLETED it also downloads the result, so the timestamps are taken
+        first to keep the download out of ``running``.
+        """
         status = response.status.value
 
         if status == "QUEUED" and self.queue_start == 0:
@@ -42,7 +48,7 @@ class RemoteBackendCounter(RemoteBackend):
             self.completed_time = time.time()
             self.run_latency = self.completed_time - self.run_start
 
-        return super().handle_response(response, tracer)
+        return super().handle(response)
 
     def get_latency(self) -> dict[str, float]:
         """Return per-phase latencies in seconds."""

@@ -16,7 +16,7 @@
 import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions, HeatmapRowHighlight, HeatmapCollapsedSection } from "../../types/heatmap-table";
-import { normalizeData, type NormalizedData } from "./normalize";
+import { normalizeData, uncomputedSections, type NormalizedData } from "./normalize";
 import { generateUid, escapeHtml } from "./utils";
 import { injectStyles, applyDarkMode } from "./styles";
 import { PALETTE, LINE_STYLES } from "./colors";
@@ -134,6 +134,7 @@ interface State {
     rowHighlights: HeatmapRowHighlight[];
     // Collapsible row sections (original ranges). The widget owns the
     // collapsed/expanded flags and flips them on the core's toggle callback.
+    // Host/user sections only — the data-derived locked ones live apart.
     collapsedSections: HeatmapCollapsedSection[];
 }
 
@@ -203,10 +204,22 @@ export function createWidget(
     let nRows = widgetData.tokens.length;
     let layerSummary: number[] = []; // max prob across rows, per absolute layer
     let finalPredToken = "";         // model's final next-token prediction
+    // Rows a sparse payload wasn't computed at, hidden behind locked bands.
+    // Appended after the host's sections so the core's section indices for
+    // the host's array (onToggleCollapse / onRemoveCollapse) are unchanged.
+    let uncomputed = new Set<number>();
+    let lockedSections: HeatmapCollapsedSection[] = [];
+
+    function isComputedRow(r: number): boolean {
+        return r >= 0 && r < nRows && !uncomputed.has(r);
+    }
 
     function recomputeDerived() {
         nLayers = widgetData.layers.length;
         nRows = widgetData.tokens.length;
+        lockedSections = uncomputedSections(widgetData);
+        uncomputed = new Set();
+        for (const sec of lockedSections) for (let r = sec.start; r <= sec.end; r++) uncomputed.add(r);
         layerSummary = [];
         for (let l = 0; l < nLayers; l++) {
             let mx = 0;
@@ -216,10 +229,12 @@ export function createWidget(
             }
             layerSummary.push(mx);
         }
-        finalPredToken = widgetData.cells[nRows - 1]?.[nLayers - 1]?.token ?? "";
-        // Drop any pinned rows / selection that fall outside the new data.
-        state.pinnedRows = state.pinnedRows.filter((p) => p >= 0 && p < nRows);
-        if (state.selectedRow !== null && state.selectedRow >= nRows) state.selectedRow = null;
+        const computed = widgetData.computedRows;
+        const lastRow = computed ? computed[computed.length - 1] ?? -1 : nRows - 1;
+        finalPredToken = widgetData.cells[lastRow]?.[nLayers - 1]?.token ?? "";
+        // Drop any pinned rows / selection outside the new data's computed rows.
+        state.pinnedRows = state.pinnedRows.filter(isComputedRow);
+        if (state.selectedRow !== null && !isComputedRow(state.selectedRow)) state.selectedRow = null;
         // Clamp view to data
         if (state.viewSize > nLayers || state.viewSize < 1) state.viewSize = nLayers;
         const maxStart = Math.max(0, nLayers - state.viewSize);
@@ -290,6 +305,7 @@ export function createWidget(
         return bestP >= 0.05 ? best : null;
     }
     function togglePinnedRow(pos: number) {
+        if (!isComputedRow(pos)) return;
         const idx = state.pinnedRows.indexOf(pos);
         if (idx >= 0) {
             // Unpin the row only. Any token auto-pinned earlier is left in
@@ -528,7 +544,9 @@ export function createWidget(
             renderRowLabel,
             rowClassName,
             rowHighlights: state.rowHighlights,
-            collapsedSections: state.collapsedSections,
+            collapsedSections: lockedSections.length
+                ? state.collapsedSections.concat(lockedSections)
+                : state.collapsedSections,
             onToggleCollapse: (idx) => {
                 const sec = state.collapsedSections[idx];
                 if (!sec) return;
@@ -799,6 +817,7 @@ export function createWidget(
     // SELECTION + LINE PLOT
     // ═══════════════════════════════════════════════════════════════
     function selectRow(row: number, layerIdx?: number, scroll = false) {
+        if (!isComputedRow(row)) return;
         state.selectedRow = row;
         state.selectedLayerIdx = layerIdx ?? widgetData.layers.length - 1;
         renderHeatmap();
@@ -951,7 +970,7 @@ export function createWidget(
 
     function showTooltip(row: number, layerIdx: number, clientX: number, clientY: number, cellWidth = 0) {
         const cell = widgetData.cells[row]?.[layerIdx];
-        if (!cell) return;
+        if (!cell || !isComputedRow(row)) return;
         const hex = baseHex();
         const truthRow = isBosToken(widgetData.tokens[row]) ? "bos" : tokenPlain(widgetData.tokens[row]);
         ttEl.innerHTML =
@@ -1004,7 +1023,7 @@ export function createWidget(
 
     function showPopup(row: number, layer: number, cellEl: HTMLElement) {
         const cellData = widgetData.cells[row]?.[layer];
-        if (!cellData) return;
+        if (!cellData || !isComputedRow(row)) return;
         // Capture the cell's screen rect BEFORE renderHeatmap() rebuilds the
         // grid (which detaches cellEl and would zero out its rect).
         const cellRect = cellEl.getBoundingClientRect();
@@ -1120,7 +1139,7 @@ export function createWidget(
     // in/out. The core fires onCellHover on cell *change*, so this is naturally
     // throttled to one preview per cell.
     function previewCellTrajectory(row: number, layer: number) {
-        if (lpHidden) return;
+        if (lpHidden || !isComputedRow(row)) return;
         const token = widgetData.cells[row]?.[layer]?.token;
         const traj = token != null ? trajectoryForToken(row, token) : null;
         if (traj) updateLinePlot({ values: traj.map((v) => v ?? null), label: tokenPlain(token!), color: "#999" });
@@ -1135,6 +1154,7 @@ export function createWidget(
     }
     function onHeatmapCellClick(row: number, layer: number, ev: MouseEvent) {
         // Shift-click → pin this cell's token trajectory directly.
+        if (!isComputedRow(row)) return;
         if (ev.shiftKey) {
             const tok = widgetData.cells[row]?.[layer]?.token;
             if (tok) { togglePin(tok); renderHeatmap(); updateLinePlot(); emitStateChange(); }
@@ -1170,9 +1190,10 @@ export function createWidget(
     heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
         if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
         e.preventDefault();
-        const cur = state.selectedRow ?? -1;
-        const next = e.key === "ArrowDown" ? Math.min(nRows - 1, cur + 1) : Math.max(0, cur - 1);
-        selectRow(next, undefined, true);
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        let next = (state.selectedRow ?? (step > 0 ? -1 : nRows)) + step;
+        while (next >= 0 && next < nRows && !isComputedRow(next)) next += step;
+        if (isComputedRow(next)) selectRow(next, undefined, true);
     });
 
     // Navigator buttons

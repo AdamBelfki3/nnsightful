@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING, Callable, Optional, Any
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 
-from ..types import JLensData, JLensMeta
+from ..types import JLensData
 from ._base import Tool
+from ._utils import IndexSpec
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
@@ -32,6 +33,8 @@ class JLensTool(Tool):
         load_jacobians: Download a lens checkpoint and return its per-layer
             Jacobian tensors.
     """
+
+    data_class = JLensData
 
     NEURON_JLENS_REPO = "neuronpedia/jacobian-lens"
     NEURON_JLENS_SUFFIX = "_jacobian_lens.pt"
@@ -119,81 +122,12 @@ class JLensTool(Tool):
 
     # ----- JLENS IMPLEMENTATION ---------------------------------------------
 
-    def _format(
-        self,
-        logits: torch.Tensor,
-        model: StandardizedTransformer,
-        input_ids,
-        top_k: int = 5,
-        include_entropy: bool=True,
-        results: Optional[dict[Any, Any]]=None,
-    ) -> dict[Any, Any]:
-        """Format one step's ``[layer, pos, vocab]`` lens logits.
-
-        Overwrites ``logits`` in place (probabilities, then ``p * log p``) so no
-        second tensor of this size is allocated. Top-k is ranked on the logits;
-        softmax runs per layer with ``dtype`` pinned, since NDIF's autocast would
-        otherwise return it in float32.
-        """
-        input_tokens = [
-            str(model.tokenizer.decode(token))
-            for token in input_ids
-        ]
-        layers = list(range(model.num_layers))
-        positions = list(range(len(input_tokens)))
-
-        _, top_indices = torch.topk(logits, k=top_k, dim=-1)
-
-        probs = logits
-        for layer_probs in probs:
-            layer_probs.copy_(torch.nn.functional.softmax(layer_probs, dim=-1, dtype=layer_probs.dtype))
-
-        # TOP-K
-        topks = [[model.tokenizer.batch_decode(torch.tensor(pos).unsqueeze(dim=1)) for pos in layer] for layer in top_indices.tolist()]
-
-        # TRAJECTORIES: trajectories[pos]{token_str: [prob_l0, prob_l1, ...etc]}
-        unique_indices = [
-            torch.unique(top_indices[:, pi, :].flatten(), sorted=False).tolist()
-            for pi in range(top_indices.shape[1])
-        ]
-        tracked_probs = probs.permute(1, 2, 0)
-        trajectories = [{model.tokenizer.decode(token): torch.round(tracked_probs[pos_idx][token].float(), decimals=3).tolist() for token in pos}  for pos_idx, pos in enumerate(unique_indices)]
-
-        # ENTROPY: entropy[l_idx][pos]
-        if include_entropy:
-            entropy = -probs.xlogy_(probs).sum(dim=-1, dtype=torch.float32)
-            entropy = torch.round(entropy, decimals=3).tolist()
-        else:
-            entropy = None
-
-        step = {
-            "meta": {"version": 2, "timestamp": "3h", "model": model.repo_id},
-            "layers": layers,
-            "input": input_tokens,
-            "tracked": trajectories,
-            "topk": topks,
-            "entropy": entropy,
-            "positions": positions,
-        }
-
-        if results is None:
-            return step
-
-        results["input"].extend(step["input"])
-        results["tracked"].extend(step["tracked"])
-        for l_idx in range(len(results["topk"])):
-            results["topk"][l_idx].extend(step["topk"][l_idx])
-        if results["entropy"] is not None and step["entropy"] is not None:
-            for l_idx in range(len(results["entropy"])):
-                results["entropy"][l_idx].extend(step["entropy"][l_idx])
-        results["positions"] = list(range(len(results["input"])))
-        return results
-
     def _run(
         self,
         model: StandardizedTransformer,
         prompt: str,
         *args,
+        positions: IndexSpec=None,
         jacobians: Optional[dict[int, torch.Tensor]]=None,
         max_new_tokens: int=1,
         generate_kwargs: Optional[dict]=None,
@@ -203,7 +137,7 @@ class JLensTool(Tool):
         raw:bool =False,
         post_transform: Optional[Callable]=None,
         **kwargs
-    ) -> torch.Tensor|dict[Any, Any]|Any:
+    ) -> JLensData|torch.Tensor|Any:
         """Run j-lens over ``max_new_tokens`` generation steps.
 
         The lens is applied at every forward pass of ``model.generate``: the
@@ -212,6 +146,16 @@ class JLensTool(Tool):
         logits are concatenated so the result spans the whole prompt + generated
         sequence — i.e. ``max_new_tokens=1`` reproduces the old single-pass
         behavior over the prompt.
+
+        ``positions`` (an :data:`~nnsightful.tools._utils.IndexSpec`, default
+        all) selects among the *prompt* positions, resolved against the prompt
+        length; only those rows of the prefill pass are projected, so its
+        buffer scales with the selection. Every generated position is still
+        included (one row per decode step). The payload's ``positions`` is then
+        the selected prompt indices followed by the generated positions'
+        absolute indices (``None`` when ``positions`` is ``None``), and the
+        ``raw`` tensor holds the same rows in that order. ``input`` and
+        ``completion`` always hold every token.
 
         When ``jacobians`` is not supplied, the lens for ``model.repo_id`` is
         resolved and loaded automatically (raising ``ValueError`` if the model
@@ -223,7 +167,14 @@ class JLensTool(Tool):
         ``min_new_tokens`` defaults to ``max_new_tokens``: nnsight drops the code
         after a ``tracer.iter`` loop that asks for more steps than the run makes,
         so an early EOS must not cut the run short.
+
+        Raises:
+            ValueError: if ``positions`` is empty or outside the prompt.
         """
+        prompt_len = len(model.tokenizer.encode(prompt))
+        selected = self._select_positions(positions, prompt_len)
+        prompt_index = self._position_index(selected)
+
         # Fresh dict per call — never a shared mutable default, or a previous
         # model's Jacobians would leak into the next call on this singleton.
         if jacobians is None:
@@ -244,14 +195,18 @@ class JLensTool(Tool):
                     jacobians.update(JLensTool.load_jacobians(filename, repo_id))
 
                 gen_logits = list() #[num_layers, seq, vocab]
-                for _ in tracer.iter[:gen_kwargs["max_new_tokens"]]:
+                for step in tracer.iter[:gen_kwargs["max_new_tokens"]]:
+                    if step == 0 and selected is not None:
+                        index, n_rows = prompt_index, len(selected)
+                    else:
+                        index, n_rows = slice(None), model.input_size[1]
                     step_logits = torch.empty(
-                        (model.num_layers, model.input_size[1], model.vocab_size),
+                        (model.num_layers, n_rows, model.vocab_size),
                         dtype=model.lm_head.weight.dtype,
                         device=model.lm_head.weight.device,
-                    ) # [num_layers, seq, vocab]
+                    ) # [num_layers, pos, vocab]
                     for l_idx in range(model.num_layers):
-                        res = model.layers[l_idx].layer_output
+                        res = model.layers[l_idx].layer_output[:, index]
                         if l_idx < model.num_layers - 1:
                             jac = jacobians[l_idx].to(device=res.device)
                             res = res @ jac.T.to(res.dtype)
@@ -264,33 +219,20 @@ class JLensTool(Tool):
                 if raw:
                     results =  torch.cat([step for step in gen_logits], dim=1).cpu().save() # [layer, pos, vocab]
                 else:
-                    input_ids = output_ids[0].tolist()
-                    results = None
-                    offset = 0
-                    for step in gen_logits:
-                        seq = step.shape[1]
-                        step_ids = input_ids[offset : offset + seq]
-                        offset += seq
-                        results = self._format(step, model, step_ids, results=results, **kwargs)
-
-                    prompt_len = int(gen_logits[0].shape[1])
-                    results["completion"] = results["input"][prompt_len:]
-                    results["input"] = results["input"][:prompt_len]
-                    results["positions"] = None
-
-                    results = results.save()
+                    results = self.format(
+                        gen_logits,
+                        model,
+                        prompt,
+                        token_ids=output_ids[0].tolist(),
+                        positions=selected,
+                        **kwargs,
+                    )
+                    results.save()
 
         if remote and non_blocking:
             return backend.job_id
 
         return results
-
-    @staticmethod
-    def to_data_obj(**kwargs):
-        meta_dict = kwargs['meta']
-        kwargs['meta'] = JLensMeta(**meta_dict)
-
-        return JLensData(**kwargs)
 
 
 j_lens = JLensTool()
