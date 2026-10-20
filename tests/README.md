@@ -38,6 +38,11 @@ types, so a wrong number fails, not just a wrong shape.
   entropy without changing the rest (entropy is computed in place, last).
 - **Tool**: `raw=True` returns the `[layer, pos, vocab]` logits on CPU, whose
   last layer is the model's logits.
+- **Positions**: each `positions` form (negative, range, list, list of
+  ranges) gives exactly the full run's rows for those positions, with
+  `positions` listing them and `input` still every token; `raw=True` holds
+  only those rows (the buffer is allocated at the selection's size); an empty
+  or out-of-range selection raises `ValueError` before tracing.
 
 ### `test_j_lens.py`
 
@@ -50,6 +55,12 @@ types, so a wrong number fails, not just a wrong shape.
 - **Generation**: with `max_new_tokens=n`, positions span the prompt plus
   `n - 1` generated tokens, `completion` matches `model.generate`, and the
   raw tensor concatenates the steps.
+- **Positions**: selecting prompt positions keeps every generated one, and
+  the rows equal the full run's; `positions` is the selected prompt indices
+  followed by the generated ones, which the viz densifies back onto the
+  prompt + generated rows; `raw=True` holds the same rows; a selection
+  outside the prompt (generated positions included) raises before
+  generating.
 
 ### `test_activation_patching.py`
 
@@ -72,7 +83,8 @@ Every tool through every way of running it:
 - **Remote** (`--remote`): the blocking backend, the non-blocking
   submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
   with `non_blocking=True`, then `await` the backend) each reproduce the
-  local run's labels and top predictions.
+  local run's labels and top predictions. The lenses also run with
+  `positions` set (a list, and a range), so both indexing forms run on NDIF.
 
 ### `test_utils.py`, `test_viz.py`
 

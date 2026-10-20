@@ -6,7 +6,7 @@ import torch
 
 from ..types import LogitLensData, LogitLensMeta
 from ._base import Tool
-from ._utils import IndexSpec, resolve_indices
+from ._utils import IndexSpec
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
@@ -64,6 +64,7 @@ class LogitLensTool(Tool):
         model: StandardizedTransformer,
         prompt: str,
         *args,
+        positions: IndexSpec=None,
         remote: bool=False,
         backend: Optional=None,
         non_blocking=False,
@@ -71,11 +72,28 @@ class LogitLensTool(Tool):
         post_transform: Optional[Callable]=None,
         **kwargs
     ) -> torch.Tensor|dict[Any, Any]|Any:
+        """Run the logit lens on ``prompt``.
+
+        ``positions`` (an :data:`~nnsightful.tools._utils.IndexSpec`, default
+        all) selects the prompt positions to project onto the vocabulary. Only
+        those rows are projected, so the ``[layer, pos, vocab]`` buffer — and
+        the cost — scales with the selection rather than the prompt length.
+        ``topk``, ``tracked`` and ``entropy`` (and the ``raw`` tensor) cover
+        the selected positions in order; ``positions`` lists their absolute
+        indices and ``input`` still holds every prompt token.
+
+        Raises:
+            ValueError: if ``positions`` is empty or outside the prompt.
+        """
+        n_tokens = len(model.tokenizer.encode(prompt))
+        selected = self._select_positions(positions, n_tokens)
+        index = self._position_index(selected)
 
         def format(
             logits: torch.Tensor,
             model: StandardizedTransformer,
             prompt,
+            positions: list[int] | None,
             top_k: int = 5,
             include_entropy: bool=True
         ) -> dict[Any, Any]:
@@ -93,7 +111,8 @@ class LogitLensTool(Tool):
                 for token in model.tokenizer.encode(prompt)
             ]
             layers = list(range(model.num_layers))
-            positions = list(range(len(input_tokens)))
+            if positions is None:
+                positions = list(range(len(input_tokens)))
 
             _, top_indices = torch.topk(logits, k=top_k, dim=-1)
 
@@ -133,19 +152,21 @@ class LogitLensTool(Tool):
 
         with torch.no_grad():
             with model.trace(prompt, remote=remote, backend=backend) as tracer:
+                n_rows = model.input_size[1] if selected is None else len(selected)
                 all_logits = torch.empty(
-                    (model.num_layers, model.input_size[1], model.vocab_size),
+                    (model.num_layers, n_rows, model.vocab_size),
                     dtype=model.lm_head.weight.dtype,
                     device=model.lm_head.weight.device,
-                ) # [num_layers, seq, vocab]
+                ) # [num_layers, pos, vocab]
 
                 for l_idx in range(model.num_layers):
-                    all_logits[l_idx] = model.project_on_vocab(model.layers[l_idx].layer_output)[0]
+                    layer_output = model.layers[l_idx].layer_output[:, index]
+                    all_logits[l_idx] = model.project_on_vocab(layer_output)[0]
 
                 if raw:
                     results = all_logits.to('cpu').save()
                 else:
-                    results = format(all_logits, model, prompt, **kwargs)
+                    results = format(all_logits, model, prompt, selected, **kwargs)
 
                 results.save()
 

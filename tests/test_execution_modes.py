@@ -6,8 +6,10 @@ JSON trip to the frontend.
 
 Remote (``--remote``): the blocking backend, the non-blocking submit-then-poll
 flow workbench uses, and nnsight's ``AsyncRemoteBackend`` each return the
-payload the local run does. Results are compared on what is robust to the
-server's hardware and dtype: the token labels and top predictions.
+payload the local run does. The lenses also run with ``positions`` set (a
+list for the logit lens, a range for j-lens). Results are compared on what is
+robust to the server's hardware and dtype: the token labels and top
+predictions.
 """
 
 from __future__ import annotations
@@ -75,6 +77,24 @@ CASES = [
         JLensData,
         inputs=lambda model: ((PROMPT,), dict(top_k=3, max_new_tokens=2)),
         key=lambda d: (d.input, d.completion, d.topk[-1][-1][0]),
+        needs_lens=True,
+    ),
+    ToolCase(
+        "logit_lens[positions]",
+        logit_lens,
+        LogitLensData,
+        inputs=lambda model: ((PROMPT,), dict(top_k=3, positions=[0, -1])),
+        key=lambda d: (d.input, d.positions, d.topk[-1][-1][0]),
+    ),
+    ToolCase(
+        "j_lens[positions]",
+        j_lens,
+        JLensData,
+        inputs=lambda model: (
+            (PROMPT,),
+            dict(top_k=3, max_new_tokens=2, positions=(-2, -1)),
+        ),
+        key=lambda d: (d.input, d.completion, d.positions, d.topk[-1][-1][0]),
         needs_lens=True,
     ),
     ToolCase(

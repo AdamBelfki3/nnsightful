@@ -8,6 +8,7 @@ import torch
 from nnsightful.tools import j_lens as j_lens_module
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
+from nnsightful.viz import _densify_logit_lens_data
 
 from .helpers import decode_each
 
@@ -130,3 +131,77 @@ class TestGeneration:
 
         assert raw.device.type == "cpu"
         assert raw.shape == (model.num_layers, n_pos, model.vocab_size)
+
+
+@pytest.fixture(scope="module")
+def full(model, has_lens):
+    """The unselected run the selections are checked against."""
+    return j_lens(model, PROMPT, max_new_tokens=TestPositions.MAX_NEW_TOKENS, top_k=3)
+
+
+class TestPositions:
+    """``positions`` selects prompt rows; every generated row is still there."""
+
+    MAX_NEW_TOKENS = 3
+
+    def test_selected_and_generated_rows_are_the_full_runs_rows(self, model, full):
+        n_prompt = len(full.input)
+        data = j_lens(
+            model,
+            PROMPT,
+            max_new_tokens=self.MAX_NEW_TOKENS,
+            top_k=3,
+            positions=[-1, 1],
+        )
+        rows = [1, n_prompt - 1, n_prompt, n_prompt + 1]
+
+        assert data.positions == rows
+        assert data.input == full.input
+        assert data.completion == full.completion
+        assert data.tracked == [full.tracked[p] for p in rows]
+        assert data.topk == [[layer[p] for p in rows] for layer in full.topk]
+        assert data.entropy == [[layer[p] for p in rows] for layer in full.entropy]
+
+    def test_densified_for_the_widget_it_matches_the_full_run(self, model, full):
+        """The viz expands the selection back onto the prompt + generated rows."""
+        data = j_lens(
+            model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, top_k=3, positions=(0, 2)
+        )
+        dense = _densify_logit_lens_data(data.model_dump())
+        kept = set(data.positions)
+
+        assert len(dense["tracked"]) == len(full.input) + len(full.completion)
+        for pos, tracked in enumerate(dense["tracked"]):
+            assert tracked == (full.tracked[pos] if pos in kept else {})
+        for layer, full_layer in zip(dense["topk"], full.topk):
+            assert layer == [
+                cell if p in kept else [] for p, cell in enumerate(full_layer)
+            ]
+
+    def test_raw_holds_the_selected_then_generated_rows(self, model, has_lens):
+        full = j_lens._run(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)
+        raw = j_lens._run(
+            model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True, positions=2
+        )
+        n_prompt = len(model.tokenizer.encode(PROMPT))
+        rows = [2, n_prompt, n_prompt + 1]
+
+        assert raw.shape == (model.num_layers, len(rows), model.vocab_size)
+        torch.testing.assert_close(raw, full[:, rows], atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("spec", [lambda n: n, lambda n: [-n - 1], lambda n: []])
+    def test_bad_selection_raises_before_generating(self, model, monkeypatch, spec):
+        """Positions resolve against the prompt: generated rows can't be selected."""
+
+        def no_generate(*args, **kwargs):
+            raise AssertionError("generated despite an invalid selection")
+
+        monkeypatch.setattr(model, "generate", no_generate)
+        n_prompt = len(model.tokenizer.encode(PROMPT))
+        with pytest.raises(ValueError, match="positions="):
+            j_lens(
+                model,
+                PROMPT,
+                max_new_tokens=self.MAX_NEW_TOKENS,
+                positions=spec(n_prompt),
+            )

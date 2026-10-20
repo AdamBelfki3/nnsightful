@@ -346,12 +346,16 @@ def _validate_line_plot_data(data: dict) -> None:
 
 
 def _densify_logit_lens_data(data: dict) -> dict:
-    """Expand sparse-position LogitLensData to dense format for the JS widget."""
+    """Expand sparse-position LogitLensData to dense format for the JS widget.
+
+    Rows span ``input`` plus any ``completion`` (j-lens generated tokens), as
+    the widget lays them out.
+    """
     positions = data.get("positions")
     if positions is None:
         return data
 
-    n_tokens = len(data["input"])
+    n_tokens = len(data["input"]) + len(data.get("completion") or [])
     n_layers = len(data["layers"])
     pos_set = {p: i for i, p in enumerate(positions)}
 

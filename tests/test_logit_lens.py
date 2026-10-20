@@ -103,3 +103,61 @@ class TestTool:
         torch.testing.assert_close(
             raw[-1].float(), reference["logits"], atol=1e-3, rtol=1e-3
         )
+
+
+class TestPositions:
+    """``positions`` projects only the selected rows, equal to the full run's."""
+
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            (lambda n: -1, lambda n: [n - 1]),
+            (lambda n: (1, 3), lambda n: [1, 2]),
+            (lambda n: [3, 0, -2, 3], lambda n: sorted({0, 3, n - 2})),
+            (lambda n: [(0, 2), (-1, n)], lambda n: [0, 1, n - 1]),
+        ],
+        ids=["negative", "range", "list", "ranges"],
+    )
+    def test_selected_rows_are_the_full_runs_rows(
+        self, model, reference, spec, expected
+    ):
+        full = reference["data"]
+        n_pos = len(full.input)
+        spec, expected = spec(n_pos), expected(n_pos)
+        data = logit_lens(model, PROMPT, top_k=3, positions=spec)
+
+        assert data.positions == expected
+        assert data.input == full.input
+        assert data.tracked == [full.tracked[p] for p in expected]
+        assert data.topk == [[layer[p] for p in expected] for layer in full.topk]
+        assert data.entropy == [[layer[p] for p in expected] for layer in full.entropy]
+
+    def test_raw_holds_only_the_selected_rows(self, model):
+        """The raw tensor is the lens buffer, allocated at the selection's size."""
+        full = logit_lens._run(model, PROMPT, raw=True)
+        raw = logit_lens._run(model, PROMPT, raw=True, positions=[1, -1])
+
+        assert raw.shape == (model.num_layers, 2, model.vocab_size)
+        torch.testing.assert_close(raw, full[:, [1, -1]])
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            lambda n: n,
+            lambda n: -n - 1,
+            lambda n: (n - 1, n + 1),
+            lambda n: [0, n],
+            lambda n: [],
+            lambda n: (2, 2),
+        ],
+        ids=["past-end", "before-start", "range", "list", "empty-list", "empty-range"],
+    )
+    def test_bad_selection_raises_before_tracing(self, model, monkeypatch, spec):
+        def no_trace(*args, **kwargs):
+            raise AssertionError("traced despite an invalid selection")
+
+        monkeypatch.setattr(model, "trace", no_trace)
+        with pytest.raises(ValueError, match="positions="):
+            logit_lens(
+                model, PROMPT, positions=spec(len(model.tokenizer.encode(PROMPT)))
+            )
