@@ -37,6 +37,41 @@ data = j_lens(model, prompt, max_new_tokens=5, positions=-1)
 data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
 ```
 
+### Running on NDIF
+
+Every tool takes `remote=True` to run on [NDIF](https://ndif.us); the result
+is formatted there and only the payload comes back.
+
+```python
+# Blocking: waits for the job and returns the data, as locally
+data = logit_lens(model, prompt, remote=True)
+
+# Non-blocking: submit, get the job id, and collect the result later
+from nnsight.intervention.backends.remote import RemoteBackend
+
+job_id = logit_lens(model, prompt, remote=True, non_blocking=True,
+                    backend=RemoteBackend(model.to_model_key(), blocking=False))
+poll = RemoteBackend(model.to_model_key(), job_id=job_id, blocking=False)
+saves = poll()                    # None until the job completes
+data = saves["results"]
+
+# Async: an AsyncRemoteBackend gives a RemoteRun, consumed on an event loop
+from nnsight.intervention.backends.remote import AsyncRemoteBackend
+
+run = logit_lens(model, prompt, remote=True,
+                 backend=AsyncRemoteBackend(model.to_model_key()))
+data = await run                  # wait for the result
+
+# ...or stream the job's status updates as they land, e.g. to a client
+async for update in run:
+    print(update.status)          # RECEIVED, QUEUED, RUNNING, ... COMPLETED
+data = run.result
+```
+
+A `RemoteRun` is consumed once (await it or iterate it), and an `ERROR`
+status raises `RemoteError`. The data classes are built on NDIF, so the
+client's pydantic version has to match the server's to load them.
+
 ### Jupyter visualizations
 
 ```python

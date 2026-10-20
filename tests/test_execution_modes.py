@@ -1,14 +1,14 @@
 """Every tool through every way of running it, locally and on NDIF.
 
-Local: ``tool(...)`` and ``_run`` (how workbench runs tools locally) return
-the typed payload, which survives the JSON trip to the frontend.
+Local: ``tool(...)`` returns the typed payload, which survives the JSON trip
+to the frontend.
 
 Remote (``--remote``): the blocking backend, the non-blocking submit-then-poll
-flow workbench uses, and nnsight's ``AsyncRemoteBackend`` each return the
-payload the local run does. The lenses also run with ``positions`` set (a
-list for the logit lens, a range for j-lens). Results are compared on what is
-robust to the server's hardware and dtype: the token labels and top
-predictions.
+flow workbench uses, and nnsight's ``AsyncRemoteBackend`` (a ``RemoteRun``,
+awaited or streamed) each return the payload the local run does. The lenses
+also run with ``positions`` set (a list for the logit lens, a range for
+j-lens). Results are compared on what is robust to the server's hardware and
+dtype: the token labels and top predictions.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from typing import Any, Callable
 
 import pytest
 from nnsight.intervention.backends.remote import AsyncRemoteBackend, RemoteBackend
+from nnsight.schema.response import Status
 
-from nnsightful.tools._base import Tool
+from nnsightful.tools._base import RemoteRun, Tool
 from nnsightful.tools.activation_patching import activation_patching
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
@@ -163,19 +164,33 @@ class TestRemote:
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
-    def test_async_backend(self, model, case, local_payload):
-        """Submit without waiting (``_run`` returns None), then await the backend."""
+    def test_async_backend_await(self, model, case, local_payload):
+        """An ``AsyncRemoteBackend`` gives a ``RemoteRun``, which awaits to the data."""
         args, kwargs = case.call_args(model)
 
         async def run():
             backend = AsyncRemoteBackend(model.to_model_key())
-            returned = case.tool(
-                model, *args, remote=True, backend=backend, non_blocking=True, **kwargs
-            )
-            return returned, await backend
+            remote_run = case.tool(model, *args, remote=True, backend=backend, **kwargs)
+            assert isinstance(remote_run, RemoteRun)
+            return await remote_run
 
-        returned, saves = asyncio.run(run())
-        assert returned is None
-        data = saves["results"]
+        data = asyncio.run(run())
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
+
+    def test_async_backend_stream(self, model, case, local_payload):
+        """A ``RemoteRun`` streams the job's status updates, then holds the data."""
+        args, kwargs = case.call_args(model)
+
+        async def run():
+            backend = AsyncRemoteBackend(model.to_model_key())
+            remote_run = case.tool(model, *args, remote=True, backend=backend, **kwargs)
+            statuses = [update.status async for update in remote_run]
+            return remote_run, statuses
+
+        remote_run, statuses = asyncio.run(run())
+        assert statuses[-1] == Status.COMPLETED
+        assert Status.RUNNING in statuses
+        assert remote_run.job_id
+        assert type(remote_run.result) is case.data_type
+        assert case.key(remote_run.result) == case.key(local_payload)

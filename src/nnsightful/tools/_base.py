@@ -4,12 +4,57 @@ from typing import TYPE_CHECKING, Any
 
 import nnsight
 import torch
+from nnsight.intervention.backends.remote import AsyncRemoteBackend, RemoteError
+from nnsight.schema.response import ResponseModel, Status
 
 from ..types import ToolData
 from ._utils import IndexSpec, resolve_indices
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
+
+
+class RemoteRun:
+    """A tool run submitted to NDIF through an ``AsyncRemoteBackend``.
+
+    Returned by a tool called with ``remote=True`` and an
+    ``AsyncRemoteBackend``: the job is already submitted, and nothing waits
+    on it until the run is consumed, on an asyncio event loop.
+
+    ``await`` it for the tool's result, or iterate it with ``async for`` to
+    get each NDIF status update (a ``ResponseModel``) as it lands — e.g. to
+    stream progress to a client — after which the result is on
+    :attr:`result`. Either way an ``ERROR`` status raises ``RemoteError``.
+    A run is consumed once: its backend's status stream can't be replayed.
+    """
+
+    def __init__(self, backend: AsyncRemoteBackend):
+        self.backend = backend
+        self.job_id: str | None = None
+        self.result: ToolData | Any = None
+
+    def __await__(self):
+        return self._resolve().__await__()
+
+    async def _resolve(self) -> ToolData | Any:
+        async for _ in self:
+            pass
+        return self.result
+
+    async def __aiter__(self):
+        """Yield each status update, then keep the job's result on :attr:`result`.
+
+        The job's saves come last from the backend; the tool saved its
+        result as ``results`` (see :meth:`Tool.__call__`).
+        """
+        async for update in self.backend:
+            if not isinstance(update, ResponseModel):
+                self.result = update["results"]
+                return
+            self.job_id = update.id
+            yield update
+            if update.status == Status.ERROR:
+                raise RemoteError(update.description)
 
 
 class Tool():
@@ -40,6 +85,17 @@ class Tool():
         job_id = tool(model, prompt, remote=True, backend=backend, non_blocking=True)
         # ... later, from a backend polling that job ...
         data = backend()["results"]
+
+    On an asyncio event loop, pass an ``AsyncRemoteBackend`` to get a
+    :class:`RemoteRun`, and await it or stream its status updates::
+
+        run = tool(model, prompt, remote=True,
+                   backend=AsyncRemoteBackend(model.to_model_key()))
+        data = await run
+        # or
+        async for update in run:
+            print(update.status)
+        data = run.result
     """
 
     data_class: type[ToolData]
@@ -57,8 +113,9 @@ class Tool():
         """Run the tool.
 
         Returns the :attr:`data_class` instance; with ``raw=True`` the
-        unformatted tensors (see :meth:`_raw`), and with ``remote`` and
-        ``non_blocking`` the NDIF job id to poll.
+        unformatted tensors (see :meth:`_raw`). Remote runs with an
+        ``AsyncRemoteBackend`` return a :class:`RemoteRun` for that result,
+        and other remote runs with ``non_blocking`` the NDIF job id to poll.
         """
         run_kwargs, format_kwargs = self._prepare(model, *args, **kwargs)
 
@@ -70,6 +127,8 @@ class Tool():
                 results = self._format(model, outputs, **format_kwargs)
             nnsight.save(results)
 
+        if remote and isinstance(backend, AsyncRemoteBackend):
+            return RemoteRun(backend)
         if remote and non_blocking:
             return backend.job_id
 
