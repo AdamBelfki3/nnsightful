@@ -1,141 +1,331 @@
 /**
- * Generate scoped CSS for a LogitLens widget instance.
- * All rules are scoped to #${uid} to avoid conflicts.
+ * Scoped CSS for the redesigned LogitLens widget.
+ *
+ * The design follows the Workbench design system (tokens.css). Those CSS
+ * variables only exist in the workbench app, so we re-declare the subset
+ * we need *locally* on the widget root — that way the widget looks right
+ * in a Jupyter notebook (no globals.css) AND in the workbench (where our
+ * local values simply match the inherited ones). Dark mode swaps the same
+ * locals via the `.ll-dark` class, which the host toggles.
+ *
+ * Heatmap CELLS always render on a light field (white → ramp blend) in
+ * both themes — they are the data ink. Only the surrounding chrome
+ * (card, labels, strips, navigator) adapts to dark mode.
  */
 export function generateStyles(uid: string): string {
+    const root = `#${uid}`;
     return `
-        #${uid} {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0; padding: 0; position: relative;
+        ${root} {
+            /* ── Local design tokens (light) ── */
+            --ll-surface: hsl(0 0% 100%);
+            --ll-surface-2: hsl(0 0% 98%);
+            --ll-surface-3: hsl(0 0% 97%);
+            --ll-card-border: hsl(0 0% 82%);
+            --ll-line: hsl(0 0% 90%);
+            --ll-line-2: hsl(0 0% 88%);
+            --ll-line-faint: hsl(0 0% 93%);
+            --ll-text: hsl(0 0% 9%);
+            --ll-text-2: hsl(0 0% 20%);
+            --ll-text-muted: hsl(0 0% 40%);
+            --ll-text-faint: hsl(0 0% 58%);
+            --ll-primary: hsl(217.2193 91.2195% 59.8039%);
+            --ll-primary-061: hsl(217.2193 91.2195% 59.8039% / 0.06);
+            --ll-primary-018: hsl(217.2193 91.2195% 59.8039% / 0.18);
+            --ll-primary-007: hsl(217.2193 91.2195% 59.8039% / 0.07);
+            --ll-shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
+            --ll-font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+            --ll-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+            box-sizing: border-box;
+            position: relative;
+            font-family: var(--ll-font-sans);
+            color: var(--ll-text);
+            -webkit-font-smoothing: antialiased;
+            background: var(--ll-surface);
+            border: 1px solid var(--ll-card-border);
+            border-radius: 0.75rem;
+            box-shadow: var(--ll-shadow-xs);
+            padding: 20px;
+            /* width:100% + max-width:100% + min-width:0 keep the card bounded
+               to its container (never grown by the wide heatmap inside, which
+               fits its columns to width and scrolls within .ll-heatmap). */
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            overflow: hidden;
             -webkit-user-select: none; user-select: none;
-            display: flex; flex-direction: column; height: 100%;
+            /* Flex column in BOTH modes: the heatmap (.ll-heatmap, hosting the
+               HeatmapTableCore) flex-grows to absorb available height and the
+               core scrolls inside it; the navigator and line plot keep their
+               natural size below.
+                - Content (Jupyter): applyCardSizing sets an inline max-height
+                  on the root from --ll-aspect-ratio, so the card caps at the
+                  width×ratio box and the heatmap scrolls inside it (faithful
+                  to the old applyOuterCap).
+                - Fill (workbench): .ll-fill makes the card fill the panel. */
+            display: flex; flex-direction: column;
         }
-        #${uid} .ll-title { font-size: var(--ll-title-size, 20px); font-weight: 600; margin-bottom: 8px; padding: 2px 0; }
-        #${uid} .color-mode-btn {
-            display: inline-block; padding: 0; background: white;
-            border-radius: 4px; font-size: var(--ll-title-size, 20px); cursor: pointer; color: #333; border: none;
+        ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
+
+        /* ── Dark theme overrides (chrome only; cells stay light) ── */
+        ${root}.ll-dark {
+            --ll-surface: hsl(0 0% 16%);
+            --ll-surface-2: hsl(0 0% 13%);
+            --ll-surface-3: hsl(0 0% 20%);
+            --ll-card-border: hsl(0 0% 26%);
+            --ll-line: hsl(0 0% 26%);
+            --ll-line-2: hsl(0 0% 30%);
+            --ll-line-faint: hsl(0 0% 24%);
+            --ll-text: hsl(0 0% 90%);
+            --ll-text-2: hsl(0 0% 80%);
+            --ll-text-muted: hsl(0 0% 64%);
+            --ll-text-faint: hsl(0 0% 55%);
+            color-scheme: dark;
         }
-        #${uid} .color-mode-btn:hover { background: #f5f5f5; }
-        #${uid} .ll-table { border-collapse: collapse; font-size: var(--ll-content-size, 14px); table-layout: fixed; }
-        #${uid} .ll-table td, #${uid} .ll-table th { border: 1px solid #ddd; box-sizing: border-box; }
-        #${uid} .pred-cell {
-            height: 22px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            padding: 2px 4px; font-family: monospace; font-size: calc(var(--ll-content-size, 14px) * 0.9);
-            cursor: pointer; position: relative;
+
+        /* Flex roles for the card's stacked regions (see #${uid} above).
+           .ll-heatmap (fixed layer header + scrollable rows) takes the
+           growable slot; nav + line plot keep their natural size. */
+        ${root} .ll-heatmap { flex: 1 1 auto; min-height: 0; }
+        ${root} .ll-nav,
+        ${root} .ll-lineplot-wrap { flex: 0 0 auto; }
+
+        /* Fill mode (workbench): the host panel already frames the widget, so
+           drop our own card chrome (border, rounded corner, shadow, surface
+           background, padding) — it would otherwise be a redundant box inside
+           the panel. The notebook (content mode) keeps the full card since it
+           stands alone in a cell. */
+        ${root}.ll-fill {
+            width: 100%; height: 100%;
+            border: none; border-radius: 0; box-shadow: none;
+            background: transparent; padding: 0;
         }
-        #${uid} .pred-cell:hover { outline: 2px solid #e91e63; outline-offset: -1px; }
-        #${uid} .pred-cell.selected { background: #fff59d !important; color: #333 !important; }
-        #${uid} .input-token {
-            padding: 2px 8px; text-align: right; font-weight: 500; color: #333;
-            background: #f5f5f5; white-space: nowrap; overflow: hidden;
-            text-overflow: ellipsis; font-family: monospace; font-size: var(--ll-content-size, 14px);
-            cursor: pointer; position: relative;
+
+        /* Leading-space marker, used in cell + row-label token rendering. */
+        ${root} .ll-lead-space { color: #3b82f6; }
+
+        /* ── Heatmap region: rendered by HeatmapTableCore, mounted into
+              .ll-heatmap. The core owns the grid (fixed header, scroll, cells,
+              corner rounding, hover outline) under its OWN #hmx_* root — which
+              is nested inside this widget root, so the #uid-scoped rules below
+              reach the few domain visuals we inject into the core's labels /
+              rows via renderRowLabel + rowClassName (bos pill, dash marker,
+              active-row rail + tint, row cursor). ── */
+        ${root} .ll-heatmap {
+            display: flex; flex-direction: column;
+            min-width: 0; max-width: 100%;
         }
-        #${uid} .input-token:hover { background: #e8e8e8; }
-        #${uid} tr:has(.input-token:hover) { outline: 2px solid rgba(255, 193, 7, 0.8); outline-offset: -1px; }
-        #${uid} tr:has(.input-token:hover) .input-token { background: #fff59d !important; }
-        #${uid} .layer-hdr {
-            padding: 4px 2px; text-align: center; font-weight: 500; color: #666;
-            background: #f5f5f5; font-size: calc(var(--ll-content-size, 14px) * 0.9); position: relative;
+        /* Every logit-lens row is clickable (pin position / open popup). */
+        ${root} .ll-hmx-row .hmx-row-grid,
+        ${root} .ll-hmx-row .hmx-rowlabel { cursor: pointer; }
+        /* Active row (selected or pinned): a left accent rail + a subtle tint.
+           The cells are opaque, so the tint reads in the label gutter — the old
+           .ll-row-sel look. .hmx-row is position:relative (core), so ::before
+           anchors to it. */
+        ${root} .hmx-row.ll-hmx-active::before {
+            content: ""; position: absolute; left: -1px; top: 0; bottom: 0;
+            width: 3px; background: var(--ll-primary); border-radius: 2px; z-index: 2;
         }
-        #${uid} .corner-hdr { padding: 4px 8px; text-align: right; font-weight: 500; color: #666; background: white; position: relative; }
-        #${uid} .chart-container { margin-top: 8px; background: transparent; border-radius: 4px; padding: 8px 0; flex: 1; min-height: 120px; }
-        #${uid} .chart-container svg { display: block; margin: 0; padding: 0; }
-        #${uid} .popup {
-            display: none; position: absolute; background: white; border: 1px solid #ddd;
-            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 12px;
-            z-index: 100; min-width: 180px; max-width: 280px;
+        ${root} .hmx-row.ll-hmx-active .hmx-row-grid {
+            background: var(--ll-surface-2);
+            box-shadow: 0 0 0 1px var(--ll-primary-018);
+            border-radius: 4px;
         }
-        #${uid} .popup.visible { display: block; }
-        #${uid} .popup-header { font-weight: 600; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
-        #${uid} .popup-header code { font-weight: 400; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); background: #f5f5f5; padding: 2px 6px; border-radius: 3px; margin-left: 4px; }
-        #${uid} .popup-close { position: absolute; top: 8px; right: 10px; cursor: pointer; color: #999; font-size: var(--ll-title-size, 20px); }
-        #${uid} .popup-close:hover { color: #333; }
-        #${uid} .topk-item {
-            padding: 4px 6px; margin: 2px 0; border-radius: 3px; cursor: pointer;
-            display: flex; justify-content: space-between;
-            font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2));
+        /* Pinned-row line-style marker + bos pill, emitted by renderRowLabel. */
+        ${root} .ll-row-style { flex-shrink: 0; }
+        ${root} .ll-bos-pill {
+            display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
+            border: 1px solid var(--ll-line-2); border-radius: 3px;
+            font-family: var(--ll-font-mono); font-size: 10px; font-weight: 500;
+            color: var(--ll-text-muted); background: var(--ll-surface-3); letter-spacing: 0.02em;
         }
-        #${uid} .topk-item:hover { background: #f0f0f0; }
-        #${uid} .topk-item.active { background: #f0f0f0; }
-        #${uid} .topk-token { font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        #${uid} .topk-prob { color: #666; margin-left: 8px; }
-        #${uid} .topk-item.pinned { border-left: 3px solid currentColor; }
-        #${uid} .resize-handle {
-            position: absolute; width: 6px; height: 100%; background: transparent;
-            cursor: col-resize; right: -3px; top: 0; z-index: 10;
+
+        /* Generation phase (keyed by original row index, so it survives
+           collapse): generated token labels are italic only — same color as
+           every other token label. */
+        ${root} .ll-gen-row .hmx-rowlabel .hmx-cell-text { font-style: italic; }
+
+        /* On-demand fold handle (⊟) in the row-label gutter: revealed on row
+           hover, lit while it's the fold anchor. margin-right:auto pushes it to
+           the outer (left) edge so it reads as a side control and doesn't shift
+           the right-aligned token. */
+        ${root} .ll-fold-handle {
+            margin-right: auto; flex: 0 0 auto;
+            display: none; align-items: center; justify-content: center;
+            width: 15px; height: 15px; border-radius: 4px;
+            border: 1px solid var(--ll-line-2); background: var(--ll-surface);
+            color: var(--ll-text-muted); font-size: 11px; line-height: 1; cursor: pointer;
         }
-        #${uid} .resize-handle:hover, #${uid} .resize-handle.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-handle-input {
-            position: absolute; width: 6px; height: 100%; background: transparent;
-            cursor: col-resize; right: -3px; top: 0; z-index: 10;
+        ${root} .hmx-row:hover .ll-fold-handle { display: inline-flex; }
+        ${root} .ll-fold-handle:hover { border-color: var(--ll-primary); color: var(--ll-primary); }
+        ${root} .ll-fold-handle.ll-armed {
+            display: inline-flex; border-color: var(--ll-primary);
+            color: var(--ll-primary); background: var(--ll-primary-061);
         }
-        #${uid} .resize-handle-input:hover, #${uid} .resize-handle-input.dragging { background: rgba(76, 175, 80, 0.4); }
-        #${uid} .table-wrapper { position: relative; display: inline-block; }
-        #${uid} .resize-handle-bottom {
-            position: absolute; bottom: -3px; left: 0; right: 0; height: 6px;
-            cursor: row-resize; background: transparent;
+
+        /* ── Layer navigator ── */
+        ${root} .ll-nav { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
+        ${root} .ll-nav-range {
+            font-family: var(--ll-font-mono); font-size: 11.5px; color: var(--ll-text-2);
+            white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 110px;
         }
-        #${uid} .resize-handle-bottom:hover, #${uid} .resize-handle-bottom.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-handle-right {
-            position: absolute; top: 0; bottom: 0; right: -3px; width: 6px;
-            cursor: ew-resize; background: transparent;
+        ${root} .ll-nav-range .ll-nav-range-key {
+            color: var(--ll-text-muted); margin-right: 6px;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            font-family: var(--ll-font-sans); font-size: 10px;
         }
-        #${uid} .resize-handle-right:hover, #${uid} .resize-handle-right.dragging { background: rgba(33, 150, 243, 0.4); }
-        #${uid} .resize-hint { font-size: calc(var(--ll-content-size, 14px) * 0.9); color: #999; margin-top: 4px; cursor: default; }
-        #${uid} .resize-hint-extra { display: none; }
-        #${uid}.show-all-handles .resize-handle,
-        #${uid}.show-all-handles .resize-handle-input,
-        #${uid}.show-all-handles .resize-handle-right { background: rgba(33, 150, 243, 0.3); }
-        #${uid} .color-menu {
-            display: none; position: absolute; background: white; border: 1px solid #ddd;
-            border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 200; min-width: 150px;
+        ${root} .ll-nav-range .ll-dim { color: var(--ll-text-faint); }
+        ${root} .ll-nav-mid { flex: 1; position: relative; min-width: 0; }
+        ${root} .ll-skyline {
+            position: relative; height: 28px; background: var(--ll-surface-3);
+            border: 1px solid var(--ll-line-2); border-radius: 4px;
+            cursor: grab; user-select: none; touch-action: none; overflow: hidden;
         }
-        #${uid} .color-menu.visible { display: block; }
-        #${uid} .color-menu-item { padding: 0; cursor: pointer; font-size: min(var(--ll-title-size, 20px), calc((var(--ll-content-size, 14px) + var(--ll-title-size, 20px)) / 2)); display: flex; align-items: stretch; }
-        #${uid} .color-menu-item:hover, #${uid} .color-menu-item.picking { background: #f0f0f0; }
-        #${uid} .color-menu-item .color-menu-label { padding: 8px 12px 8px 0; flex: 1; }
-        #${uid} .color-menu-item .color-swatch { width: 32px; height: auto; min-height: 24px; border: 0; border-left: 1px solid #ccc; background: transparent; cursor: pointer; opacity: 0; transition: opacity 0.15s; padding: 0; -webkit-appearance: none; -moz-appearance: none; appearance: none; }
-        #${uid} .color-menu-item:hover .color-swatch, #${uid} .color-menu-item.picking .color-swatch { opacity: 1; }
-        #${uid} .color-menu-item .color-swatch:hover { border-left-color: #666; }
-        #${uid} .legend-close { cursor: pointer; }
-        #${uid} .legend-close:hover { fill: #e91e63 !important; }
-        @keyframes menuBlink-${uid} {
-            0% { background: #f0f0f0; }
-            50% { background: #d0d0d0; }
-            100% { background: #f0f0f0; }
+        ${root} .ll-skyline.ll-grabbing { cursor: grabbing; }
+        ${root} .ll-skyline-bars {
+            position: absolute; inset: 0; display: flex; align-items: flex-end;
+            pointer-events: none;
         }
-        /* Dark mode */
-        #${uid}.dark-mode { background: #1e1e1e; color: #e0e0e0; }
-        #${uid}.dark-mode .ll-title { color: #e0e0e0; }
-        #${uid}.dark-mode .color-mode-btn { background: #2d2d2d; color: #e0e0e0; }
-        #${uid}.dark-mode .color-mode-btn:hover { background: #3d3d3d; }
-        #${uid}.dark-mode .ll-table td, #${uid}.dark-mode .ll-table th { border-color: #444; }
-        #${uid}.dark-mode .pred-cell { color: #e0e0e0; }
-        #${uid}.dark-mode .pred-cell.selected { background: #4a4a00 !important; color: #fff !important; }
-        #${uid}.dark-mode .input-token { background: #2d2d2d; color: #e0e0e0; }
-        #${uid}.dark-mode .input-token:hover { background: #3d3d3d; }
-        #${uid}.dark-mode tr:has(.input-token:hover) .input-token { background: #4a4a00 !important; color: #fff !important; }
-        #${uid}.dark-mode .layer-hdr { background: #2d2d2d; color: #aaa; }
-        #${uid}.dark-mode .corner-hdr { background: #1e1e1e; color: #aaa; }
-        #${uid}.dark-mode .chart-container { background: transparent; }
-        #${uid}.dark-mode .popup { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
-        #${uid}.dark-mode .popup-header { border-bottom-color: #444; }
-        #${uid}.dark-mode .popup-header code { background: #3d3d3d; color: #e0e0e0; }
-        #${uid}.dark-mode .popup-close { color: #888; }
-        #${uid}.dark-mode .popup-close:hover { color: #e0e0e0; }
-        #${uid}.dark-mode .topk-item:hover { background: #3d3d3d; }
-        #${uid}.dark-mode .topk-item.active { background: #3d3d3d; }
-        #${uid}.dark-mode .topk-prob { color: #aaa; }
-        #${uid}.dark-mode .color-menu { background: #2d2d2d; border-color: #444; }
-        #${uid}.dark-mode .color-menu-item:hover, #${uid}.dark-mode .color-menu-item.picking { background: #3d3d3d; }
-        #${uid}.dark-mode .color-menu-item .color-swatch { border-left-color: #555; }
-        #${uid}.dark-mode .resize-hint { color: #888; }
-        @keyframes menuBlink-${uid}-dark {
-            0% { background: #3d3d3d; }
-            50% { background: #4d4d4d; }
-            100% { background: #3d3d3d; }
+        ${root} .ll-skyline-bar { flex: 1; min-width: 1px; }
+        ${root} .ll-skyline-win {
+            position: absolute; top: -1px; bottom: -1px;
+            background: var(--ll-primary-007); border: 1.5px solid var(--ll-primary);
+            border-radius: 4px; box-shadow: 0 0 0 3px var(--ll-primary-007);
+            pointer-events: none;
         }
+        ${root} .ll-skyline-handle {
+            position: absolute; top: 4px; bottom: 4px; width: 2px;
+            background: var(--ll-primary); border-radius: 2px;
+        }
+        ${root} .ll-nav-ticks {
+            position: relative; height: 12px; margin-top: 2px;
+            font-family: var(--ll-font-mono); font-size: 9.5px;
+            color: var(--ll-text-faint); font-variant-numeric: tabular-nums;
+        }
+        ${root} .ll-nav-tick { position: absolute; white-space: nowrap; }
+        ${root} .ll-nav-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        ${root} .ll-nav-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 26px; height: 26px; padding: 0;
+            border: 1px solid var(--ll-line-2); background: var(--ll-surface);
+            color: var(--ll-text-2); border-radius: 4px; cursor: pointer;
+        }
+        ${root} .ll-nav-btn:hover:not(:disabled) { background: var(--ll-surface-3); color: var(--ll-text); }
+        ${root} .ll-nav-btn:disabled { opacity: 0.35; cursor: default; }
+        ${root} .ll-nav-sep { width: 1px; height: 16px; background: var(--ll-line-2); margin: 0 4px; }
+
+        /* ── Line plot (kept on cell click) ── */
+        ${root} .ll-lineplot-wrap {
+            margin-top: 14px; padding-top: 14px;
+            border-top: 1px solid var(--ll-line-faint);
+        }
+        ${root} .ll-lineplot-wrap.ll-hidden { display: none; }
+        ${root} .ll-lineplot-head {
+            display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+        }
+        ${root} .ll-lineplot-title {
+            font-size: 11px; color: var(--ll-text-muted);
+            letter-spacing: 0.06em; text-transform: uppercase;
+        }
+        ${root} .ll-lineplot-token { font-family: var(--ll-font-mono); font-size: 12px; color: var(--ll-text); }
+        /* Definite-height box so LinePlotCore's height:100% resolves and the
+           plot can't grow unbounded (it sets height:100% on its mount). */
+        /* Height is set inline by applyLinePlotHeight() so the plot's aspect
+           ratio stays proportional to the widget's; 200px is just a fallback
+           before the first sizing pass. */
+        ${root} .ll-lineplot-box { height: 200px; overflow: hidden; }
+        ${root} .ll-lineplot { width: 100%; height: 100%; }
+
+        /* ── Tooltip ──
+           Sized in em so its root font-size (set inline, proportional to the
+           hovered cell's width and capped) scales the whole box uniformly. */
+        ${root} .ll-tooltip {
+            position: absolute; font-size: 11px;
+            width: max-content; max-width: 11.5em; padding: 0.5em 0.62em;
+            background: var(--ll-surface); border: 1px solid var(--ll-line-2);
+            border-radius: 0.42em;
+            box-shadow: 0 4px 14px -4px rgba(0,0,0,0.12), 0 2px 5px -2px rgba(0,0,0,0.08);
+            pointer-events: none; z-index: 50; font-family: var(--ll-font-sans);
+            display: none;
+        }
+        ${root} .ll-tooltip.ll-visible { display: block; }
+        ${root} .ll-tt-head { display: flex; align-items: center; gap: 0.45em; }
+        ${root} .ll-tt-swatch { width: 0.85em; height: 0.85em; border-radius: 0.15em; border: 1px solid var(--ll-line-2); flex-shrink: 0; }
+        ${root} .ll-tt-token {
+            font-family: var(--ll-font-mono); font-size: 0.97em; font-weight: 500;
+            color: var(--ll-text); max-width: 8.5em;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        ${root} .ll-tt-grid {
+            margin-top: 0.36em; display: grid; grid-template-columns: auto auto; justify-content: space-between;
+            gap: 0.1em 0.7em; font-size: 0.85em; color: var(--ll-text-muted);
+        }
+        ${root} .ll-tt-grid .ll-tt-val {
+            font-family: var(--ll-font-mono); color: var(--ll-text); text-align: right;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+
+        /* ── Top-k popup (portaled to <body>, so it carries its own token
+              block + ID-scoped selectors; .ll-dark mirrored from the root). ── */
+        #${uid}_popup {
+            --p-surface: hsl(0 0% 100%);
+            --p-border: hsl(0 0% 86%);
+            --p-line: hsl(0 0% 92%);
+            --p-text: hsl(0 0% 12%);
+            --p-text-2: hsl(0 0% 38%);
+            --p-muted: hsl(0 0% 50%);
+            --p-hover: hsl(0 0% 96%);
+            --p-code: hsl(0 0% 95%);
+            --p-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+            --p-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+            box-sizing: border-box;
+            display: none; position: fixed; z-index: 100;
+            flex-direction: column; min-height: 0;
+            min-width: 0; max-width: 280px;
+            background: var(--p-surface); border: 1px solid var(--p-border);
+            border-radius: 6px;
+            box-shadow: 0 6px 20px -4px rgba(0,0,0,0.18), 0 2px 6px -2px rgba(0,0,0,0.10);
+            padding: 12px; font-family: var(--p-sans); color: var(--p-text);
+            overflow: hidden;
+            -webkit-user-select: none; user-select: none;
+        }
+        #${uid}_popup.ll-visible { display: flex; }
+        #${uid}_popup.ll-dark {
+            --p-surface: hsl(0 0% 18%); --p-border: hsl(0 0% 30%); --p-line: hsl(0 0% 28%);
+            --p-text: hsl(0 0% 90%); --p-text-2: hsl(0 0% 70%); --p-muted: hsl(0 0% 60%);
+            --p-hover: hsl(0 0% 24%); --p-code: hsl(0 0% 26%); color-scheme: dark;
+        }
+        #${uid}_popup .ll-lead-space { color: #3b82f6; }
+        #${uid}_popup .ll-popup-close {
+            position: absolute; top: 6px; right: 9px; cursor: pointer;
+            color: var(--p-muted); font-size: 17px; line-height: 1;
+        }
+        #${uid}_popup .ll-popup-close:hover { color: var(--p-text); }
+        #${uid}_popup .ll-popup-header {
+            flex: 0 0 auto;
+            font-weight: 600; font-size: 13px; padding-right: 16px;
+            margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--p-line);
+        }
+        #${uid}_popup .ll-popup-sub {
+            font-weight: 400; font-size: 11.5px; color: var(--p-text-2); margin-top: 3px;
+        }
+        #${uid}_popup .ll-popup-sub code {
+            font-family: var(--p-mono); background: var(--p-code);
+            padding: 1px 5px; border-radius: 3px;
+        }
+        #${uid}_popup .ll-popup-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+        #${uid}_popup .ll-topk {
+            display: flex; justify-content: space-between; align-items: center; gap: 10px;
+            padding: 3px 6px; border-radius: 3px; cursor: pointer;
+            border-left: 3px solid transparent;
+            font-family: var(--p-mono); font-size: 12px;
+        }
+        #${uid}_popup .ll-topk:hover { background: var(--p-hover); }
+        #${uid}_popup .ll-topk-tok {
+            color: var(--p-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            -webkit-user-select: text; user-select: text;
+        }
+        #${uid}_popup .ll-topk-prob { color: var(--p-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
     `;
 }
 
@@ -146,12 +336,17 @@ export function injectStyles(uid: string): HTMLStyleElement {
     return style;
 }
 
-export function applyDarkMode(widgetEl: HTMLElement, enabled: boolean): void {
-    if (enabled) {
-        widgetEl.classList.add("dark-mode");
-        widgetEl.style.colorScheme = "dark";
-    } else {
-        widgetEl.classList.remove("dark-mode");
-        widgetEl.style.colorScheme = "";
-    }
+export function applyDarkMode(
+    widgetEl: HTMLElement,
+    enabled: boolean,
+    ...extras: (HTMLElement | null | undefined)[]
+): void {
+    const toggle = (el: HTMLElement) => {
+        if (enabled) el.classList.add("ll-dark");
+        else el.classList.remove("ll-dark");
+    };
+    toggle(widgetEl);
+    if (enabled) widgetEl.style.colorScheme = "dark";
+    else widgetEl.style.colorScheme = "";
+    for (const el of extras) if (el) toggle(el);
 }

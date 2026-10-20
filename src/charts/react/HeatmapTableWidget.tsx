@@ -5,20 +5,26 @@ import { HeatmapTableCore } from "../core/heatmap-table";
 interface HeatmapTableWidgetProps {
     data: HeatmapTableData;
     cellWidth?: number;
+    cellHeight?: number;
     rowHeaderWidth?: number;
     darkMode?: boolean;
+    showGrid?: boolean;
+    cornerLabel?: string;
     maxRows?: number | null;
-    onCellHover?: (row: number, col: number) => void;
-    onCellClick?: (row: number, col: number) => void;
-    onRowHeaderClick?: (row: number) => void;
+    onCellHover?: (row: number, col: number, ev: MouseEvent) => void;
+    onCellClick?: (row: number, col: number, ev: MouseEvent) => void;
+    onRowHeaderClick?: (row: number, ev: MouseEvent) => void;
     onCellLeave?: () => void;
 }
 
 export function HeatmapTableWidget({
     data,
     cellWidth = 44,
+    cellHeight,
     rowHeaderWidth = 100,
     darkMode = false,
+    showGrid,
+    cornerLabel,
     maxRows,
     onCellHover,
     onCellClick,
@@ -30,9 +36,9 @@ export function HeatmapTableWidget({
     const callbacksRef = useRef({ onCellHover, onCellClick, onRowHeaderClick, onCellLeave });
     callbacksRef.current = { onCellHover, onCellClick, onRowHeaderClick, onCellLeave };
 
-    const stableCellHover = useCallback((row: number, col: number) => callbacksRef.current.onCellHover?.(row, col), []);
-    const stableCellClick = useCallback((row: number, col: number) => callbacksRef.current.onCellClick?.(row, col), []);
-    const stableRowHeaderClick = useCallback((row: number) => callbacksRef.current.onRowHeaderClick?.(row), []);
+    const stableCellHover = useCallback((row: number, col: number, ev: MouseEvent) => callbacksRef.current.onCellHover?.(row, col, ev), []);
+    const stableCellClick = useCallback((row: number, col: number, ev: MouseEvent) => callbacksRef.current.onCellClick?.(row, col, ev), []);
+    const stableRowHeaderClick = useCallback((row: number, ev: MouseEvent) => callbacksRef.current.onRowHeaderClick?.(row, ev), []);
     const stableCellLeave = useCallback(() => callbacksRef.current.onCellLeave?.(), []);
 
     useEffect(() => {
@@ -40,8 +46,11 @@ export function HeatmapTableWidget({
         containerRef.current.innerHTML = "";
         const options: HeatmapTableOptions = {
             cellWidth,
+            cellHeight,
             rowHeaderWidth,
             darkMode,
+            showGrid,
+            cornerLabel,
             maxRows,
             onCellHover: stableCellHover,
             onCellClick: stableCellClick,
@@ -57,9 +66,9 @@ export function HeatmapTableWidget({
     }, [data]);
 
     useEffect(() => {
-        coreRef.current?.setOptions({ cellWidth, rowHeaderWidth, darkMode, maxRows });
+        coreRef.current?.setOptions({ cellWidth, cellHeight, rowHeaderWidth, darkMode, showGrid, cornerLabel, maxRows });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [cellWidth, rowHeaderWidth, darkMode, maxRows]);
+    }, [cellWidth, cellHeight, rowHeaderWidth, darkMode, showGrid, cornerLabel, maxRows]);
 
     if (!data.rows || data.rows.length === 0) {
         return (

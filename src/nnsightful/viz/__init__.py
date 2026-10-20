@@ -24,6 +24,7 @@ def _to_dict(obj: dict | BaseModel) -> dict:
     return obj
 
 _STANDALONE_JS: str | None = None
+_STANDALONE_JS_MTIME: float | None = None
 
 
 # ── Global defaults ──────────────────────────────────────────────────
@@ -33,9 +34,19 @@ _default_aspect_ratio: str | None = None  # None = use per-widget default
 _default_dark_mode: bool | None = None
 
 _WIDGET_ASPECT_RATIOS = {
-    "logit_lens": 5/3,  # content-driven height (table + chart with its own aspect ratio)
+    # logit_lens applies its aspect-ratio to the widget root (via the
+    # --ll-aspect-ratio CSS variable). That caps the widget's height
+    # proportional to its width; the heatmap viewport scrolls when content
+    # exceeds the cap. Not the outer-wrapper aspect-ratio used by the other
+    # widgets — see _widget_html for the dispatch.
+    "logit_lens": "5 / 3",
+    # j_lens mirrors logit_lens: same widget, same height-cap behavior.
+    "j_lens": "5 / 3",
     "activation_patching": "21 / 9",
     "line_plot": "21 / 9",
+    # heatmap_table is content-sized (its own cell/row dimensions); no outer
+    # aspect-ratio.
+    "heatmap_table": None,
 }
 
 _SENTINEL = object()
@@ -94,16 +105,19 @@ def get_dark_mode() -> bool | None:
 # ── Internal helpers ─────────────────────────────────────────────────
 
 def _get_standalone_js() -> str:
-    """Load and cache the standalone JS bundle."""
-    global _STANDALONE_JS
-    if _STANDALONE_JS is None:
-        js_path = Path(__file__).resolve().parent / "charts.js"
-        if not js_path.exists():
-            raise FileNotFoundError(
-                f"charts.js not found at {js_path}. "
-                "Run 'npm run build' in the nnsightful/ directory first."
-            )
+    """Load and cache the standalone JS bundle. Reloads when charts.js changes
+    on disk so local rebuilds are picked up without a kernel restart."""
+    global _STANDALONE_JS, _STANDALONE_JS_MTIME
+    js_path = Path(__file__).resolve().parent / "charts.js"
+    if not js_path.exists():
+        raise FileNotFoundError(
+            f"charts.js not found at {js_path}. "
+            "Run 'npm run build' in the nnsightful/ directory first."
+        )
+    mtime = js_path.stat().st_mtime
+    if _STANDALONE_JS is None or _STANDALONE_JS_MTIME != mtime:
         _STANDALONE_JS = js_path.read_text(encoding="utf-8")
+        _STANDALONE_JS_MTIME = mtime
     return _STANDALONE_JS
 
 
@@ -116,13 +130,90 @@ def _resolve_options(options: dict | None, dark_mode: bool | None) -> dict:
     return result
 
 
+def _expand_row_spec(spec) -> set[int]:
+    """Expand a row spec into a set of row indices.
+
+    Accepts a single int / (start, end) inclusive tuple / range, or a list
+    mixing those. Normalizing to a set makes equivalent specifications (any
+    order, overlaps, ranges vs explicit indices) collapse to the same result.
+    """
+    if spec is None:
+        return set()
+    if isinstance(spec, (int, tuple, range)):
+        spec = [spec]
+    rows: set[int] = set()
+    for item in spec:
+        if isinstance(item, bool):  # guard: bool is an int subclass
+            raise ValueError(f"Invalid row spec item: {item!r}")
+        if isinstance(item, int):
+            rows.add(item)
+        elif isinstance(item, range):
+            rows.update(item)
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            start, end = int(item[0]), int(item[1])
+            rows.update(range(start, end + 1))  # inclusive
+        else:
+            raise ValueError(
+                f"Invalid row spec item {item!r}; use ints, (start, end) "
+                "tuples, ranges, or a list of those."
+            )
+    return {r for r in rows if r >= 0}
+
+
+def _rows_to_ranges(rows: set[int]) -> list[dict]:
+    """Group a set of row indices into contiguous inclusive ranges (sorted)."""
+    out: list[dict] = []
+    for r in sorted(rows):
+        if out and r == out[-1]["end"] + 1:
+            out[-1]["end"] = r
+        else:
+            out.append({"start": r, "end": r})
+    return out
+
+
+def _apply_row_options(
+    ui_state: dict, highlight_rows=None, collapse_rows=None
+) -> None:
+    """Fold caller row options into the widget ui_state (in place).
+
+    - highlight_rows -> a single `rowHighlights` group (Design A). The widget
+      groups contiguous indices into blocks, so non-contiguous rows render as
+      separate blocks automatically.
+    - collapse_rows  -> `collapsedSections` (one section per contiguous run),
+      each initially collapsed.
+    Row indices refer to original data rows. An explicit value already present
+    in ui_state is left untouched.
+    """
+    hl = _expand_row_spec(highlight_rows)
+    if hl and "rowHighlights" not in ui_state:
+        ui_state["rowHighlights"] = [{"rows": sorted(hl)}]
+    cr = _expand_row_spec(collapse_rows)
+    if cr and "collapsedSections" not in ui_state:
+        ui_state["collapsedSections"] = [
+            {**rng, "collapsed": True} for rng in _rows_to_ranges(cr)
+        ]
+
+
 def _resolve_sizing(
     width: str | None, aspect_ratio: str | None, widget_key: str
 ) -> tuple[str, str | None]:
     """Resolve width and aspect-ratio against global defaults."""
     w = width or _default_width
-    ar = aspect_ratio or _default_aspect_ratio or _WIDGET_ASPECT_RATIOS[widget_key]
+    # A per-widget default of None means "content-sized": opt out of
+    # aspect-ratio boxing entirely, even when the user has set a global
+    # default. Only an explicit per-call aspect_ratio can override that.
+    widget_ar = _WIDGET_ASPECT_RATIOS.get(widget_key)
+    if widget_ar is None:
+        ar = aspect_ratio
+    else:
+        ar = aspect_ratio or _default_aspect_ratio or widget_ar
     return w, ar
+
+
+# CSS keywords that mean "no aspect-ratio". Forwarded to the widget as a
+# distinct sentinel ("unbounded") so the JS layer can distinguish a Python
+# opt-out from the workbench's fill-mode signal (variable unset).
+_ASPECT_RATIO_OPT_OUT_KEYWORDS = {"none", "auto", "initial", "inherit", "unset"}
 
 
 def _widget_html(
@@ -132,22 +223,65 @@ def _widget_html(
     options_json: str,
     width: str,
     aspect_ratio: str | None,
-    extra_js: str = "",
+    use_css_vars: bool = False,
 ) -> str:
-    """Generate the HTML/JS snippet that creates a standalone widget."""
+    """Generate the HTML/JS snippet that creates a standalone widget.
+
+    Args:
+        use_css_vars: If True, forward `width` and `aspect_ratio` as CSS
+            custom properties on the inner container (used by logit_lens).
+            The outer box stays at the notebook's natural width. If False,
+            apply `width` and `aspect_ratio` directly to the outer box
+            (used by line_plot / activation_patching).
+    """
     js = _get_standalone_js()
     cid = f"{prefix}_{uuid.uuid4().hex[:12]}"
-    ar_style = f"aspect-ratio:{aspect_ratio};" if aspect_ratio else ""
-    inner_height = "height:100%;" if aspect_ratio else ""
+    if use_css_vars:
+        outer_style = "max-width:100%;box-sizing:border-box;"
+        # NOTE: --ll-heatmap-width is forwarded for backward/forward compat
+        # but the redesigned logit-lens widget does not currently read it
+        # (the card fills its container width and the heatmap fits columns
+        # to that width). --ll-aspect-ratio drives the height cap.
+        css_vars = [f"--ll-heatmap-width:{width}"]
+        if isinstance(aspect_ratio, str) and aspect_ratio.strip():
+            keyword = aspect_ratio.strip().lower()
+            if keyword in _ASPECT_RATIO_OPT_OUT_KEYWORDS:
+                # Explicit opt-out from the Python caller. JS reads
+                # "unbounded" as "no cap, content-driven flow".
+                css_vars.append("--ll-aspect-ratio:unbounded")
+            else:
+                # Pass the (presumed valid) ratio through verbatim.
+                css_vars.append(f"--ll-aspect-ratio:{aspect_ratio}")
+        # Note: if aspect_ratio is None/empty, the CSS variable is NOT
+        # forwarded — that's the workbench fill-mode signal, but the
+        # Python entry point ensures a default ratio is resolved before
+        # we get here, so this branch is unreachable in practice from
+        # display_logit_lens.
+        inner_style = (
+            ";".join(css_vars) + ";max-width:100%;box-sizing:border-box;"
+        )
+    elif aspect_ratio:
+        # line_plot / activation_patching: fixed outer box with an aspect-
+        # ratio so the widget fills it. This is the original behavior.
+        outer_style = f"width:{width};aspect-ratio:{aspect_ratio};"
+        inner_style = "width:100%;height:100%;"
+    else:
+        # Fallback for any widget without an aspect-ratio (e.g. the generic
+        # heatmap table). The widget (an inline-flex card with max-width:100%)
+        # shrink-wraps to its content and scrolls a wide grid internally, so
+        # the outer just provides a definite width cap for that 100% to
+        # resolve against.
+        outer_style = f"max-width:{width};"
+        inner_style = ""
     return f"""
-    <div style="width:{width};{ar_style}"><div id="{cid}" style="width:100%;{inner_height}"></div></div>
+    <div style="{outer_style}"><div id="{cid}" style="{inner_style}"></div></div>
     <script>
     (function() {{
         {js}
         var container = document.getElementById('{cid}');
         var data = {data_json};
         if (typeof {widget_name} !== "undefined") {{
-            {widget_name}(container, data, {options_json});{extra_js}
+            {widget_name}(container, data, {options_json});
         }} else {{
             container.innerHTML = "<pre>{widget_name} not loaded</pre>";
         }}
@@ -181,6 +315,21 @@ def _validate_logit_lens_data(data: dict) -> None:
         )
 
 
+_J_LENS_REQUIRED_KEYS = {"meta", "layers", "input", "tracked", "topk"}
+
+
+def _validate_j_lens_data(data: dict) -> None:
+    """Validate that data has the required JLensData keys."""
+    missing = _J_LENS_REQUIRED_KEYS - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"JLensData is missing required keys: {sorted(missing)}. "
+            f"Expected keys: {sorted(_J_LENS_REQUIRED_KEYS)}. "
+            f"Got keys: {sorted(data.keys())}. "
+            "See nnsightful.types.JLensData for the expected schema."
+        )
+
+
 _LINE_PLOT_REQUIRED_KEYS = {"lines"}
 
 
@@ -195,54 +344,6 @@ def _validate_line_plot_data(data: dict) -> None:
         )
 
 
-def _densify_logit_lens_data(data: dict) -> dict:
-    """Expand sparse-position LogitLensData to dense format for the JS widget."""
-    positions = data.get("positions")
-    if positions is None:
-        return data
-
-    n_tokens = len(data["input"])
-    n_layers = len(data["layers"])
-    pos_set = {p: i for i, p in enumerate(positions)}
-
-    dense_tracked = []
-    for tok_idx in range(n_tokens):
-        if tok_idx in pos_set:
-            dense_tracked.append(data["tracked"][pos_set[tok_idx]])
-        else:
-            dense_tracked.append({})
-
-    dense_topk = []
-    for li in range(n_layers):
-        layer_topk = []
-        for tok_idx in range(n_tokens):
-            if tok_idx in pos_set:
-                layer_topk.append(data["topk"][li][pos_set[tok_idx]])
-            else:
-                layer_topk.append([])
-        dense_topk.append(layer_topk)
-
-    dense_entropy = None
-    if data.get("entropy") is not None:
-        dense_entropy = []
-        for li in range(n_layers):
-            layer_entropy = []
-            for tok_idx in range(n_tokens):
-                if tok_idx in pos_set:
-                    layer_entropy.append(data["entropy"][li][pos_set[tok_idx]])
-                else:
-                    layer_entropy.append(0.0)
-            dense_entropy.append(layer_entropy)
-
-    return {
-        **data,
-        "positions": None,
-        "tracked": dense_tracked,
-        "topk": dense_topk,
-        "entropy": dense_entropy,
-    }
-
-
 # ── Display functions ────────────────────────────────────────────────
 
 def display_logit_lens(
@@ -251,6 +352,9 @@ def display_logit_lens(
     width: str | None = None,
     aspect_ratio: str | None = None,
     dark_mode: bool | None = None,
+    full_height: bool = False,
+    highlight_rows=None,
+    collapse_rows=None,
     return_html: bool = False,
 ) -> HTML | None:
     """
@@ -258,54 +362,122 @@ def display_logit_lens(
 
     Args:
         data: LogitLensData dict (V2 format with meta, layers, input, tracked, topk).
+            A payload computed at a subset of ``positions`` is passed through
+            as is: the widget maps it onto its rows and hides the rows that
+            weren't computed behind locked "… N rows not computed" bands.
         ui_state: Optional LogitLensUIState dict for initial widget configuration.
-        width: CSS width of the container. Defaults to global setting.
-        aspect_ratio: CSS aspect-ratio for the outer wrapper. Defaults to None
-            (content-driven height). The chart uses its own aspect ratio
-            set via ui_state["chartAspectRatio"] (default "21 / 9").
+        width: CSS width applied to the heatmap viewport (the scrollable
+            area that holds the table), e.g. "90%" or "600px". The line
+            plot below matches this width too. Defaults to global setting.
+        aspect_ratio: CSS aspect-ratio applied to the widget root
+            (width:height, e.g. "5 / 3"). The widget's height is derived
+            from its width via this ratio; when content exceeds the cap,
+            the heatmap viewport scrolls. The line plot keeps its own
+            constant aspect-ratio via ui_state["chartAspectRatio"].
+
+            Pass "none" / "auto" to opt out of the cap entirely: the
+            widget then grows with its content. Passing None (the default)
+            uses the package default ("5 / 3"), not opt-out.
         dark_mode: Force dark (True) or light (False) mode. When None,
             uses the global setting, or auto-detects from the notebook theme.
+        full_height: If True, disable the vertical height cap so the heatmap
+            grows to show every token row without an internal scrollbar
+            (handy in notebooks). Equivalent to aspect_ratio="none", and
+            takes precedence over any aspect_ratio passed.
+        highlight_rows: Rows to highlight (Design A band). Accepts ints,
+            (start, end) inclusive tuples, ranges, or a list mixing them.
+            Contiguous indices render as one block, gaps as separate blocks;
+            e.g. [2, 3, 4, 8, 10, 11] -> blocks 2-4, 8, 10-11. Indices are
+            original data rows.
+        collapse_rows: Rows initially hidden behind a "… N rows hidden" band
+            (click to expand). Same spec format as highlight_rows; contiguous
+            runs become one collapsible section.
         return_html: If True, return the HTML object instead of displaying it.
     """
     data = _to_dict(data)
     _validate_logit_lens_data(data)
-    data = _densify_logit_lens_data(data)
     data_json = json.dumps(data)
 
+    # full_height wins over aspect_ratio: opt out of the height cap so the
+    # widget is content-driven (grows to fit all rows, no inner scroll).
+    if full_height:
+        aspect_ratio = "none"
+
     ui_state_dict = _resolve_options(ui_state, dark_mode)
+    _apply_row_options(ui_state_dict, highlight_rows, collapse_rows)
     ui_state_json = json.dumps(ui_state_dict)
     w, ar = _resolve_sizing(width, aspect_ratio, "logit_lens")
 
-    # Gray out rows where all .pred-cell elements are empty (uncomputed positions).
-    disable_js = """
-            function disableEmptyRows(ct) {
-                var rows = ct.querySelectorAll("tr");
-                for (var i = 0; i < rows.length; i++) {
-                    var cells = rows[i].querySelectorAll(".pred-cell");
-                    if (cells.length === 0) continue;
-                    var empty = true;
-                    for (var c = 0; c < cells.length; c++) {
-                        if (cells[c].textContent.trim() !== "") { empty = false; break; }
-                    }
-                    if (empty) {
-                        rows[i].style.pointerEvents = "none";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "0.5";
-                        }
-                    } else {
-                        rows[i].style.pointerEvents = "";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "";
-                        }
-                    }
-                }
-            }
-            disableEmptyRows(container);
-            new MutationObserver(function() { disableEmptyRows(container); })
-                .observe(container, { childList: true, subtree: true });"""
 
-    html = _widget_html("LogitLensWidget", "ll", data_json, ui_state_json, w, ar,
-                         extra_js=disable_js)
+    html = _widget_html(
+        "LogitLensWidget", "ll", data_json, ui_state_json, w, ar, use_css_vars=True
+    )
+    return _display_or_return(html, return_html)
+
+
+def display_j_lens(
+    data: dict | BaseModel,
+    ui_state: dict | None = None,
+    width: str | None = None,
+    aspect_ratio: str | None = None,
+    dark_mode: bool | None = None,
+    full_height: bool = False,
+    highlight_rows=None,
+    collapse_rows=None,
+    return_html: bool = False,
+) -> HTML | None:
+    """
+    Display a J-lens visualization in a Jupyter notebook.
+
+    J-lens is a parallel of the logit-lens tool and shares its data format,
+    so it renders through the same widget. See ``display_logit_lens`` for the
+    full argument reference.
+
+    Args:
+        data: JLensData dict (V2 format with meta, layers, input, tracked, topk).
+            Sparse ``positions`` render as in ``display_logit_lens``.
+        ui_state: Optional UI state dict for initial widget configuration.
+        width: CSS width applied to the heatmap viewport. Defaults to global setting.
+        aspect_ratio: CSS aspect-ratio applied to the widget root (e.g. "5 / 3").
+            Pass "none" / "auto" to opt out of the height cap. None uses the
+            package default ("5 / 3").
+        dark_mode: Force dark (True) or light (False) mode. When None, uses the
+            global setting, or auto-detects from the notebook theme.
+        full_height: If True, disable the vertical height cap so the heatmap
+            grows to show every token row without an internal scrollbar.
+        highlight_rows: Rows to highlight (Design A band). Accepts ints,
+            (start, end) inclusive tuples, ranges, or a list mixing them.
+            Contiguous indices render as one block, gaps as separate blocks;
+            e.g. [2, 3, 4, 8, 10, 11] -> blocks 2-4, 8, 10-11. Indices are
+            original data rows (prompt + generated).
+        collapse_rows: Rows initially hidden behind a "… N rows hidden" band
+            (click to expand). Same spec format as highlight_rows; contiguous
+            runs become one collapsible section.
+        return_html: If True, return the HTML object instead of displaying it.
+    """
+    data = _to_dict(data)
+    _validate_j_lens_data(data)
+    data_json = json.dumps(data)
+
+    # full_height wins over aspect_ratio: opt out of the height cap so the
+    # widget is content-driven (grows to fit all rows, no inner scroll).
+    if full_height:
+        aspect_ratio = "none"
+
+    # Generated rows are styled by the widget itself (Option E, derived from the
+    # data's input/completion split). Caller row highlights/collapses are folded
+    # in here.
+    ui_state_dict = _resolve_options(ui_state, dark_mode)
+    _apply_row_options(ui_state_dict, highlight_rows, collapse_rows)
+    ui_state_json = json.dumps(ui_state_dict)
+    w, ar = _resolve_sizing(width, aspect_ratio, "j_lens")
+
+
+    # J-lens reuses the logit-lens widget (identical data format) until it
+    # gets its own JS widget.
+    html = _widget_html(
+        "LogitLensWidget", "jl", data_json, ui_state_json, w, ar, use_css_vars=True
+    )
     return _display_or_return(html, return_html)
 
 
@@ -366,4 +538,88 @@ def display_line_plot(
     w, ar = _resolve_sizing(width, aspect_ratio, "line_plot")
 
     html = _widget_html("LinePlotWidget", "lp", data_json, options_json, w, ar)
+    return _display_or_return(html, return_html)
+
+
+def _to_2d_list(values, cast=None) -> list[list]:
+    """Coerce a 2D array-like (numpy array, list of lists, etc.) to a plain
+    list of lists, optionally casting each element."""
+    # numpy / anything with .tolist()
+    tolist = getattr(values, "tolist", None)
+    rows = tolist() if callable(tolist) else values
+    out = []
+    for row in rows:
+        row = list(row)
+        out.append([cast(v) for v in row] if cast else row)
+    return out
+
+
+def display_heatmap_table(
+    values,
+    row_labels: list[str] | None = None,
+    col_labels: list[str] | None = None,
+    *,
+    texts=None,
+    ramp: str = "purple",
+    value_domain: tuple[float, float] | None = None,
+    cell_width: int | None = None,
+    row_header_width: int | None = None,
+    corner_label: str | None = None,
+    width: str | None = None,
+    dark_mode: bool | None = None,
+    return_html: bool = False,
+) -> HTML | None:
+    """
+    Display a generic heatmap table in a Jupyter notebook.
+
+    Args:
+        values: 2D array-like (numpy array or list of lists) of numbers that
+            drive each cell's color. Normalized to [0, 1] over `value_domain`.
+        row_labels: Labels for each row (left header). Defaults to row indices.
+        col_labels: Labels for each column (bottom header). Defaults to indices.
+        texts: Optional 2D array-like of strings shown inside the cells.
+            Defaults to the formatted numeric value.
+        ramp: Color ramp — "purple", "blue", "teal", or a "#rrggbb" hex.
+            Cells blend from the surface toward this color by value.
+        value_domain: (min, max) used to normalize `values`. Defaults to
+            (0, 1).
+        cell_width: Pixel width of each data column (default 48).
+        row_header_width: Pixel width of the row-label column (default 100).
+        corner_label: Text in the corner cell where the column header meets
+            the row labels (blank if omitted).
+        width: CSS width of the container. Defaults to global setting.
+        dark_mode: Force dark (True) or light (False) mode. When None,
+            uses the global setting, or auto-detects from the notebook theme.
+        return_html: If True, return the HTML object instead of displaying it.
+    """
+    values = _to_2d_list(values)
+    n_rows = len(values)
+    n_cols = len(values[0]) if n_rows else 0
+
+    data: dict = {
+        "values": values,
+        "rowLabels": list(row_labels) if row_labels is not None
+        else [str(i) for i in range(n_rows)],
+        "colLabels": list(col_labels) if col_labels is not None
+        else [str(j) for j in range(n_cols)],
+        "ramp": ramp,
+    }
+    if texts is not None:
+        data["texts"] = _to_2d_list(texts, str)
+    if value_domain is not None:
+        data["valueDomain"] = list(value_domain)
+    data_json = json.dumps(data)
+
+    options: dict = {}
+    if cell_width is not None:
+        options["cellWidth"] = cell_width
+    if row_header_width is not None:
+        options["rowHeaderWidth"] = row_header_width
+    if corner_label is not None:
+        options["cornerLabel"] = corner_label
+    options = _resolve_options(options, dark_mode)
+    options_json = json.dumps(options)
+
+    w, ar = _resolve_sizing(width, None, "heatmap_table")
+    html = _widget_html("HeatmapTableWidget", "hm", data_json, options_json, w, ar)
     return _display_or_return(html, return_html)

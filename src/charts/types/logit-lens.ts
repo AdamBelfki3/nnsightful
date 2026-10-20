@@ -11,9 +11,19 @@ export interface LogitLensData {
     };
     layers: number[];
     input: string[];
+    /** Generated token strings (parallel to `input`). When present, the full
+     *  row sequence is `input + completion`; the widget derives the
+     *  prompt/generation split — and a highlight — from the two lengths. */
+    completion?: string[];
+    /** Absolute row indices (over `input + completion`) the lens was computed
+     *  at, in order. When set, `tracked[i]`, `topk[layer][i]` and
+     *  `entropy[layer][i]` describe row `positions[i]` only; the widget maps
+     *  them back onto their rows and hides the rest behind locked bands.
+     *  Omitted / null = dense (every row, in order). */
+    positions?: number[] | null;
     tracked: Record<string, number[]>[];
     topk: string[][][];
-    entropy?: number[][];
+    entropy?: number[][] | null;
 }
 
 /**
@@ -36,6 +46,9 @@ export interface LogitLensUIState {
         lineStyle?: { name: string; dash: string };
     }>;
     lastPinnedGroupIndex?: number;
+    // Pinned prompt positions. `line` (the dash-style name) is informational
+    // only — on restore the style is recomputed from array order, so the
+    // order of this array determines each row's style.
     pinnedRows?: Array<{ pos: number; line: string }>;
     heatmapBaseColor?: string | null;
     heatmapNextColor?: string | null;
@@ -43,6 +56,25 @@ export interface LogitLensUIState {
     showHeatmap?: boolean;
     showChart?: boolean;
     trajectoryMetric?: "probability" | "rank";
+
+    // Redesigned-widget options
+    ramp?: "purple" | "blue" | "teal";
+    showGrid?: boolean;
+    dimLowProb?: boolean;
+    selectedRow?: number | null;
+    // Absolute layer index of the cell driving the trajectory line plot.
+    selectedLayer?: number | null;
+    // Layer-navigator window (which layers are shown / zoom level).
+    viewStart?: number;
+    viewSize?: number;
+    // Note: pinned trajectories round-trip through `pinnedGroups` +
+    // `colorIndex` (declared above) — each pin is a single-token group.
+    // Declarative row highlights, forwarded verbatim to the heatmap core (bands
+    // / rails / block dividers, "Design A"). Generic — a host marks any rows.
+    rowHighlights?: import("./heatmap-table").HeatmapRowHighlight[];
+    // Collapsible row sections (original ranges). The widget owns the
+    // collapsed/expanded flags; this persists the current state.
+    collapsedSections?: import("./heatmap-table").HeatmapCollapsedSection[];
 }
 
 /**

@@ -93,7 +93,7 @@ export function createInitialState(
         chartHeight: uiState?.chartHeight ?? null,
         chartAspectRatio: uiState?.chartAspectRatio !== undefined
             ? (uiState.chartAspectRatio ?? null)
-            : (uiState?.chartHeight != null ? null : "21 / 9"),
+            : (uiState?.chartHeight != null ? null : "32 / 9"),
         inputTokenWidth: uiState?.inputTokenWidth ?? 100,
         currentCellWidth: uiState?.cellWidth ?? 44,
         currentMaxRows: uiState?.maxRows !== undefined ? (uiState.maxRows ?? null) : null,

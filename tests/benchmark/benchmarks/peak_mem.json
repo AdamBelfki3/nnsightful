@@ -1,0 +1,47 @@
+{
+  "name": "peak_mem",
+  "version": 1,
+  "kind": "local",
+  "dimension": "peak_mem",
+  "description": "Largest prompt length whose peak GPU memory beyond the weights stays within each threshold of the model footprint (weights + NDIF's minimum padding).",
+  "meta_params": {
+    "n_repeat": 3,
+    "n_warmup": 1,
+    "dtype": "bfloat16",
+    "autocast": true,
+    "swept": "prompt_length",
+    "thresholds": [
+      0.1,
+      0.25,
+      0.5
+    ],
+    "min_length": 2,
+    "max_length": 4096,
+    "padding_bias": 524288000
+  },
+  "models": [
+    "openai-community/gpt2",
+    "google/gemma-3-1b-pt",
+    "meta-llama/Llama-3.1-8B"
+  ],
+  "tools": [
+    {
+      "tool": "logit_lens",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      }
+    },
+    {
+      "tool": "activation_patching",
+      "fixed_args": {}
+    },
+    {
+      "tool": "j_lens",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      }
+    }
+  ]
+}

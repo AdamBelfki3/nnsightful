@@ -6,3 +6,7 @@ __pycache__/
 *.egg-info/
 build/
 .eggs/
+tests/benchmark/results/tmp/
+tests/benchmark/results/.*.tmp
+.docs/
+send/

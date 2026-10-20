@@ -1,165 +1,174 @@
-"""End-to-end tests for nnsightful.tools.logit_lens."""
+"""Logit lens on a local model: payload shape, agreement with the model, options."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
+import torch
 
 from nnsightful.tools.logit_lens import logit_lens
-from nnsightful.types import LogitLensData
 
+from .helpers import decode_each, model_logits
 
 PROMPT = "The capital of France is"
 
 
-class TestLogitLensEndToEnd:
-    """Integration tests that run logit_lens on a real model."""
+@pytest.fixture(scope="module")
+def reference(model):
+    """The model's own final distribution and the default lens payload."""
+    logits = model_logits(model, PROMPT)
+    return {
+        "logits": logits,
+        "probs": torch.softmax(logits, dim=-1),
+        "data": logit_lens(model, PROMPT, top_k=3),
+    }
 
-    def test_basic_output_structure(self, model):
-        data = logit_lens(model, PROMPT)
-        assert isinstance(data, LogitLensData)
-        assert data.meta.version == 2
-        assert data.meta.model != ""
 
-    def test_all_layers_by_default(self, model):
-        data = logit_lens(model, PROMPT)
-        assert data.layers == list(range(model.num_layers))
+class TestPayload:
+    def test_shapes_follow_layers_positions_and_top_k(self, model, reference):
+        data = reference["data"]
+        n_layers = model.num_layers
+        tokens = decode_each(model, model.tokenizer.encode(PROMPT))
 
-    def test_input_tokens_match_tokenizer(self, model):
-        data = logit_lens(model, PROMPT)
-        expected_len = len(model.tokenizer.encode(PROMPT))
-        assert len(data.input) == expected_len
+        assert data.meta.model == model.repo_id
+        assert data.layers == list(range(n_layers))
+        assert data.input == tokens
+        assert data.positions == list(range(len(tokens)))
+        assert [len(layer) for layer in data.topk] == [len(tokens)] * n_layers
+        assert all(len(cell) == 3 for layer in data.topk for cell in layer)
+        assert len(data.tracked) == len(tokens)
+        assert all(
+            len(trajectory) == n_layers
+            for position in data.tracked
+            for trajectory in position.values()
+        )
+        assert [len(layer) for layer in data.entropy] == [len(tokens)] * n_layers
 
-    def test_positions_none_when_all(self, model):
-        """When no position selection, positions field should be None."""
-        data = logit_lens(model, PROMPT)
-        assert data.positions is None
+    def test_tracked_tokens_are_the_union_of_each_positions_top_k(self, reference):
+        data = reference["data"]
+        for pos, tracked in enumerate(data.tracked):
+            union = {token for layer in data.topk for token in layer[pos]}
+            assert set(tracked) == union
 
-    def test_sparse_layers(self, model):
-        data = logit_lens(model, PROMPT, layers=[0, -1])
-        assert len(data.layers) == 2
-        assert data.layers[0] == 0
-        assert data.layers[-1] == model.num_layers - 1
 
-    def test_sparse_positions(self, model):
-        data = logit_lens(model, PROMPT, positions=[0, -1])
-        assert data.positions is not None
-        assert len(data.positions) == 2
-        n_tokens = len(model.tokenizer.encode(PROMPT))
-        assert data.positions == [0, n_tokens - 1]
+class TestMatchesModel:
+    """The last layer's lens is the model's own output distribution."""
 
-    def test_tracked_trajectories_length(self, model):
-        """Each tracked token trajectory should have one entry per layer."""
-        data = logit_lens(model, PROMPT, layers=[0, 1, 2])
-        n_layers = len(data.layers)
-        for pos_tracked in data.tracked:
-            for trajectory in pos_tracked.values():
-                assert len(trajectory) == n_layers
+    def test_final_layer_top_k_is_the_models_top_k(self, model, reference):
+        expected = [
+            decode_each(model, ids)
+            for ids in reference["logits"].topk(3, dim=-1).indices
+        ]
+        assert reference["data"].topk[-1] == expected
 
-    def test_topk_shape(self, model):
-        """topk should be [n_layers][n_positions] lists of token strings."""
-        data = logit_lens(model, PROMPT, top_k=3)
-        n_pos = len(data.input)
-        for layer_topk in data.topk:
-            assert len(layer_topk) == n_pos
-            for pos_tokens in layer_topk:
-                assert len(pos_tokens) <= 3
-                assert all(isinstance(t, str) for t in pos_tokens)
+    def test_final_layer_probabilities_are_the_models(self, model, reference):
+        probs = reference["probs"]
+        for pos, tracked in enumerate(reference["data"].tracked):
+            top_id = int(probs[pos].argmax())
+            final = tracked[model.tokenizer.decode(top_id)][-1]
+            assert final == pytest.approx(probs[pos, top_id].item(), abs=1e-3)
 
-    def test_entropy_included_by_default(self, model):
-        data = logit_lens(model, PROMPT)
-        assert data.entropy is not None
-        assert len(data.entropy) == len(data.layers)
-        for layer_entropy in data.entropy:
-            assert all(isinstance(v, float) for v in layer_entropy)
-            assert all(v >= 0 for v in layer_entropy)
+    def test_final_layer_entropy_is_the_models(self, reference):
+        probs = reference["probs"]
+        expected = -(probs * probs.log()).nan_to_num().sum(dim=-1)
+        assert reference["data"].entropy[-1] == pytest.approx(
+            expected.tolist(), abs=1e-2
+        )
 
-    def test_entropy_excluded(self, model):
-        data = logit_lens(model, PROMPT, include_entropy=False)
+
+class TestOptions:
+    @pytest.mark.parametrize("top_k", [1, 7])
+    def test_top_k_sets_the_number_of_tokens_per_cell(self, model, top_k):
+        data = logit_lens(model, PROMPT, top_k=top_k)
+        assert {len(cell) for layer in data.topk for cell in layer} == {top_k}
+
+    def test_without_entropy_the_rest_of_the_payload_is_unchanged(
+        self, model, reference
+    ):
+        """Entropy is computed in place over the probabilities, after the rest."""
+        data = logit_lens(model, PROMPT, top_k=3, include_entropy=False)
         assert data.entropy is None
-
-    def test_top_p_selects_tokens(self, model):
-        """top_p alone (no top_k) should still select tokens."""
-        data = logit_lens(model, PROMPT, top_k=None, top_p=0.9)
-        for pos_tracked in data.tracked:
-            assert len(pos_tracked) > 0
-
-    def test_top_k_and_top_p_min(self, model):
-        """With both top_k and top_p, whichever cutoff is reached first wins."""
-        data_k = logit_lens(model, PROMPT, top_k=10, top_p=None)
-        data_both = logit_lens(model, PROMPT, top_k=10, top_p=0.5)
-        # top_p may cut off before top_k, so combined <= top_k-only
-        for tk, tboth in zip(data_k.tracked, data_both.tracked):
-            assert len(tboth) <= len(tk)
-
-    def test_logit_indices_always_tracked(self, model):
-        """Explicit logit_indices should appear in tracked tokens."""
-        # Token index 0 is always a valid vocab index
-        data = logit_lens(model, PROMPT, top_k=1, logit_indices=[0])
-        token_0_str = model.tokenizer.decode(0)
-        for pos_tracked in data.tracked:
-            assert token_0_str in pos_tracked
-
-    def test_no_selection_raises(self, model):
-        """Must specify at least one of top_k or top_p."""
-        raw = logit_lens._run(model, PROMPT, layers=[0])
-        with pytest.raises(AssertionError, match="top_k or top_p"):
-            logit_lens._format(raw, top_k=None, top_p=None)
-
-    def test_json_roundtrip(self, model):
-        """LogitLensData should survive JSON serialization."""
-        data = logit_lens(model, PROMPT, top_k=3, layers=[0, -1])
-        dumped = data.model_dump()
-        json_str = json.dumps(dumped)
-        restored = LogitLensData(**json.loads(json_str))
-        assert restored.layers == data.layers
-        assert restored.input == data.input
-        assert len(restored.tracked) == len(data.tracked)
-
-    def test_probabilities_sum_tracked(self, model):
-        """Tracked probabilities should be in [0, 1]."""
-        data = logit_lens(model, PROMPT, top_k=5)
-        for pos_tracked in data.tracked:
-            for trajectory in pos_tracked.values():
-                for prob in trajectory:
-                    assert 0.0 <= prob <= 1.0
+        assert data.model_dump(exclude={"entropy"}) == reference["data"].model_dump(
+            exclude={"entropy"}
+        )
 
 
-class TestLogitLensRunFormat:
-    """Tests for the _run / _format split."""
+class TestTool:
+    def test_raw_returns_the_per_layer_logits_on_cpu(self, model, reference):
+        raw = logit_lens(model, PROMPT, raw=True)
+        n_pos = len(model.tokenizer.encode(PROMPT))
 
-    def test_run_returns_expected_keys(self, model):
-        raw = logit_lens._run(model, PROMPT)
-        assert "input_tokens" in raw
-        assert "all_logits" in raw
-        assert "tokenizer" in raw
-        assert "layer_indices" in raw
-        assert "model_name" in raw
-        assert isinstance(raw["input_tokens"], list)
-        assert isinstance(raw["layer_indices"], list)
-        assert len(raw["all_logits"]) == len(raw["layer_indices"])
+        assert isinstance(raw, torch.Tensor)
+        assert raw.device.type == "cpu"
+        assert raw.shape == (model.num_layers, n_pos, model.vocab_size)
+        torch.testing.assert_close(
+            raw[-1].float(), reference["logits"], atol=1e-3, rtol=1e-3
+        )
 
-    def test_run_with_sparse_layers(self, model):
-        raw = logit_lens._run(model, PROMPT, layers=[0, -1])
-        assert len(raw["layer_indices"]) == 2
-        assert len(raw["all_logits"]) == 2
+    @pytest.mark.parametrize("positions", [None, [1, -1]], ids=["all", "selected"])
+    def test_formatting_raw_output_gives_the_payload(self, model, positions):
+        n_pos = len(model.tokenizer.encode(PROMPT))
+        selected = None if positions is None else [p % n_pos for p in positions]
+        raw = logit_lens(model, PROMPT, raw=True, positions=positions)
+        raw = raw.to(model.lm_head.weight.device)
 
-    def test_format_from_raw(self, model):
-        """_format should produce LogitLensData from a _run result."""
-        raw = logit_lens._run(model, PROMPT, layers=[0, 1])
-        data = logit_lens._format(raw, top_k=3)
-        assert isinstance(data, LogitLensData)
-        assert len(data.layers) == 2
-        assert len(data.input) == len(raw["input_tokens"])
+        assert logit_lens.format(
+            raw, model, PROMPT, selected, top_k=3
+        ) == logit_lens(model, PROMPT, top_k=3, positions=positions)
 
-    def test_run_then_format_matches_call(self, model):
-        """_run + _format should produce the same result as __call__."""
-        raw = logit_lens._run(model, PROMPT, layers=[0, -1])
-        data_split = logit_lens._format(raw, top_k=3, include_entropy=False)
-        data_direct = logit_lens(model, PROMPT, layers=[0, -1], top_k=3, include_entropy=False)
-        assert data_split.layers == data_direct.layers
-        assert data_split.input == data_direct.input
-        assert len(data_split.tracked) == len(data_direct.tracked)
-        assert data_split.entropy is None
-        assert data_direct.entropy is None
+
+class TestPositions:
+    """``positions`` projects only the selected rows, equal to the full run's."""
+
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            (lambda n: -1, lambda n: [n - 1]),
+            (lambda n: (1, 3), lambda n: [1, 2]),
+            (lambda n: [3, 0, -2, 3], lambda n: sorted({0, 3, n - 2})),
+            (lambda n: [(0, 2), (-1, n)], lambda n: [0, 1, n - 1]),
+        ],
+        ids=["negative", "range", "list", "ranges"],
+    )
+    def test_selected_rows_are_the_full_runs_rows(
+        self, model, reference, spec, expected
+    ):
+        full = reference["data"]
+        n_pos = len(full.input)
+        spec, expected = spec(n_pos), expected(n_pos)
+        data = logit_lens(model, PROMPT, top_k=3, positions=spec)
+
+        assert data.positions == expected
+        assert data.input == full.input
+        assert data.tracked == [full.tracked[p] for p in expected]
+        assert data.topk == [[layer[p] for p in expected] for layer in full.topk]
+        assert data.entropy == [[layer[p] for p in expected] for layer in full.entropy]
+
+    def test_raw_holds_only_the_selected_rows(self, model):
+        """The raw tensor is the lens buffer, allocated at the selection's size."""
+        full = logit_lens(model, PROMPT, raw=True)
+        raw = logit_lens(model, PROMPT, raw=True, positions=[1, -1])
+
+        assert raw.shape == (model.num_layers, 2, model.vocab_size)
+        torch.testing.assert_close(raw, full[:, [1, -1]])
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            lambda n: n,
+            lambda n: -n - 1,
+            lambda n: (n - 1, n + 1),
+            lambda n: [0, n],
+            lambda n: [],
+            lambda n: (2, 2),
+        ],
+        ids=["past-end", "before-start", "range", "list", "empty-list", "empty-range"],
+    )
+    def test_bad_selection_raises_before_tracing(self, model, monkeypatch, spec):
+        def no_trace(*args, **kwargs):
+            raise AssertionError("traced despite an invalid selection")
+
+        monkeypatch.setattr(model, "trace", no_trace)
+        with pytest.raises(ValueError, match="positions="):
+            logit_lens(
+                model, PROMPT, positions=spec(len(model.tokenizer.encode(PROMPT)))
+            )

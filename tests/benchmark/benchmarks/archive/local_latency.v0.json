@@ -1,0 +1,46 @@
+{
+  "name": "local_latency",
+  "version": 0,
+  "kind": "local",
+  "dimension": "latency",
+  "description": "The original latency measurements (CPU, float32, before the benchmark definitions existed); defined as exactly the tests that were measured.",
+  "meta_params": {
+    "n_repeat": 10,
+    "n_warmup": 3,
+    "dtype": "float32",
+    "autocast": false
+  },
+  "models": [
+    "openai-community/gpt2",
+    "meta-llama/Llama-3.1-8B"
+  ],
+  "tools": [
+    {
+      "tool": "logit_lens",
+      "name": "logit_lens[length]",
+      "fixed_args": {
+        "top_k": 5,
+        "include_entropy": true
+      },
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    },
+    {
+      "tool": "activation_patching",
+      "name": "activation_patching[length]",
+      "fixed_args": {},
+      "sweep": {
+        "prompt_length": [
+          10,
+          25,
+          50
+        ]
+      }
+    }
+  ]
+}
