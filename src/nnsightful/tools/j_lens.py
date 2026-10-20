@@ -219,7 +219,7 @@ class JLensTool(Tool):
                 if raw:
                     results =  torch.cat([step for step in gen_logits], dim=1).cpu().save() # [layer, pos, vocab]
                 else:
-                    results = self.payload(
+                    results = self.format(
                         gen_logits,
                         model,
                         prompt,
@@ -232,7 +232,7 @@ class JLensTool(Tool):
         if remote and non_blocking:
             return backend.job_id
 
-        return results if raw else self.load(results)
+        return results
 
 
 j_lens = JLensTool()

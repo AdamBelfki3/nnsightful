@@ -90,7 +90,7 @@ class ActivationPatchingTool(Tool):
                         "clean_probs": clean_probs,
                     }
                 else:
-                    results = self.payload(
+                    results = self.format(
                         src_pred=src_pred, 
                         clean_pred=clean_pred, 
                         patched_logits=patched_logits, 
@@ -103,7 +103,7 @@ class ActivationPatchingTool(Tool):
         if remote and non_blocking:
             return backend.job_id
 
-        return results if raw else self.load(results)
+        return results
 
 
 activation_patching = ActivationPatchingTool()
