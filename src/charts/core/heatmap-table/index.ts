@@ -1,4 +1,5 @@
 import type {
+    HeatmapCollapsedSection,
     HeatmapColumnWindow,
     HeatmapTableData,
     HeatmapTableOptions,
@@ -16,6 +17,16 @@ const EXPANDED_TOGGLE_H = 20;
 // Vertical inset on each region tracker so adjacent regions read as separate
 // bars (a gap at every boundary) rather than one continuous rail.
 const REGION_PAD = 7;
+
+/** One vertical slot of the rendered rows region, in original-index order: a
+ *  data row, a collapsed band standing in for a row range, or the re-collapse
+ *  handle above an expanded section. `index` is the section's position in
+ *  `collapsedSections`; `shown` counts the band/section's rows that would be
+ *  visible once expanded (its locked rows excluded). */
+export type HeatmapRowPlanItem =
+    | { kind: "row"; row: number }
+    | { kind: "band"; start: number; end: number; index: number; locked: boolean; label?: string; shown: number }
+    | { kind: "handle"; start: number; end: number; index: number; shown: number };
 
 /**
  * HeatmapTableCore — a generic, reusable heatmap table abstracted from the
@@ -221,33 +232,14 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         const rows = this.data.rows;
         const rowCount = o.maxRows != null ? Math.min(rows.length, o.maxRows) : rows.length;
 
-        // Collapse plan: sections (inclusive ORIGINAL ranges) hidden behind a
-        // thin band unless expanded. Rows keep their original indices; a
-        // collapsed section becomes one band, an expanded one gets a re-collapse
-        // handle. `index` is the section's position in the option array (what
-        // onToggleCollapse reports). Assumed non-overlapping. Computed here (not
-        // just in the render loop) so fill sizing can account for hidden rows.
-        const sections = (o.collapsedSections ?? [])
-            .map((s, i) => ({
-                start: Math.max(0, s.start),
-                end: Math.min(rowCount - 1, s.end),
-                collapsed: s.collapsed !== false,
-                index: i,
-            }))
-            .filter((s) => s.start <= s.end)
-            .sort((a, b) => a.start - b.start);
-        const sectionAt = (r: number) => sections.find((s) => s.start === r);
-
-        // Count visible rows and the height taken by collapse bands/handles, so
-        // fill-mode stretches only the visible rows into the remaining space.
+        // Computed up front (not just in the render loop) so fill sizing can
+        // account for the hidden rows and the bands/handles standing in for them.
+        const plan = HeatmapTableCore.planRows(rowCount, o.collapsedSections);
         let visibleRowCount = 0;
         let collapseExtraH = 0;
-        for (let r = 0; r < rowCount; ) {
-            const sec = sectionAt(r);
-            if (sec && sec.collapsed) { collapseExtraH += COLLAPSED_BAND_H; r = sec.end + 1; continue; }
-            if (sec && !sec.collapsed) collapseExtraH += EXPANDED_TOGGLE_H;
-            visibleRowCount++;
-            r++;
+        for (const item of plan) {
+            if (item.kind === "row") visibleRowCount++;
+            else collapseExtraH += item.kind === "band" ? COLLAPSED_BAND_H : EXPANDED_TOGGLE_H;
         }
         const rowH = this.resolveRowHeight(visibleRowCount, collapseExtraH);
         const tableW = rowHdrW + cellW * nCols;
@@ -351,41 +343,41 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         // Rows interleaved with collapse bands, in original-index order.
         let html = `<div class="hmx-grid-inner" style="width:${tableW}px;min-width:${tableW}px;">`;
         let y = 0;
-        for (let r = 0; r < rowCount; ) {
-            const sec = sectionAt(r);
-            if (sec && sec.collapsed) {
-                const count = sec.end - sec.start + 1;
+        for (const item of plan) {
+            if (item.kind === "band") {
+                const count = item.end - item.start + 1;
                 // Accent the band if it hides highlighted rows, so that cue
                 // isn't lost while collapsed.
                 let hlColor: string | undefined;
                 let hidesHl = false;
-                for (let hr = sec.start; hr <= sec.end; hr++) {
+                for (let hr = item.start; hr <= item.end; hr++) {
                     if (rowHl[hr]) { hidesHl = true; hlColor = rowHl[hr].color; break; }
                 }
                 const plural = count === 1 ? "" : "s";
-                html += `<div class="hmx-collapsed${hidesHl ? " hmx-collapsed-hl" : ""}" data-cs="${sec.index}" data-count="${count}" `
+                const text = `${count} row${plural} ${escapeHtml(item.label ?? "hidden")}`;
+                const cls = "hmx-collapsed" + (item.locked ? " hmx-collapsed-locked" : "") + (hidesHl ? " hmx-collapsed-hl" : "");
+                html += `<div class="${cls}"${item.locked ? "" : ` data-cs="${item.index}"`} data-count="${item.shown}" `
                     + `style="width:${tableW}px;min-width:${tableW}px;height:${COLLAPSED_BAND_H}px;${hlColor ? `--hmx-hl:${escapeHtml(hlColor)};` : ""}" `
-                    + `title="Click to show ${count} hidden row${plural}">`
-                    + `<span class="hmx-collapsed-inner">… ${count} row${plural} hidden</span>`
+                    + `title="${item.locked ? text : `Click to show ${count} hidden row${plural}`}">`
+                    + `<span class="hmx-collapsed-inner">… ${text}</span>`
                     + `</div>`;
-                coverY(sec.start, sec.end, y, y + COLLAPSED_BAND_H);
+                coverY(item.start, item.end, y, y + COLLAPSED_BAND_H);
                 y += COLLAPSED_BAND_H;
-                r = sec.end + 1;
                 continue;
             }
-            if (sec && !sec.collapsed) {
-                const count = sec.end - sec.start + 1;
-                html += `<div class="hmx-expanded-toggle" data-cs="${sec.index}" data-count="${count}" `
+            if (item.kind === "handle") {
+                const count = item.end - item.start + 1;
+                html += `<div class="hmx-expanded-toggle" data-cs="${item.index}" data-count="${item.shown}" `
                     + `style="width:${tableW}px;min-width:${tableW}px;" title="Collapse these ${count} rows">`
                     + `<span>⌃ collapse ${count} row${count === 1 ? "" : "s"}</span>`
                     + `<span class="hmx-toggle-x" title="Remove — keep these rows expanded">×</span>`
                     + `</div>`;
                 y += EXPANDED_TOGGLE_H;
+                continue;
             }
-            html += rowHtml(r);
-            coverY(r, r, y, y + rowH);
+            html += rowHtml(item.row);
+            coverY(item.row, item.row, y, y + rowH);
             y += rowH;
-            r++;
         }
         // Region rails + labels — absolute within the (scrolling) grid-inner.
         for (let i = 0; i < regions.length; i++) {
@@ -447,6 +439,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             // Collapse band (expand) or expanded-section handle (collapse).
             const band = target.closest(".hmx-collapsed, .hmx-expanded-toggle") as HTMLElement | null;
             if (band) {
+                if (band.dataset.cs === undefined) return; // locked band
                 const idx = parseInt(band.dataset.cs!);
                 // The × on an expanded handle removes the section entirely
                 // (rows stay expanded, no band/handle).
@@ -478,6 +471,68 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             const cell = target.closest(".hmx-cell") as HTMLElement | null;
             if (cell) this.options.onCellClick?.(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e);
         });
+    }
+
+    /**
+     * Lay out `rowCount` rows under `sections`: which rows render, and where a
+     * collapsed band or an expanded section's handle stands in for a range.
+     *
+     * Locked sections take precedence: a section lying entirely within locked
+     * rows is dropped, a collapsed one partially overlapping them hides its
+     * whole range behind its own band, and an expanded one shows its rows with
+     * the locked runs still behind locked bands. Locked runs are split at a
+     * section start so every handle/band sits at its own section's first row.
+     * Sections reaching past the last row are clipped.
+     */
+    static planRows(rowCount: number, sections: HeatmapCollapsedSection[] = []): HeatmapRowPlanItem[] {
+        const norm = sections
+            .map((s, index) => ({
+                start: Math.max(0, s.start),
+                end: Math.min(rowCount - 1, s.end),
+                collapsed: s.collapsed !== false,
+                locked: !!s.locked,
+                label: s.label,
+                index,
+            }))
+            .filter((s) => s.start <= s.end);
+        type Sec = (typeof norm)[number];
+        const lockedAt: (Sec | undefined)[] = new Array(rowCount);
+        for (const s of norm) {
+            if (!s.locked) continue;
+            for (let r = s.start; r <= s.end; r++) lockedAt[r] ??= s;
+        }
+        const shownIn = (a: number, b: number) => {
+            let n = 0;
+            for (let r = a; r <= b; r++) if (!lockedAt[r]) n++;
+            return n;
+        };
+        const outerAt = new Map<number, Sec>();
+        for (const s of norm) {
+            if (s.locked || shownIn(s.start, s.end) === 0 || outerAt.has(s.start)) continue;
+            outerAt.set(s.start, s);
+        }
+
+        const plan: HeatmapRowPlanItem[] = [];
+        for (let r = 0; r < rowCount; ) {
+            const sec = outerAt.get(r);
+            if (sec?.collapsed) {
+                plan.push({ kind: "band", start: sec.start, end: sec.end, index: sec.index, locked: false, label: sec.label, shown: shownIn(sec.start, sec.end) });
+                r = sec.end + 1;
+                continue;
+            }
+            if (sec) plan.push({ kind: "handle", start: sec.start, end: sec.end, index: sec.index, shown: shownIn(sec.start, sec.end) });
+            const lock = lockedAt[r];
+            if (lock) {
+                let end = r;
+                while (end + 1 < rowCount && lockedAt[end + 1] === lock && !outerAt.has(end + 1)) end++;
+                plan.push({ kind: "band", start: r, end, index: lock.index, locked: true, label: lock.label, shown: 0 });
+                r = end + 1;
+                continue;
+            }
+            plan.push({ kind: "row", row: r });
+            r++;
+        }
+        return plan;
     }
 
     private clearHover(): void {

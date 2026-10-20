@@ -8,7 +8,6 @@ import torch
 from nnsightful.tools import j_lens as j_lens_module
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
-from nnsightful.viz import _densify_logit_lens_data
 
 from .helpers import decode_each
 
@@ -190,22 +189,6 @@ class TestPositions:
         assert data.tracked == [full.tracked[p] for p in rows]
         assert data.topk == [[layer[p] for p in rows] for layer in full.topk]
         assert data.entropy == [[layer[p] for p in rows] for layer in full.entropy]
-
-    def test_densified_for_the_widget_it_matches_the_full_run(self, model, full):
-        """The viz expands the selection back onto the prompt + generated rows."""
-        data = j_lens(
-            model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, top_k=3, positions=(0, 2)
-        )
-        dense = _densify_logit_lens_data(data.model_dump())
-        kept = set(data.positions)
-
-        assert len(dense["tracked"]) == len(full.input) + len(full.completion)
-        for pos, tracked in enumerate(dense["tracked"]):
-            assert tracked == (full.tracked[pos] if pos in kept else {})
-        for layer, full_layer in zip(dense["topk"], full.topk):
-            assert layer == [
-                cell if p in kept else [] for p, cell in enumerate(full_layer)
-            ]
 
     def test_raw_holds_the_selected_then_generated_rows(self, model, has_lens):
         full = j_lens._run(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)

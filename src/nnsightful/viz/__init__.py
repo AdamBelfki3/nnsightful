@@ -223,7 +223,6 @@ def _widget_html(
     options_json: str,
     width: str,
     aspect_ratio: str | None,
-    extra_js: str = "",
     use_css_vars: bool = False,
 ) -> str:
     """Generate the HTML/JS snippet that creates a standalone widget.
@@ -282,7 +281,7 @@ def _widget_html(
         var container = document.getElementById('{cid}');
         var data = {data_json};
         if (typeof {widget_name} !== "undefined") {{
-            {widget_name}(container, data, {options_json});{extra_js}
+            {widget_name}(container, data, {options_json});
         }} else {{
             container.innerHTML = "<pre>{widget_name} not loaded</pre>";
         }}
@@ -345,58 +344,6 @@ def _validate_line_plot_data(data: dict) -> None:
         )
 
 
-def _densify_logit_lens_data(data: dict) -> dict:
-    """Expand sparse-position LogitLensData to dense format for the JS widget.
-
-    Rows span ``input`` plus any ``completion`` (j-lens generated tokens), as
-    the widget lays them out.
-    """
-    positions = data.get("positions")
-    if positions is None:
-        return data
-
-    n_tokens = len(data["input"]) + len(data.get("completion") or [])
-    n_layers = len(data["layers"])
-    pos_set = {p: i for i, p in enumerate(positions)}
-
-    dense_tracked = []
-    for tok_idx in range(n_tokens):
-        if tok_idx in pos_set:
-            dense_tracked.append(data["tracked"][pos_set[tok_idx]])
-        else:
-            dense_tracked.append({})
-
-    dense_topk = []
-    for li in range(n_layers):
-        layer_topk = []
-        for tok_idx in range(n_tokens):
-            if tok_idx in pos_set:
-                layer_topk.append(data["topk"][li][pos_set[tok_idx]])
-            else:
-                layer_topk.append([])
-        dense_topk.append(layer_topk)
-
-    dense_entropy = None
-    if data.get("entropy") is not None:
-        dense_entropy = []
-        for li in range(n_layers):
-            layer_entropy = []
-            for tok_idx in range(n_tokens):
-                if tok_idx in pos_set:
-                    layer_entropy.append(data["entropy"][li][pos_set[tok_idx]])
-                else:
-                    layer_entropy.append(0.0)
-            dense_entropy.append(layer_entropy)
-
-    return {
-        **data,
-        "positions": None,
-        "tracked": dense_tracked,
-        "topk": dense_topk,
-        "entropy": dense_entropy,
-    }
-
-
 # ── Display functions ────────────────────────────────────────────────
 
 def display_logit_lens(
@@ -415,6 +362,9 @@ def display_logit_lens(
 
     Args:
         data: LogitLensData dict (V2 format with meta, layers, input, tracked, topk).
+            A payload computed at a subset of ``positions`` is passed through
+            as is: the widget maps it onto its rows and hides the rows that
+            weren't computed behind locked "… N rows not computed" bands.
         ui_state: Optional LogitLensUIState dict for initial widget configuration.
         width: CSS width applied to the heatmap viewport (the scrollable
             area that holds the table), e.g. "90%" or "600px". The line
@@ -446,7 +396,6 @@ def display_logit_lens(
     """
     data = _to_dict(data)
     _validate_logit_lens_data(data)
-    data = _densify_logit_lens_data(data)
     data_json = json.dumps(data)
 
     # full_height wins over aspect_ratio: opt out of the height cap so the
@@ -459,36 +408,10 @@ def display_logit_lens(
     ui_state_json = json.dumps(ui_state_dict)
     w, ar = _resolve_sizing(width, aspect_ratio, "logit_lens")
 
-    # Gray out rows where all .pred-cell elements are empty (uncomputed positions).
-    disable_js = """
-            function disableEmptyRows(ct) {
-                var rows = ct.querySelectorAll("tr");
-                for (var i = 0; i < rows.length; i++) {
-                    var cells = rows[i].querySelectorAll(".pred-cell");
-                    if (cells.length === 0) continue;
-                    var empty = true;
-                    for (var c = 0; c < cells.length; c++) {
-                        if (cells[c].textContent.trim() !== "") { empty = false; break; }
-                    }
-                    if (empty) {
-                        rows[i].style.pointerEvents = "none";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "0.5";
-                        }
-                    } else {
-                        rows[i].style.pointerEvents = "";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "";
-                        }
-                    }
-                }
-            }
-            disableEmptyRows(container);
-            new MutationObserver(function() { disableEmptyRows(container); })
-                .observe(container, { childList: true, subtree: true });"""
 
-    html = _widget_html("LogitLensWidget", "ll", data_json, ui_state_json, w, ar,
-                         extra_js=disable_js, use_css_vars=True)
+    html = _widget_html(
+        "LogitLensWidget", "ll", data_json, ui_state_json, w, ar, use_css_vars=True
+    )
     return _display_or_return(html, return_html)
 
 
@@ -512,6 +435,7 @@ def display_j_lens(
 
     Args:
         data: JLensData dict (V2 format with meta, layers, input, tracked, topk).
+            Sparse ``positions`` render as in ``display_logit_lens``.
         ui_state: Optional UI state dict for initial widget configuration.
         width: CSS width applied to the heatmap viewport. Defaults to global setting.
         aspect_ratio: CSS aspect-ratio applied to the widget root (e.g. "5 / 3").
@@ -533,8 +457,6 @@ def display_j_lens(
     """
     data = _to_dict(data)
     _validate_j_lens_data(data)
-    # J-lens shares the logit-lens data format, so reuse its densifier.
-    data = _densify_logit_lens_data(data)
     data_json = json.dumps(data)
 
     # full_height wins over aspect_ratio: opt out of the height cap so the
@@ -550,38 +472,12 @@ def display_j_lens(
     ui_state_json = json.dumps(ui_state_dict)
     w, ar = _resolve_sizing(width, aspect_ratio, "j_lens")
 
-    # Gray out rows where all .pred-cell elements are empty (uncomputed positions).
-    disable_js = """
-            function disableEmptyRows(ct) {
-                var rows = ct.querySelectorAll("tr");
-                for (var i = 0; i < rows.length; i++) {
-                    var cells = rows[i].querySelectorAll(".pred-cell");
-                    if (cells.length === 0) continue;
-                    var empty = true;
-                    for (var c = 0; c < cells.length; c++) {
-                        if (cells[c].textContent.trim() !== "") { empty = false; break; }
-                    }
-                    if (empty) {
-                        rows[i].style.pointerEvents = "none";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "0.5";
-                        }
-                    } else {
-                        rows[i].style.pointerEvents = "";
-                        for (var c = 0; c < cells.length; c++) {
-                            cells[c].style.opacity = "";
-                        }
-                    }
-                }
-            }
-            disableEmptyRows(container);
-            new MutationObserver(function() { disableEmptyRows(container); })
-                .observe(container, { childList: true, subtree: true });"""
 
     # J-lens reuses the logit-lens widget (identical data format) until it
     # gets its own JS widget.
-    html = _widget_html("LogitLensWidget", "jl", data_json, ui_state_json, w, ar,
-                         extra_js=disable_js, use_css_vars=True)
+    html = _widget_html(
+        "LogitLensWidget", "jl", data_json, ui_state_json, w, ar, use_css_vars=True
+    )
     return _display_or_return(html, return_html)
 
 

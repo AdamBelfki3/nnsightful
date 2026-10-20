@@ -18,6 +18,9 @@ pytest tests/test_logit_lens.py
 
 # Use different models
 pytest --model-names "openai-community/gpt2,google/gemma-3-1b-pt"
+
+# JS/TS widget tests (node's built-in test runner, after `npm install`)
+npm test
 ```
 
 ## What is tested
@@ -60,8 +63,7 @@ types, so a wrong number fails, not just a wrong shape.
   tokens or a position selection.
 - **Positions**: selecting prompt positions keeps every generated one, and
   the rows equal the full run's; `positions` is the selected prompt indices
-  followed by the generated ones, which the viz densifies back onto the
-  prompt + generated rows; `raw=True` holds the same rows; a selection
+  followed by the generated ones; `raw=True` holds the same rows; a selection
   outside the prompt (generated positions included) raises before
   generating.
 
@@ -94,7 +96,24 @@ Every tool through every way of running it:
 ### `test_utils.py`, `test_viz.py`
 
 `resolve_indices` and the `nnsightful.viz` display functions; no model
-needed.
+needed. A payload with sparse `positions` reaches the widget unchanged (the
+widget maps it onto its rows).
+
+### `js/` (`npm test`)
+
+`run.mjs` bundles `js/*.test.ts` with esbuild and runs them with
+`node --test`. The fixtures in `js/fixtures/` are gpt2 logit-lens and j-lens
+payloads (`top_k=2`, trajectories rounded to 4 decimals), each dense and with
+a `positions` selection.
+
+- **Densify**: a sparse payload maps onto the dense run's rows across
+  `input + completion`, with empty cells, `{}` tracked and `0` entropy at the
+  rows that weren't computed; dense payloads pass through.
+- **Locked sections**: each gap of uncomputed rows becomes one locked
+  collapsed section, which stays collapsed even when flagged expanded.
+- **Composition**: host sections merged ahead of the locked ones keep their
+  indices; a host section entirely over uncomputed rows is dropped, and
+  expanding one that overlaps them still leaves those rows banded.
 
 ### `benchmark/`
 

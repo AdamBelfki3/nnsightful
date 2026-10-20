@@ -15,9 +15,15 @@ export interface LogitLensData {
      *  row sequence is `input + completion`; the widget derives the
      *  prompt/generation split — and a highlight — from the two lengths. */
     completion?: string[];
+    /** Absolute row indices (over `input + completion`) the lens was computed
+     *  at, in order. When set, `tracked[i]`, `topk[layer][i]` and
+     *  `entropy[layer][i]` describe row `positions[i]` only; the widget maps
+     *  them back onto their rows and hides the rest behind locked bands.
+     *  Omitted / null = dense (every row, in order). */
+    positions?: number[] | null;
     tracked: Record<string, number[]>[];
     topk: string[][][];
-    entropy?: number[][];
+    entropy?: number[][] | null;
 }
 
 /**

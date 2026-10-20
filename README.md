@@ -42,7 +42,9 @@ data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_
 ```python
 from nnsightful import display_logit_lens, display_line_plot
 
-# Display a logit lens heatmap + trajectory chart
+# Display a logit lens heatmap + trajectory chart. With a `positions`
+# selection only the computed rows show; each run of the others folds into a
+# locked "… N rows not computed" band
 display_logit_lens(data, dark_mode=True)
 
 # Display an activation patching line plot
@@ -57,6 +59,17 @@ import { LogitLensWidget, LinePlotWidget } from "nnsightful";
 <LogitLensWidget data={data} darkMode={true} />
 <LinePlotWidget data={data} darkMode={true} />
 ```
+
+The logit-lens widget takes the tools' payload as is, sparse `positions`
+included. Rows it wasn't computed at are hidden behind locked collapsed
+sections, kept apart from the `collapsedSections` in its UI state: those are
+the host's (indices in `onToggleCollapse` / `onRemoveCollapse` refer to that
+array) and only they are persisted.
+
+In the generic heatmap core, a `collapsedSections` entry with `locked: true`
+is always collapsed — its band has no expand affordance and ignores clicks —
+and wins over any other section overlapping its rows; `label` replaces the
+"hidden" in "… N rows hidden".
 
 ## Project Structure
 
@@ -84,6 +97,7 @@ nnsightful/
 ```bash
 npm install
 npm run build
+npm test       # widget tests (node's built-in test runner)
 ```
 
 This produces:

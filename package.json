@@ -22,7 +22,8 @@
     "prepare": "node esbuild.config.mjs && tsc",
     "build": "node esbuild.config.mjs && tsc",
     "build:watch": "node esbuild.config.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/js/run.mjs"
   },
   "peerDependencies": {
     "react": "^18.2.0 || ^19.0.0",

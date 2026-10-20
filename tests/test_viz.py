@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ import pytest
 from IPython.display import HTML
 
 from nnsightful.types import LogitLensData, LogitLensMeta
-from nnsightful.viz import display_line_plot, display_logit_lens
+from nnsightful.viz import display_j_lens, display_line_plot, display_logit_lens
 
 
 def _make_logit_lens_data(**overrides) -> dict:
@@ -82,6 +83,18 @@ class TestDisplayLogitLens:
         )
         result = display_logit_lens(pydantic_data, return_html=True)
         assert isinstance(result, HTML)
+
+    @pytest.mark.parametrize("display", [display_logit_lens, display_j_lens])
+    @patch("nnsightful.viz._get_standalone_js", return_value=FAKE_JS)
+    def test_sparse_positions_reach_the_widget_as_is(self, _mock, display):
+        """The widget maps a selection onto its rows; the payload isn't densified."""
+        data = _make_logit_lens_data(
+            input=["The", " cat", " sat"],
+            positions=[0, 2],
+        )
+        html = display(data, return_html=True).data
+        payload = json.loads(re.search(r"var data = (.*);\n", html).group(1))
+        assert payload == data
 
     def test_missing_keys_raises(self):
         with pytest.raises(ValueError, match="missing required keys"):
