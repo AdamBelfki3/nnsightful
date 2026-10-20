@@ -128,10 +128,6 @@ class TestLocal:
     def test_call_returns_the_typed_payload(self, case, local_payload):
         assert type(local_payload) is case.data_type
 
-    def test_run_matches_call(self, model, case, local_payload):
-        args, kwargs = case.call_args(model)
-        assert case.tool._run(model, *args, **kwargs) == local_payload
-
     def test_payload_survives_json(self, case, local_payload):
         restored = case.data_type.model_validate_json(local_payload.model_dump_json())
         assert restored == local_payload
@@ -150,7 +146,7 @@ class TestRemote:
         """Workbench's flow: submit for a job id, poll it from a fresh backend."""
         args, kwargs = case.call_args(model)
         submit = RemoteBackend(model.to_model_key(), blocking=False)
-        job_id = case.tool._run(
+        job_id = case.tool(
             model, *args, remote=True, backend=submit, non_blocking=True, **kwargs
         )
         assert isinstance(job_id, str) and job_id
@@ -173,7 +169,7 @@ class TestRemote:
 
         async def run():
             backend = AsyncRemoteBackend(model.to_model_key())
-            returned = case.tool._run(
+            returned = case.tool(
                 model, *args, remote=True, backend=backend, non_blocking=True, **kwargs
             )
             return returned, await backend

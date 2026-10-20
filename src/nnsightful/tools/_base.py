@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import nnsight
+import torch
+
 from ..types import ToolData
 from ._utils import IndexSpec, resolve_indices
 
@@ -12,43 +15,98 @@ if TYPE_CHECKING:
 class Tool():
     """Abstract base for nnsightful tools.
 
-    Subclasses set :attr:`data_class` to their result data class and implement
-    ``_run``, which sets up the trace/session, collects the tensors and, still
-    inside the trace, formats them with :meth:`format` into a ``data_class``
-    instance. On NDIF that runs server-side, and the instance is what is saved
-    and sent back. With ``raw=True`` ``_run`` returns the tensors unformatted
-    instead; :meth:`format` can be applied to them afterwards.
+    ``__call__`` drives every run in the same steps:
+
+    1. :meth:`_prepare` (client-side): resolve and validate the arguments into
+       those of :meth:`_run` and :meth:`_format`, so a bad call fails before
+       anything is traced or sent to NDIF.
+    2. A ``model.session`` (remote or local) around:
+
+       - :meth:`_run`: the tool's traces, returning the tensors it collected;
+       - :meth:`_format` (or :meth:`_raw` with ``raw=True``): turning them
+         into the :attr:`data_class` instance. It runs in the session, so on
+         NDIF it runs server-side and only the payload is sent back.
+
+    Subclasses set :attr:`data_class` and implement those hooks; none of
+    them handles ``remote``, ``backend``, ``non_blocking`` or saving.
 
     End users call the tool directly::
 
         data = tool(model, prompt, ...)
 
-    For async two-phase patterns (e.g. workbench), submit with ``_run`` and
+    For async two-phase patterns (e.g. workbench), submit without waiting and
     read the instance from the job's results::
 
-        job_id = tool._run(
-            model, prompt, remote=True, backend=backend, non_blocking=True
-        )
+        job_id = tool(model, prompt, remote=True, backend=backend, non_blocking=True)
         # ... later, from a backend polling that job ...
         data = backend()["results"]
     """
 
     data_class: type[ToolData]
 
-    def _run(
+    def __call__(
         self,
         model: "StandardizedTransformer",
         *args,
         remote: bool = False,
         backend=None,
+        non_blocking: bool = False,
+        raw: bool = False,
         **kwargs,
     ) -> ToolData | Any:
-        """Run the trace/session and return the formatted data.
+        """Run the tool.
 
-        With ``raw=True`` returns the unformatted tensors instead, and with
-        ``remote`` and ``non_blocking`` the NDIF job id to poll.
+        Returns the :attr:`data_class` instance; with ``raw=True`` the
+        unformatted tensors (see :meth:`_raw`), and with ``remote`` and
+        ``non_blocking`` the NDIF job id to poll.
         """
-        ...
+        run_kwargs, format_kwargs = self._prepare(model, *args, **kwargs)
+
+        with torch.no_grad(), model.session(remote=remote, backend=backend):
+            outputs = self._run(model, **run_kwargs)
+            if raw:
+                results = self._raw(model, outputs)
+            else:
+                results = self._format(model, outputs, **format_kwargs)
+            nnsight.save(results)
+
+        if remote and non_blocking:
+            return backend.job_id
+
+        return results
+
+    def format(self, *args, **kwargs) -> ToolData:
+        """Format a run's tensors into a :attr:`data_class` instance.
+
+        Delegates to ``data_class.format`` (e.g.
+        :meth:`~nnsightful.types.LogitLensData.format`), which documents the
+        arguments.
+        """
+        return self.data_class.format(*args, **kwargs)
+
+    def _prepare(
+        self, model: "StandardizedTransformer", *args, **kwargs
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve and validate the call's arguments.
+
+        Returns the keyword arguments of :meth:`_run` and of :meth:`_format`;
+        each of those lists the arguments it takes.
+        """
+        raise NotImplementedError
+
+    def _run(self, model: "StandardizedTransformer", **kwargs) -> dict[str, Any]:
+        """Trace the model and return the tensors the tool collected."""
+        raise NotImplementedError
+
+    def _format(
+        self, model: "StandardizedTransformer", outputs: dict[str, Any], **kwargs
+    ) -> ToolData:
+        """Turn a run's outputs into the :attr:`data_class` instance."""
+        raise NotImplementedError
+
+    def _raw(self, model: "StandardizedTransformer", outputs: dict[str, Any]) -> Any:
+        """What ``raw=True`` returns: the run's outputs, unformatted."""
+        return outputs
 
     @staticmethod
     def _select_positions(positions: IndexSpec, n_tokens: int) -> list[int] | None:
@@ -90,32 +148,3 @@ class Tool():
             return slice(selected[0], selected[-1] + 1)
         return selected
 
-    def format(self, *args, **kwargs) -> ToolData:
-        """Format a run's tensors into a :attr:`data_class` instance.
-
-        Delegates to ``data_class.format`` (e.g.
-        :meth:`~nnsightful.types.LogitLensData.format`), which documents the
-        arguments.
-        """
-        return self.data_class.format(*args, **kwargs)
-
-    def __call__(
-        self,
-        model: "StandardizedTransformer",
-        *args,
-        remote: bool=False,
-        backend=None,
-        non_blocking=False,
-        raw=False,
-        **kwargs,
-    ) -> ToolData | Any:
-        """Run the tool; same as ``_run``."""
-        return self._run(
-            model,
-            *args,
-            remote=remote,
-            backend=backend,
-            non_blocking=non_blocking,
-            raw=raw,
-            **kwargs,
-        )

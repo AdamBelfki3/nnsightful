@@ -125,7 +125,7 @@ class TestGeneration:
         assert [len(layer) for layer in data.entropy] == [n_pos] * model.num_layers
 
     def test_raw_concatenates_the_steps(self, model, has_lens):
-        raw = j_lens._run(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)
+        raw = j_lens(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)
         n_pos = len(model.tokenizer.encode(PROMPT)) + self.MAX_NEW_TOKENS - 1
 
         assert raw.device.type == "cpu"
@@ -153,12 +153,12 @@ class TestGeneration:
                 output = tracer.result.save()
             token_ids = output[0].tolist()
         kwargs = dict(max_new_tokens=max_new_tokens, positions=positions)
-        raw = j_lens._run(model, PROMPT, raw=True, **kwargs)
+        raw = j_lens(model, PROMPT, raw=True, **kwargs)
         raw = raw.to(model.lm_head.weight.device)
 
         assert j_lens.format(
             raw, model, PROMPT, token_ids, selected, top_k=3
-        ) == j_lens._run(model, PROMPT, top_k=3, **kwargs)
+        ) == j_lens(model, PROMPT, top_k=3, **kwargs)
 
 
 @pytest.fixture(scope="module")
@@ -191,8 +191,8 @@ class TestPositions:
         assert data.entropy == [[layer[p] for p in rows] for layer in full.entropy]
 
     def test_raw_holds_the_selected_then_generated_rows(self, model, has_lens):
-        full = j_lens._run(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)
-        raw = j_lens._run(
+        full = j_lens(model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True)
+        raw = j_lens(
             model, PROMPT, max_new_tokens=self.MAX_NEW_TOKENS, raw=True, positions=2
         )
         n_prompt = len(model.tokenizer.encode(PROMPT))
