@@ -431,7 +431,7 @@ differences.
 
 ## Remote execution
 
-Each nnsightful tool accepts `remote=True`. The runner uses a custom
+Each nnsightful tool takes an `exec_mode`. The runner uses a custom
 `RemoteBackendCounter` (a subclass of `nnsight`'s `RemoteBackend`)
 that records per-phase latency via status callbacks:
 
@@ -508,8 +508,8 @@ each call, aggregates the stats, and turns failures into failed /
 unsupported results.
 
 - **Meters** (`meters.py`) are context managers around one tool call:
-  `LocalLatency` (synced wall clock), `RemoteLatency` (injects
-  `remote=True` and a fresh `backend=` counter, records the four
+  `LocalLatency` (synced wall clock), `RemoteLatency` (passes
+  `exec_mode={"remote": True, "backend": counter}` with a fresh counter, records the four
   phases) and `PeakMemory` (peak allocated beyond what was allocated
   before the call). An out-of-memory error is recorded on the meter
   instead of raised. Local calls also run under NDIF's autocast.

@@ -39,38 +39,41 @@ data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_
 
 ### Running on NDIF
 
-Every tool takes `remote=True` to run on [NDIF](https://ndif.us); the result
-is formatted there and only the payload comes back.
+Where a tool runs is its `exec_mode`. On [NDIF](https://ndif.us) the result is
+formatted there and only the payload comes back.
 
 ```python
-# Blocking: waits for the job and returns the data, as locally
-data = logit_lens(model, prompt, remote=True)
+from nnsightful import ExecMode, NonBlockingToolBackend
 
-# Non-blocking: submit, get the job id, and collect the result later
-from nnsight.intervention.backends.remote import RemoteBackend
+# Local (the default) or blocking remote: the data, as usual
+data = logit_lens(model, prompt)
+data = logit_lens(model, prompt, exec_mode=ExecMode.REMOTE)
 
-job_id = logit_lens(model, prompt, remote=True, non_blocking=True,
-                    backend=RemoteBackend(model.to_model_key(), blocking=False))
-poll = RemoteBackend(model.to_model_key(), job_id=job_id, blocking=False)
-saves = poll()                    # None until the job completes
-data = saves["results"]
+# Non-blocking: submit, and collect the result later — here or, from the job
+# id, in another request or process
+job = logit_lens(model, prompt, exec_mode=ExecMode.REMOTE_NON_BLOCKING)
+job.job_id
+data = job.poll()                 # None until the job completes
+data = job.result(timeout=300)    # or wait for it
+data = NonBlockingToolBackend.from_job(model, job.job_id).result()
 
-# Async: an AsyncRemoteBackend gives a RemoteRun, consumed on an event loop
-from nnsight.intervention.backends.remote import AsyncRemoteBackend
+# Async, on an event loop: await the result, or stream the status updates
+run = logit_lens(model, prompt, exec_mode=ExecMode.REMOTE_ASYNC)
+data = await run.result()
+async for update in run.updates():
+    print(update.status)          # QUEUED, DISPATCHED, RUNNING, COMPLETED
+data = await run.result()         # returns at once after the stream
 
-run = logit_lens(model, prompt, remote=True,
-                 backend=AsyncRemoteBackend(model.to_model_key()))
-data = await run                  # wait for the result
-
-# ...or stream the job's status updates as they land, e.g. to a client
-async for update in run:
-    print(update.status)          # RECEIVED, QUEUED, RUNNING, ... COMPLETED
-data = run.result
+# Your own backend: pass `model.session` arguments; the backend is returned
+backend = logit_lens(model, prompt, exec_mode={"remote": True, "backend": my_backend})
 ```
 
-A `RemoteRun` is consumed once (await it or iterate it), and an `ERROR`
-status raises `RemoteError`. The data classes are built on NDIF, so the
-client's pydantic version has to match the server's to load them.
+The modes also accept their names (`exec_mode="remote_async"`). The backends
+the tool builds carry the model's per-request environment (attention
+implementation, PEFT adapter), as nnsight's own remote backends do. An async
+run's status stream is consumed once, and an `ERROR` status raises
+`RemoteError`. The data classes are built on NDIF, so the client's pydantic
+version has to match the server's to load them.
 
 ### Jupyter visualizations
 

@@ -130,8 +130,8 @@ class LocalLatency(Meter):
 class RemoteLatency(Meter):
     """Per-phase seconds of a remote call; :attr:`HEADLINE` is the reported stat.
 
-    Each call gets a fresh backend counter, passed as ``backend=`` with
-    ``remote=True``.
+    Each call gets a fresh backend counter, passed as the call's
+    ``exec_mode={"remote": True, "backend": counter}``.
     """
 
     PHASES = ("total", "total_unqueued", "running", "download")
@@ -153,7 +153,7 @@ class RemoteLatency(Meter):
         if factory is None:
             from .backend import RemoteBackendCounter as factory
         self._counter = factory(self.model.to_model_key())
-        return {"remote": True, "backend": self._counter}
+        return {"exec_mode": {"remote": True, "backend": self._counter}}
 
     def _record(self) -> None:
         for phase, value in self._counter.get_latency().items():

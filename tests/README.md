@@ -86,11 +86,18 @@ types, so a wrong number fails, not just a wrong shape.
 Every tool through every way of running it:
 
 - **Local**: `tool(...)` returns the typed payload, and it survives JSON.
-- **Remote** (`--remote`): the blocking backend, the non-blocking
-  submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
-  with `non_blocking=True`, then `await` the backend) each return the typed
-  payload, built on NDIF, with the local run's labels and top predictions. The lenses also run with
-  `positions` set (a list, and a range), so both indexing forms run on NDIF.
+- **Exec modes** (no network): modes resolve by name; an unknown one raises;
+  the backends the tool builds carry the model's key and env; a non-blocking
+  dict without a backend is refused; a dict runs the session it describes,
+  and its backend is returned after running.
+- **Non-blocking backend** (no network): `poll()` is the tool's result once
+  complete, `result()` waits for it and times out.
+- **Remote** (`--remote`): `ExecMode.REMOTE`; `REMOTE_NON_BLOCKING` collected
+  from a backend rebuilt from the job id (workbench's flow); `REMOTE_ASYNC`
+  awaited, and streamed then awaited. Each returns the typed payload, built on
+  NDIF, with the local run's labels and top predictions. The lenses also run
+  with `positions` set (a list, and a range), so both indexing forms run on
+  NDIF.
 
 ### `test_utils.py`, `test_viz.py`
 

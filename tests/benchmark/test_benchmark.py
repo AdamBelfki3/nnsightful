@@ -650,9 +650,10 @@ class TestMeters:
     def test_remote_latency_injects_backend(self):
         meter = RemoteLatency(_FakeModel("org/a"), counter_factory=_FakeCounter)
         with meter as extra:
-            assert extra["remote"] is True and extra["backend"].key == "key:org/a"
+            mode = extra["exec_mode"]
+            assert mode["remote"] is True and mode["backend"].key == "key:org/a"
         with meter as extra2:
-            assert extra2["backend"] is not extra["backend"]
+            assert extra2["exec_mode"]["backend"] is not mode["backend"]
         stats = meter.stats()
         assert stats["mean"] == 2.0 and stats["samples"] == [2.0, 2.0]
         assert set(stats["breakdown"]) == {
@@ -900,7 +901,9 @@ class TestRunLoop:
         assert all(o["status"] == "ok" for o in outcomes)
         assert len(seen) == 1 + 2 * 2
         assert all(
-            k["remote"] is True and isinstance(k["backend"], _FakeCounter) for k in seen
+            k["exec_mode"]["remote"] is True
+            and isinstance(k["exec_mode"]["backend"], _FakeCounter)
+            for k in seen
         )
         assert outcomes[0]["stats"]["mean"] == 2.0
         assert outcomes[0]["stats"]["breakdown"]["total"]["mean"] == 3.0

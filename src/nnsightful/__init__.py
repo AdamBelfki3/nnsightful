@@ -1,6 +1,7 @@
 """nnsightful: a higher-level extension of NNsight for mechanistic interpretability."""
 
-from nnsightful.tools._base import RemoteRun, Tool
+from nnsightful.tools._base import Tool
+from nnsightful.tools.execution import AsyncToolBackend, ExecMode, NonBlockingToolBackend
 from nnsightful.tools._utils import IndexSpec, resolve_indices
 from nnsightful.tools.activation_patching import activation_patching
 from nnsightful.tools.j_lens import j_lens
@@ -30,7 +31,9 @@ __all__ = [
     "j_lens",
     "logit_lens",
     "Tool",
-    "RemoteRun",
+    "ExecMode",
+    "NonBlockingToolBackend",
+    "AsyncToolBackend",
     "ToolData",
     "IndexSpec",
     "resolve_indices",
