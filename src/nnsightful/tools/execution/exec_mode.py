@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from .async_backend import AsyncToolBackend
 from .non_blocking import NonBlockingToolBackend
+from .tool_backend import ToolBackend
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
@@ -43,10 +44,18 @@ class ExecMode(Enum):
         it returns its result instead.
 
         Raises:
+            TypeError: for an ``exec_mode`` that is none of those, or a
+                ``backend`` class that isn't a ``ToolBackend`` (only those know
+                how to be built for a model; pass any other backend built).
             ValueError: for an unknown mode name, or a non-blocking remote run
                 with no backend to collect it from (use
                 ``ExecMode.REMOTE_NON_BLOCKING``).
         """
+        if not isinstance(exec_mode, (cls, str, Mapping)):
+            raise TypeError(
+                "exec_mode must be an ExecMode, its name, or a mapping of "
+                f"model.session arguments; got {exec_mode!r}"
+            )
         if isinstance(exec_mode, str):
             try:
                 exec_mode = cls[exec_mode.upper()]
@@ -59,6 +68,12 @@ class ExecMode(Enum):
 
         backend = session.get("backend")
         if isinstance(backend, type):
+            if not issubclass(backend, ToolBackend):
+                raise TypeError(
+                    f"exec_mode's backend {backend.__name__} is a class that "
+                    "can't be built for the model; pass NonBlockingToolBackend, "
+                    "AsyncToolBackend, or a built backend instance"
+                )
             backend = session["backend"] = backend.for_model(model)
         if (
             backend is None

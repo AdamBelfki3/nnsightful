@@ -22,6 +22,11 @@ class NonBlockingToolBackend(ToolBackend, RemoteBackend):
     submitted; :attr:`job_id` identifies it. Collect the result with
     :meth:`poll` (one check) or :meth:`result` (wait). In another process,
     rebuild the backend from the job id with :meth:`from_job`.
+
+    One backend per run: once it has a job id, nnsight's backend polls that
+    job instead of submitting a new one, so a second run through the same
+    instance would silently collect the first job's result. Pass a new
+    instance, or the class, which is built afresh for each run.
     """
 
     def __init__(self, model_key: str, **kwargs: Any) -> None:

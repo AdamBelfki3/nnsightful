@@ -13,7 +13,8 @@ model:
 - ``ExecMode.REMOTE_ASYNC`` submits the job and returns an
   :class:`AsyncToolBackend` to await the result or stream status updates.
 - Any other mapping with a ``backend`` returns that backend: the caller
-  drives it.
+  drives it. A backend serves one run, so pass a new instance (or the class,
+  built afresh for each run) on every call.
 
 The two backends are nnsight's, built for the model (with its per-request
 environment) and turned to the tool: their results are the tool's result

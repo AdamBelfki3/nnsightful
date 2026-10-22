@@ -154,6 +154,18 @@ class TestExecMode:
         with pytest.raises(ValueError, match="expected one of local, remote"):
             ExecMode.resolve("cloud", model)
 
+    @pytest.mark.parametrize("bad", [None, True, ["remote"]], ids=repr)
+    def test_an_exec_mode_of_the_wrong_type_raises(self, model, bad):
+        with pytest.raises(TypeError, match="exec_mode must be an ExecMode"):
+            logit_lens(model, PROMPT, exec_mode=bad)
+
+    def test_a_backend_class_that_isnt_a_tool_backend_raises(self, model):
+        """Only a tool backend knows how to be built for a model."""
+        with pytest.raises(TypeError, match="RemoteBackend is a class"):
+            logit_lens(
+                model, PROMPT, exec_mode={"remote": True, "backend": RemoteBackend}
+            )
+
     def test_a_run_never_changes_a_mode(self, model):
         """Every call shares a mode's preset; each gets its own session and
         its own backend."""

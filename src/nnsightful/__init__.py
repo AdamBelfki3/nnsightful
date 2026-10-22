@@ -1,9 +1,13 @@
 """nnsightful: a higher-level extension of NNsight for mechanistic interpretability."""
 
 from nnsightful.tools._base import Tool
-from nnsightful.tools.execution import AsyncToolBackend, ExecMode, NonBlockingToolBackend
 from nnsightful.tools._utils import IndexSpec, resolve_indices
 from nnsightful.tools.activation_patching import activation_patching
+from nnsightful.tools.execution import (
+    AsyncToolBackend,
+    ExecMode,
+    NonBlockingToolBackend,
+)
 from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
 from nnsightful.types import (

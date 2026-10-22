@@ -68,7 +68,10 @@ data = await run.result()         # returns at once after the stream
 backend = logit_lens(model, prompt, exec_mode={"remote": True, "backend": my_backend})
 ```
 
-The modes also accept their names (`exec_mode="remote_async"`). The backends
+A backend serves one run: pass a new one (or the class, e.g.
+`NonBlockingToolBackend`, built for each run) on every call. A non-blocking
+backend that already has a job id polls that job instead of submitting a new
+one. The modes also accept their names (`exec_mode="remote_async"`). The backends
 the tool builds carry the model's per-request environment (attention
 implementation, PEFT adapter), as nnsight's own remote backends do. An async
 run's status stream is consumed once, and an `ERROR` status raises
