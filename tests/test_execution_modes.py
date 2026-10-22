@@ -49,6 +49,7 @@ class ToolCase:
     inputs: Callable[[Any], tuple[tuple, dict]]
     key: Callable[[Any], Any]
     needs_lens: bool = False
+    raw_key: Callable[[Any], Any] = lambda raw: tuple(raw.shape)
 
     POLL_TIMEOUT = 600
 
@@ -109,6 +110,7 @@ CASES = [
         ActivationPatchingData,
         inputs=_patching_inputs,
         key=lambda d: d.tokenLabels[:2],
+        raw_key=lambda raw: (sorted(raw), len(raw["patched_logits"])),
     ),
 ]
 
@@ -119,6 +121,7 @@ def case(request) -> ToolCase:
 
 
 _local_payloads: dict[tuple[str, str], ToolData] = {}
+_local_raws: dict[tuple[str, str], Any] = {}
 
 
 @pytest.fixture
@@ -129,6 +132,16 @@ def local_payload(model, case):
         args, kwargs = case.call_args(model)
         _local_payloads[cache_key] = case.tool(model, *args, **kwargs)
     return _local_payloads[cache_key]
+
+
+@pytest.fixture
+def local_raw(model, case):
+    """``tool(..., raw=True)`` run locally, once per model and tool."""
+    cache_key = (model.repo_id, case.name)
+    if cache_key not in _local_raws:
+        args, kwargs = case.call_args(model)
+        _local_raws[cache_key] = case.tool(model, *args, raw=True, **kwargs)
+    return _local_raws[cache_key]
 
 
 class TestLocal:
@@ -219,29 +232,118 @@ class TestExecMode:
 
 
 class TestNonBlockingToolBackend:
-    """Collecting a submitted job's result, without the network."""
+    """Collecting a submitted job's result, without the network: a fake HTTP
+    client answers nnsight's real ``poll``, and the result download is stubbed."""
 
-    @staticmethod
-    def _backend(monkeypatch, polls):
-        backend = NonBlockingToolBackend("key", host="http://ndif.test", job_id="j")
-        answers = iter(polls)
-        monkeypatch.setattr(
-            RemoteBackend, "poll", lambda self, tracer=None: next(answers)
+    class _Response:
+        """One answer to ``GET /response/{job_id}``: a status, or a 404."""
+
+        def __init__(self, status=None, description="", status_code=200):
+            self.status_code = status_code
+            url = "https://bucket.test/result" if status == Status.COMPLETED else None
+            self.text = (
+                ResponseModel(
+                    id="job-1", status=status, description=description, data=url
+                ).model_dump_json()
+                if status is not None
+                else ""
+            )
+
+        def raise_for_status(self):
+            pass
+
+    class _Client:
+        """Stands in for ``httpx.Client``, answering each GET in turn."""
+
+        def __init__(self, answers):
+            self.answers = iter(answers)
+            self.urls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers=None):
+            self.urls.append(url)
+            return next(self.answers)
+
+    def _backend(self, monkeypatch, answers):
+        backend = NonBlockingToolBackend("key", host="http://ndif.test", job_id="job-1")
+        client = self._Client(answers)
+        monkeypatch.setattr("httpx.Client", lambda **kwargs: client)
+        backend.download_result = lambda url: {"results": "data", "other": 1}
+        return backend, client
+
+    def test_from_job_keeps_the_job_id(self, model):
+        """How another request or process picks a submitted job back up."""
+        backend = NonBlockingToolBackend.from_job(model, "job-123")
+        assert backend.job_id == "job-123"
+        assert backend.blocking is False
+        assert backend.model_key == model.to_model_key()
+        assert backend.env == model._remoteable_get_env()
+
+    def test_a_run_submits_without_waiting(self):
+        """With no job yet, nnsight's backend submits over HTTP (no websocket
+        held open); once it has a job id, calling it polls instead."""
+        backend = NonBlockingToolBackend("key", host="http://ndif.test")
+        calls = []
+        backend.submit = lambda tracer: calls.append("submit")
+        backend.request = lambda request, tracer: calls.append("request")
+        backend(object())
+        assert backend.blocking is False
+        assert calls == ["submit"]
+
+    def test_poll_is_none_until_complete_then_the_tools_result(self, monkeypatch):
+        backend, client = self._backend(
+            monkeypatch,
+            [
+                self._Response(status_code=404),
+                self._Response(Status.RUNNING),
+                self._Response(Status.COMPLETED),
+            ],
         )
-        return backend
-
-    def test_poll_is_the_tools_result_once_complete(self, monkeypatch):
-        backend = self._backend(monkeypatch, [None, {"results": "data", "x": 1}])
+        assert backend.poll() is None  # not registered yet
         assert backend.poll() is None
+        assert backend.status == Status.RUNNING
         assert backend.poll() == "data"
+        assert backend.status == Status.COMPLETED
+        assert client.urls == ["http://ndif.test/response/job-1"] * 3
 
-    def test_result_waits_for_completion(self, monkeypatch):
-        backend = self._backend(monkeypatch, [None, None, {"results": "data"}])
+    def test_result_waits_through_an_unregistered_and_running_job(self, monkeypatch):
+        backend, _ = self._backend(
+            monkeypatch,
+            [
+                self._Response(status_code=404),
+                self._Response(Status.QUEUED),
+                self._Response(Status.RUNNING),
+                self._Response(Status.COMPLETED),
+            ],
+        )
         assert backend.result(interval=0) == "data"
 
+    def test_an_error_response_raises(self, monkeypatch):
+        backend, _ = self._backend(
+            monkeypatch,
+            [self._Response(Status.RUNNING), self._Response(Status.ERROR, "boom")],
+        )
+        assert backend.poll() is None
+        with pytest.raises(RemoteError, match="boom"):
+            backend.poll()
+
+        backend, _ = self._backend(
+            monkeypatch,
+            [self._Response(Status.QUEUED), self._Response(Status.ERROR, "boom")],
+        )
+        with pytest.raises(RemoteError, match="boom"):
+            backend.result(interval=0)
+
     def test_result_times_out(self, monkeypatch):
-        backend = self._backend(monkeypatch, iter(lambda: None, 1))
-        with pytest.raises(TimeoutError, match="job j"):
+        backend, _ = self._backend(
+            monkeypatch, iter(lambda: self._Response(Status.RUNNING), None)
+        )
+        with pytest.raises(TimeoutError, match="job job-1"):
             backend.result(timeout=0.01, interval=0)
 
 
@@ -399,3 +501,74 @@ class TestRemote:
         assert backend.job_id
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
+
+    def test_raw_non_blocking(self, model, case, local_raw):
+        """``raw=True`` comes back through the backend as the unformatted
+        outputs (compared by shape: NDIF's dtype can differ)."""
+        args, kwargs = case.call_args(model)
+        job = case.tool(
+            model,
+            *args,
+            raw=True,
+            exec_mode=ExecMode.REMOTE_NON_BLOCKING,
+            **kwargs,
+        )
+        raw = job.result(timeout=case.POLL_TIMEOUT)
+        assert case.raw_key(raw) == case.raw_key(local_raw)
+
+    def test_raw_async(self, model, case, local_raw):
+        args, kwargs = case.call_args(model)
+
+        async def run():
+            backend = case.tool(
+                model, *args, raw=True, exec_mode=ExecMode.REMOTE_ASYNC, **kwargs
+            )
+            return await backend.result()
+
+        raw = asyncio.run(run())
+        assert case.raw_key(raw) == case.raw_key(local_raw)
+
+
+@pytest.mark.remote
+class TestRemoteFailure:
+    """A job that fails on the server surfaces as ``RemoteError`` in every mode.
+
+    The failing call patches a source position past the end of the prompt:
+    nothing checks it before the run, so the trace fails on NDIF.
+    """
+
+    @staticmethod
+    def _failing(model, exec_mode):
+        return activation_patching(
+            model,
+            SRC_PROMPT,
+            TGT_PROMPT,
+            src_pos=[999],
+            tgt_pos=[_patching_inputs(model)[1]["tgt_pos"][0]],
+            tgt_freeze=[],
+            exec_mode=exec_mode,
+        )
+
+    def test_blocking_raises(self, model):
+        with pytest.raises(RemoteError):
+            self._failing(model, ExecMode.REMOTE)
+
+    def test_non_blocking_result_raises(self, model):
+        job = self._failing(model, ExecMode.REMOTE_NON_BLOCKING)
+        assert job.job_id
+        with pytest.raises(RemoteError):
+            job.result(timeout=ToolCase.POLL_TIMEOUT)
+
+    def test_async_stream_and_result_raise(self, model):
+        statuses = []
+
+        async def run():
+            backend = self._failing(model, ExecMode.REMOTE_ASYNC)
+            with pytest.raises(RemoteError):
+                async for update in backend.updates():
+                    statuses.append(update.status)
+            with pytest.raises(RemoteError):
+                await backend.result()
+
+        asyncio.run(run())
+        assert statuses[-1] == Status.ERROR
