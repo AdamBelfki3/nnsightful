@@ -5,7 +5,7 @@
  * for use in Jupyter notebooks and plain HTML pages.
  */
 
-import type { LogitLensData, LogitLensUIState } from "./types/logit-lens";
+import type { LogitLensData, LogitLensOptions, LogitLensUIState } from "./types/logit-lens";
 import type { LinePlotData, LinePlotOptions } from "./types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions } from "./types/heatmap-table";
 import type { ActivationPatchingData, ActivationPatchingOptions } from "./types/activation-patching";
@@ -15,6 +15,7 @@ import { LinePlotCore } from "./core/line-plot";
 import { HeatmapTableCore } from "./core/heatmap-table";
 import { ActivationPatchingCore } from "./visualizations/activation-patching";
 import { detectThemeMode, onThemeModeChange } from "./detect-theme-mode";
+import { snapshotChart, captureElement } from "./snapshot";
 
 // ── Shared helpers ──────────────────────────────────────────────────
 
@@ -52,9 +53,10 @@ function createLogitLensWidget(
     container: HTMLElement | string,
     data: LogitLensData,
     uiState?: Partial<LogitLensUIState>,
+    options?: LogitLensOptions,
 ) {
     // LogitLensCore handles its own container resolution and theme reactivity
-    return new LogitLensCore(container, data, uiState);
+    return new LogitLensCore(container, data, uiState, options);
 }
 
 function createLinePlotWidget(
@@ -192,4 +194,6 @@ export {
     createLinePlotWidget as LinePlotWidget,
     createHeatmapTableWidget as HeatmapTableWidget,
     createActivationPatchingWidget as ActivationPatchingWidget,
+    snapshotChart,
+    captureElement,
 };
