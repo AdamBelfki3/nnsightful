@@ -41,6 +41,9 @@ export function generateStyles(uid: string): string {
             font-family: var(--ll-font-sans);
             color: var(--ll-text);
             -webkit-font-smoothing: antialiased;
+            /* Don't inherit a host's pre-wrap (e.g. a contenteditable editor),
+               which would render the markup's whitespace as blank lines. */
+            white-space: normal; word-break: normal;
             background: var(--ll-surface);
             border: 1px solid var(--ll-card-border);
             border-radius: 0.75rem;
@@ -100,6 +103,16 @@ export function generateStyles(uid: string): string {
             border: none; border-radius: 0; box-shadow: none;
             background: transparent; padding: 0;
         }
+
+        /* Static (report / snapshot): bare like fill mode, sized to content,
+           and inert — the host frames it and owns any click. */
+        ${root}.ll-static {
+            border: none; border-radius: 0; box-shadow: none;
+            background: transparent; padding: 0;
+            pointer-events: none;
+        }
+        ${root}.ll-static .ll-skyline { cursor: default; }
+        ${root}.ll-static .ll-skyline-handle { display: none; }
 
         /* Leading-space marker, used in cell + row-label token rendering. */
         ${root} .ll-lead-space { color: #3b82f6; }

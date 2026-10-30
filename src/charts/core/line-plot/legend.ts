@@ -27,12 +27,14 @@ function applyLegendStyles(el: HTMLDivElement, darkMode: boolean): void {
         `border:1px solid ${border};align-self:flex-start;`;
 }
 
+/** Rebuild the legend. With `callbacks` null the legend is a static key: plain
+ *  rows with no toggle/remove affordances. */
 export function updateLegend(
     el: HTMLDivElement,
     labels: string[],
     hiddenLines: Set<number>,
     darkMode: boolean,
-    callbacks: LegendCallbacks,
+    callbacks: LegendCallbacks | null,
     data?: LinePlotData,
 ): void {
     applyLegendStyles(el, darkMode);
@@ -56,19 +58,21 @@ export function updateLegend(
         const isHidden = hiddenLines.has(idx);
         const removable = line?.removable ?? false;
 
-        const btn = document.createElement("button");
+        const btn = document.createElement(callbacks ? "button" : "div");
         btn.style.cssText =
             `display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;` +
-            `border:none;background:transparent;cursor:pointer;transition:all 0.15s;` +
+            `border:none;background:transparent;cursor:${callbacks ? "pointer" : "default"};transition:all 0.15s;` +
             `opacity:${isHidden ? "0.5" : "1"};`;
 
-        btn.addEventListener("mouseenter", () => {
-            btn.style.background = hoverBg;
-        });
-        btn.addEventListener("mouseleave", () => {
-            btn.style.background = "transparent";
-        });
-        btn.addEventListener("click", () => callbacks.onToggle(idx));
+        if (callbacks) {
+            btn.addEventListener("mouseenter", () => {
+                btn.style.background = hoverBg;
+            });
+            btn.addEventListener("mouseleave", () => {
+                btn.style.background = "transparent";
+            });
+            btn.addEventListener("click", () => callbacks.onToggle(idx));
+        }
 
         // Color dot
         const dot = document.createElement("span");
@@ -87,6 +91,11 @@ export function updateLegend(
         span.title = label;
         span.innerHTML = renderTokenHTML(label);
         btn.appendChild(span);
+
+        if (!callbacks) {
+            el.appendChild(btn);
+            return;
+        }
 
         // Close button (for removable lines)
         if (removable && callbacks.onRemove) {

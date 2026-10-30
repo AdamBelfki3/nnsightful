@@ -34,6 +34,7 @@ export function generateHeatmapStyles(uid: string): string {
             padding: 16px;
             overflow: hidden;
             -webkit-user-select: none; user-select: none;
+            white-space: normal; word-break: normal;
         }
         ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
         ${root}.hmx-dark {
@@ -189,6 +190,10 @@ export function generateHeatmapStyles(uid: string): string {
             color: var(--hmx-text-muted); cursor: pointer;
         }
         ${root} .hmx-toggle-x:hover { color: var(--hmx-text); }
+
+        /* static: a picture of the grid — no hover outline, pointer cursors
+           or band hover states. */
+        ${root}.hmx-static .hmx-frame { pointer-events: none; }
     `;
 }
 

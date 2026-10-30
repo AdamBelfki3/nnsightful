@@ -112,6 +112,40 @@ is always collapsed — its band has no expand affordance and ignores clicks —
 and wins over any other section overlapping its rows; `label` replaces the
 "hidden" in "… N rows hidden".
 
+### Static rendering and snapshots
+
+Pass `interactive={false}` (or `{ interactive: false }` to `LogitLensCore` /
+`ActivationPatchingCore`) for a static rendering of a chart's UI state, e.g.
+to embed it in a document. The logit lens then shows its full content height
+— every row, with collapsed sections as bands — without controls, hover,
+popups or keyboard focus; activation patching shows the plot and its legend
+without the mode bar and token selector. Updating `uiState` still re-renders.
+
+`snapshotChart` draws the same static rendering offscreen from a chart's data
+and UI state — the state the widget emits on `stateChange` — and captures it
+as a PNG, in the browser:
+
+```ts
+import { snapshotChart } from "nnsightful";
+
+const shot = await snapshotChart(
+    { kind: "logit-lens", data, uiState },          // logit lens and j-lens
+    { width: 880, scale: 2, darkMode: false },
+);
+shot.dataUrl;          // PNG data URL, shot.width × shot.height CSS px
+await shot.toBlob();
+
+await snapshotChart({ kind: "activation-patching", data, mode: "rank", selectedTokens: [0, 3] });
+```
+
+`width` sets the layout width (the logit lens samples its layer columns to
+fit it, as on screen); activation patching also takes a `height`. `scale` is
+the pixel density, lowered automatically for images too large for a canvas.
+`captureElement(el, options)` captures any rendered element the same way.
+Both are also on the standalone bundle (`InterpTools.snapshotChart`). Verified
+in Chromium; WebKit browsers may refuse to read back the image (the snapshot
+then rejects with an error saying so).
+
 ## Project Structure
 
 ```
