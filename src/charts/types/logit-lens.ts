@@ -78,6 +78,20 @@ export interface LogitLensUIState {
 }
 
 /**
+ * Rendering options for a LogitLens widget — how it is drawn, not what it
+ * shows (that is LogitLensUIState). Fixed at construction.
+ */
+export interface LogitLensOptions {
+    /** false: a static rendering of the UI state, e.g. for a report or a
+     *  snapshot. The heatmap takes its full content height (every row, with
+     *  collapsed sections as bands), and there are no controls, hover,
+     *  popups or keyboard focus. Default true. */
+    interactive?: boolean;
+    /** Canvas resolution for the trajectory plot; see LinePlotOptions. */
+    pixelRatio?: number;
+}
+
+/**
  * Public API of a LogitLens widget instance
  */
 export interface LogitLensWidgetInterface extends BaseWidgetInterface<LogitLensData> {

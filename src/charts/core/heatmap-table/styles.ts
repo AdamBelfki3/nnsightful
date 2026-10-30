@@ -189,6 +189,10 @@ export function generateHeatmapStyles(uid: string): string {
             color: var(--hmx-text-muted); cursor: pointer;
         }
         ${root} .hmx-toggle-x:hover { color: var(--hmx-text); }
+
+        /* static: a picture of the grid — no hover outline, pointer cursors
+           or band hover states. */
+        ${root}.hmx-static .hmx-frame { pointer-events: none; }
     `;
 }
 

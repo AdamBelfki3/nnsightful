@@ -48,6 +48,12 @@ export interface LinePlotOptions {
     legendPosition?: "right" | "none";
     showDataPoints?: boolean;
     onLineRemoved?: (lineIdx: number) => void;
+    /** false: a static rendering — no hover crosshair/tooltip, and the legend
+     *  is a plain key rather than toggle buttons. Default true. */
+    interactive?: boolean;
+    /** Canvas resolution multiplier. Defaults to window.devicePixelRatio; set
+     *  it higher to draw a sharper plot for a snapshot. */
+    pixelRatio?: number;
 }
 
 /**

@@ -28,4 +28,9 @@ export interface ActivationPatchingOptions {
     defaultSelectedTokens?: number[];
     onTokenSelectionChange?: (indices: number[]) => void;
     onModeChange?: (mode: ActivationPatchingMode) => void;
+    /** false: a static rendering — the plot and its legend only, without the
+     *  mode bar and token selector. Default true. Fixed at construction. */
+    interactive?: boolean;
+    /** Canvas resolution for the plot; see LinePlotOptions. */
+    pixelRatio?: number;
 }

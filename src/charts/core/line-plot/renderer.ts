@@ -111,7 +111,7 @@ export function drawChart(
     const ctx = canvas.getContext("2d")!;
 
     const rect = container.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = options.pixelRatio ?? (window.devicePixelRatio || 1);
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
     canvas.style.width = `${rect.width}px`;

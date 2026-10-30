@@ -13,7 +13,7 @@
  * theme detector, and LinePlotCore for the kept trajectory panel.
  */
 
-import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
+import type { LogitLensData, LogitLensOptions, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions, HeatmapRowHighlight, HeatmapCollapsedSection } from "../../types/heatmap-table";
 import { normalizeData, uncomputedSections, type NormalizedData } from "./normalize";
@@ -142,8 +142,12 @@ export function createWidget(
     containerArg: HTMLElement | string,
     inputData: LogitLensData,
     uiState?: Partial<LogitLensUIState>,
+    options?: LogitLensOptions,
 ): CreateWidgetResult | null {
     const uid = generateUid();
+    // Static: a picture of the UI state for a report or snapshot — full
+    // content height, no controls, hover, popups or focus.
+    const interactive = options?.interactive !== false;
     let container: HTMLElement | null;
     if (typeof containerArg === "string") container = document.querySelector(containerArg);
     else if (containerArg instanceof Element) container = containerArg as HTMLElement;
@@ -349,8 +353,8 @@ export function createWidget(
     // DOM SHELL
     // ═══════════════════════════════════════════════════════════════
     container.innerHTML = `
-        <div id="${uid}" tabindex="-1">
-            <div class="ll-heatmap" id="${uid}_heatmap" tabindex="0"></div>
+        <div id="${uid}"${interactive ? ' tabindex="-1"' : ' class="ll-static"'}>
+            <div class="ll-heatmap" id="${uid}_heatmap"${interactive ? ' tabindex="0"' : ""}></div>
             <div class="ll-nav" id="${uid}_nav"></div>
             <div class="ll-lineplot-wrap ll-hidden" id="${uid}_lp_wrap">
                 <div class="ll-lineplot-head">
@@ -385,8 +389,9 @@ export function createWidget(
     const popupBodyEl = document.getElementById(uid + "_popup_body")!;
 
     // Portal popup to body so position: fixed isn't broken by a
-    // transformed ancestor (and it can extend past the card edge).
-    document.body.appendChild(popupEl);
+    // transformed ancestor (and it can extend past the card edge). A static
+    // widget never opens it.
+    if (interactive) document.body.appendChild(popupEl);
 
     let linePlot: LinePlotCore | null = null;
     let overlayEl: HTMLElement | null = null;
@@ -402,7 +407,10 @@ export function createWidget(
     // column and the heatmap scroll region grows to use the leftover height;
     // otherwise (content/Jupyter) the card height is derived from the
     // aspect-ratio and the heatmap scrolls to stay inside that box.
-    const aspectRaw = getComputedStyle(widgetEl).getPropertyValue("--ll-aspect-ratio").trim();
+    // A static widget is always content-sized, so every row shows.
+    const aspectRaw = interactive
+        ? getComputedStyle(widgetEl).getPropertyValue("--ll-aspect-ratio").trim()
+        : "unbounded";
     const fillMode = !aspectRaw;
     if (fillMode) widgetEl.classList.add("ll-fill");
 
@@ -467,8 +475,10 @@ export function createWidget(
         const active = r === state.selectedRow || isPinnedRow(r);
         // Fold affordance (shown on row hover; stays lit while it's the anchor).
         // margin-right:auto in CSS pushes it to the outer (left) edge of the gutter.
-        let html = `<span class="ll-fold-handle${foldAnchor === r ? " ll-armed" : ""}" `
-            + `title="Fold rows: click / shift-click, then pick another row">⊟</span>`;
+        let html = interactive
+            ? `<span class="ll-fold-handle${foldAnchor === r ? " ll-armed" : ""}" `
+                + `title="Fold rows: click / shift-click, then pick another row">⊟</span>`
+            : "";
         if (isPinnedRow(r)) html += rowStyleMarker(lineStyleForRow(r).dash, isDarkMode());
         html += isBosToken(tok)
             ? `<span class="ll-bos-pill">bos</span>`
@@ -522,7 +532,8 @@ export function createWidget(
     // The options that drive the core each render. Striding/fit-to-width and
     // fill-vs-content are now core policies configured from widget state.
     function heatmapOptions(): Partial<HeatmapTableOptions> {
-        return {
+        const display: Partial<HeatmapTableOptions> = {
+            interactive,
             columnSizing: "fit",
             minColumnWidth: MIN_CELL,
             maxVisibleColumns: COL_CAP,
@@ -547,6 +558,11 @@ export function createWidget(
             collapsedSections: lockedSections.length
                 ? state.collapsedSections.concat(lockedSections)
                 : state.collapsedSections,
+            onVisibleColumnsChange: (visible) => { shownLayers = visible; },
+        };
+        if (!interactive) return display;
+        return {
+            ...display,
             onToggleCollapse: (idx) => {
                 const sec = state.collapsedSections[idx];
                 if (!sec) return;
@@ -560,7 +576,6 @@ export function createWidget(
                 renderHeatmap();
                 emitStateChange();
             },
-            onVisibleColumnsChange: (visible) => { shownLayers = visible; },
             onCellHover: onHeatmapCellHover,
             onCellClick: onHeatmapCellClick,
             onRowHeaderClick: (row, ev) => {
@@ -665,16 +680,16 @@ export function createWidget(
                 </div>
                 <div class="ll-nav-ticks">${ticksHtml}</div>
             </div>
-            <div class="ll-nav-controls">
+            ${interactive ? `<div class="ll-nav-controls">
                 <button class="ll-nav-btn" data-nav="panL" title="Pan left" ${start <= 0 ? "disabled" : ""}>${ICON_CHEVL}</button>
                 <button class="ll-nav-btn" data-nav="panR" title="Pan right" ${start + size >= nLayers ? "disabled" : ""}>${ICON_CHEVR}</button>
                 <div class="ll-nav-sep"></div>
                 <button class="ll-nav-btn" data-nav="zoomIn" title="Zoom in" ${atMinZoom ? "disabled" : ""}>${ICON_PLUS}</button>
                 <button class="ll-nav-btn" data-nav="zoomOut" title="Zoom out" ${atFull ? "disabled" : ""}>${ICON_MINUS}</button>
                 <button class="ll-nav-btn" data-nav="reset" title="Reset to overview">${ICON_RESET_SM}</button>
-            </div>
+            </div>` : ""}
         `;
-        attachSkylineDrag();
+        if (interactive) attachSkylineDrag();
     }
 
     // Cheap: just reposition the window overlay during a drag.
@@ -920,6 +935,8 @@ export function createWidget(
                 xAxisLabel: "layer",
                 yAxisLabel: "probability",
                 transparentBackground: true,
+                interactive,
+                pixelRatio: options?.pixelRatio,
             };
             if (!linePlot) {
                 // Pre-set min-height so LinePlotCore won't force its default
@@ -1126,10 +1143,12 @@ export function createWidget(
         updateLinePlot();
     }
 
-    document.getElementById(uid + "_popup_close")!.addEventListener("click", (e) => {
-        e.stopPropagation();
-        closePopup();
-    });
+    if (interactive) {
+        document.getElementById(uid + "_popup_close")!.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closePopup();
+        });
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // EVENT WIRING (via HeatmapTableCore callbacks)
@@ -1178,35 +1197,37 @@ export function createWidget(
         if (!cell) { hideTooltip(); return; }
         showTooltip(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e.clientX, e.clientY, cell.offsetWidth);
     };
-    hmScrollEl.addEventListener("mousemove", onScrollMove);
     // Shift-click a row label to fold — suppress the text selection it would
     // otherwise make (which the core's click guard treats as "don't act").
     const onScrollMouseDown = (e: MouseEvent) => {
         if (e.shiftKey && (e.target as HTMLElement).closest(".hmx-rowlabel")) e.preventDefault();
     };
-    hmScrollEl.addEventListener("mousedown", onScrollMouseDown);
+    if (interactive) {
+        hmScrollEl.addEventListener("mousemove", onScrollMove);
+        hmScrollEl.addEventListener("mousedown", onScrollMouseDown);
 
-    // Keyboard nav when the heatmap is focused.
-    heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-        e.preventDefault();
-        const step = e.key === "ArrowDown" ? 1 : -1;
-        let next = (state.selectedRow ?? (step > 0 ? -1 : nRows)) + step;
-        while (next >= 0 && next < nRows && !isComputedRow(next)) next += step;
-        if (isComputedRow(next)) selectRow(next, undefined, true);
-    });
+        // Keyboard nav when the heatmap is focused.
+        heatmapEl.addEventListener("keydown", (e: KeyboardEvent) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const step = e.key === "ArrowDown" ? 1 : -1;
+            let next = (state.selectedRow ?? (step > 0 ? -1 : nRows)) + step;
+            while (next >= 0 && next < nRows && !isComputedRow(next)) next += step;
+            if (isComputedRow(next)) selectRow(next, undefined, true);
+        });
 
-    // Navigator buttons
-    navEl.addEventListener("click", (e) => {
-        const btn = (e.target as HTMLElement).closest("[data-nav]") as HTMLElement | null;
-        if (!btn || btn.hasAttribute("disabled")) return;
-        const act = btn.dataset.nav;
-        if (act === "panL") panBy(-Math.max(1, Math.floor(state.viewSize / 4)));
-        else if (act === "panR") panBy(Math.max(1, Math.floor(state.viewSize / 4)));
-        else if (act === "zoomIn") zoom(-1);
-        else if (act === "zoomOut") zoom(1);
-        else if (act === "reset") resetView();
-    });
+        // Navigator buttons
+        navEl.addEventListener("click", (e) => {
+            const btn = (e.target as HTMLElement).closest("[data-nav]") as HTMLElement | null;
+            if (!btn || btn.hasAttribute("disabled")) return;
+            const act = btn.dataset.nav;
+            if (act === "panL") panBy(-Math.max(1, Math.floor(state.viewSize / 4)));
+            else if (act === "panR") panBy(Math.max(1, Math.floor(state.viewSize / 4)));
+            else if (act === "zoomIn") zoom(-1);
+            else if (act === "zoomOut") zoom(1);
+            else if (act === "reset") resetView();
+        });
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // FULL RENDER + THEME

@@ -23,6 +23,8 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
     private darkMode: boolean;
     private transparentBackground: boolean;
     private title?: string;
+    private interactive: boolean;
+    private pixelRatio?: number;
 
     private container: HTMLElement;
     private modeBar: HTMLDivElement;
@@ -41,6 +43,8 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
         this.darkMode = options.darkMode ?? false;
         this.transparentBackground = options.transparentBackground ?? false;
         this.title = options.title;
+        this.interactive = options.interactive !== false;
+        this.pixelRatio = options.pixelRatio;
         this.onTokenSelectionChange = options.onTokenSelectionChange;
         this.onModeChange = options.onModeChange;
 
@@ -57,13 +61,14 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
         container.style.width = "100%";
         container.style.height = "100%";
 
-        // Mode toggle bar
+        // Mode toggle bar + token selector. A static rendering keeps them
+        // detached: the plot's title names the mode and its legend the tokens.
         this.modeBar = this.createModeBar();
-        container.appendChild(this.modeBar);
-
-        // Token selector
         this.tokenSelectorEl = createTokenSelector(this.buildTokenSelectorConfig());
-        container.appendChild(this.tokenSelectorEl);
+        if (this.interactive) {
+            container.appendChild(this.modeBar);
+            container.appendChild(this.tokenSelectorEl);
+        }
 
         // Chart container takes remaining space
         const plotContainer = document.createElement("div");
@@ -199,6 +204,8 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
             invertYAxis: false,
             centerYAxisAtZero: false,
             logScale: false,
+            interactive: this.interactive,
+            pixelRatio: this.pixelRatio,
         };
 
         if (this.mode === "rank") {
