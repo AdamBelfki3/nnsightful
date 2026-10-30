@@ -164,6 +164,10 @@ export interface HeatmapTableOptions {
     rowRegions?: HeatmapRowRegion[];
 
     // ── Interaction ────────────────────────────────────────────────
+    /** false: a static rendering — no hover outline, no click callbacks, and
+     *  expanded sections show their rows without a re-collapse handle.
+     *  Default true. Fixed at construction. */
+    interactive?: boolean;
     onCellHover?: (row: number, col: number, ev: MouseEvent) => void;
     onCellClick?: (row: number, col: number, ev: MouseEvent) => void;
     onRowHeaderClick?: (row: number, ev: MouseEvent) => void;

@@ -2,6 +2,7 @@ export type { BaseWidgetInterface } from "./base";
 
 export type {
     LogitLensData,
+    LogitLensOptions,
     LogitLensUIState,
     LogitLensWidgetInterface,
 } from "./logit-lens";

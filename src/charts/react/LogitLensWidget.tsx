@@ -10,6 +10,10 @@ interface LogitLensWidgetProps {
     className?: string;
     titleSize?: string;
     contentSize?: string;
+    /** false: a static rendering of `uiState` (see LogitLensOptions). Fixed
+     *  per `data` (the core is rebuilt when data changes). */
+    interactive?: boolean;
+    pixelRatio?: number;
 }
 
 export function LogitLensWidget({
@@ -20,6 +24,8 @@ export function LogitLensWidget({
     className,
     titleSize = "16px",
     contentSize = "12px",
+    interactive = true,
+    pixelRatio,
 }: LogitLensWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const coreRef = useRef<LogitLensCore | null>(null);
@@ -46,7 +52,7 @@ export function LogitLensWidget({
                 ...uiState,
                 darkMode: darkMode ?? uiState?.darkMode ?? null,
             };
-            coreRef.current = new LogitLensCore(containerRef.current, data, mergedState);
+            coreRef.current = new LogitLensCore(containerRef.current, data, mergedState, { interactive, pixelRatio });
         } catch (e) {
             console.error("Failed to create LogitLensWidget:", e);
         }

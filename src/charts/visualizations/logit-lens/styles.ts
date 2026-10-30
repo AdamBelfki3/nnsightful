@@ -101,6 +101,16 @@ export function generateStyles(uid: string): string {
             background: transparent; padding: 0;
         }
 
+        /* Static (report / snapshot): bare like fill mode, sized to content,
+           and inert — the host frames it and owns any click. */
+        ${root}.ll-static {
+            border: none; border-radius: 0; box-shadow: none;
+            background: transparent; padding: 0;
+            pointer-events: none;
+        }
+        ${root}.ll-static .ll-skyline { cursor: default; }
+        ${root}.ll-static .ll-skyline-handle { display: none; }
+
         /* Leading-space marker, used in cell + row-label token rendering. */
         ${root} .ll-lead-space { color: #3b82f6; }
 

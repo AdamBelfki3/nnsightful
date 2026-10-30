@@ -81,6 +81,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             alwaysShowLastColumn: false,
             darkMode: false,
             showGrid: true,
+            interactive: true,
             ...options,
         };
         this.uid = "hmx_" + (++heatmapIdCounter) + "_" + Date.now().toString(36);
@@ -97,9 +98,13 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         this.hdrEl = this.root.querySelector(".hmx-hdr-fixed")!;
         this.scrollEl = this.root.querySelector(".hmx-scroll")!;
 
-        this.attachListeners();
+        if (this.isInteractive()) this.attachListeners();
         this.render();
         this.setupResponsive();
+    }
+
+    private isInteractive(): boolean {
+        return this.options.interactive !== false;
     }
 
     // ── Responsive (fit/fill/sampling) plumbing ────────────────────
@@ -222,6 +227,8 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         this.root.classList.toggle("hmx-dark", dark);
         this.root.classList.toggle("hmx-bare", o.chrome === "none");
         this.root.classList.toggle("hmx-fill", o.height === "fill");
+        const interactive = this.isInteractive();
+        this.root.classList.toggle("hmx-static", !interactive);
 
         const rowHdrW = o.rowHeaderWidth ?? 100;
         const hdrH = o.headerHeight ?? 26;
@@ -239,7 +246,8 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         let collapseExtraH = 0;
         for (const item of plan) {
             if (item.kind === "row") visibleRowCount++;
-            else collapseExtraH += item.kind === "band" ? COLLAPSED_BAND_H : EXPANDED_TOGGLE_H;
+            else if (item.kind === "band") collapseExtraH += COLLAPSED_BAND_H;
+            else if (interactive) collapseExtraH += EXPANDED_TOGGLE_H;
         }
         const rowH = this.resolveRowHeight(visibleRowCount, collapseExtraH);
         const tableW = rowHdrW + cellW * nCols;
@@ -356,9 +364,10 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 const plural = count === 1 ? "" : "s";
                 const text = `${count} row${plural} ${escapeHtml(item.label ?? "hidden")}`;
                 const cls = "hmx-collapsed" + (item.locked ? " hmx-collapsed-locked" : "") + (hidesHl ? " hmx-collapsed-hl" : "");
-                html += `<div class="${cls}"${item.locked ? "" : ` data-cs="${item.index}"`} data-count="${item.shown}" `
+                const expandable = interactive && !item.locked;
+                html += `<div class="${cls}"${expandable ? ` data-cs="${item.index}"` : ""} data-count="${item.shown}" `
                     + `style="width:${tableW}px;min-width:${tableW}px;height:${COLLAPSED_BAND_H}px;${hlColor ? `--hmx-hl:${escapeHtml(hlColor)};` : ""}" `
-                    + `title="${item.locked ? text : `Click to show ${count} hidden row${plural}`}">`
+                    + `title="${expandable ? `Click to show ${count} hidden row${plural}` : text}">`
                     + `<span class="hmx-collapsed-inner">… ${text}</span>`
                     + `</div>`;
                 coverY(item.start, item.end, y, y + COLLAPSED_BAND_H);
@@ -366,6 +375,8 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 continue;
             }
             if (item.kind === "handle") {
+                // A static grid shows an expanded section's rows plainly.
+                if (!interactive) continue;
                 const count = item.end - item.start + 1;
                 html += `<div class="hmx-expanded-toggle" data-cs="${item.index}" data-count="${item.shown}" `
                     + `style="width:${tableW}px;min-width:${tableW}px;" title="Collapse these ${count} rows">`

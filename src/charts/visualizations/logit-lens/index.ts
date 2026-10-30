@@ -1,4 +1,4 @@
-import type { LogitLensData, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
+import type { LogitLensData, LogitLensOptions, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import { createWidget } from "./widget";
 
 /**
@@ -15,8 +15,9 @@ export class LogitLensCore implements LogitLensWidgetInterface {
         container: HTMLElement | string,
         data: LogitLensData,
         uiState?: Partial<LogitLensUIState>,
+        options?: LogitLensOptions,
     ) {
-        const result = createWidget(container, data, uiState);
+        const result = createWidget(container, data, uiState, options);
         if (result) {
             this.widget = result.widget;
             this.styleEl = result.styleEl;
