@@ -41,6 +41,9 @@ export function generateStyles(uid: string): string {
             font-family: var(--ll-font-sans);
             color: var(--ll-text);
             -webkit-font-smoothing: antialiased;
+            /* Don't inherit a host's pre-wrap (e.g. a contenteditable editor),
+               which would render the markup's whitespace as blank lines. */
+            white-space: normal; word-break: normal;
             background: var(--ll-surface);
             border: 1px solid var(--ll-card-border);
             border-radius: 0.75rem;
