@@ -34,6 +34,7 @@ export function generateHeatmapStyles(uid: string): string {
             padding: 16px;
             overflow: hidden;
             -webkit-user-select: none; user-select: none;
+            white-space: normal; word-break: normal;
         }
         ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
         ${root}.hmx-dark {

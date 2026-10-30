@@ -52,6 +52,17 @@ const SKIP_PROP =
 // SVG geometry lives in attributes, which the clone keeps.
 const SVG_GEOMETRY = new Set(["d", "x", "y", "cx", "cy", "r", "rx", "ry"]);
 const SKIP_TAG = new Set(["script", "style", "link", "noscript", "template"]);
+// A line's computed width reads 0px while its style is none, whatever was
+// specified; once the style is set (Tailwind's preflight makes every border
+// solid), an omitted width would fall back to the initial `medium`.
+const LINE_WIDTH_OF: [style: string, width: string][] = [
+    ["border-top-style", "border-top-width"],
+    ["border-right-style", "border-right-width"],
+    ["border-bottom-style", "border-bottom-width"],
+    ["border-left-style", "border-left-width"],
+    ["outline-style", "outline-width"],
+    ["column-rule-style", "column-rule-width"],
+];
 // XML 1.0 forbids most C0 controls and U+FFFE/U+FFFF; lone surrogates are not
 // characters at all (and make encodeURIComponent throw). Model tokens can
 // hold any of these.
@@ -108,7 +119,8 @@ class StyleSandbox {
 
 /** Inline CSS for `cs`: every property that differs from the tag default,
  *  or from the parent's value (an inherited property must be restated when
- *  the parent's differs, even if it equals the default). */
+ *  the parent's differs, even if it equals the default), plus the width of
+ *  every border/outline that has a style. */
 function styleText(
     cs: CSSStyleDeclaration,
     defaults: Map<string, string>,
@@ -116,12 +128,20 @@ function styleText(
     svg: boolean,
 ): string {
     let out = "";
+    const written = new Set<string>();
     for (let i = 0; i < cs.length; i++) {
         const prop = cs.item(i);
         if (SKIP_PROP.test(prop) || (svg && SVG_GEOMETRY.has(prop))) continue;
         const value = cs.getPropertyValue(prop);
         if (value === defaults.get(prop) && (!parent || value === parent.getPropertyValue(prop))) continue;
         out += `${prop}:${value};`;
+        written.add(prop);
+    }
+    for (const [style, width] of LINE_WIDTH_OF) {
+        const lineStyle = cs.getPropertyValue(style);
+        if (lineStyle && lineStyle !== "none" && lineStyle !== "hidden" && !written.has(width)) {
+            out += `${width}:${cs.getPropertyValue(width)};`;
+        }
     }
     return out;
 }

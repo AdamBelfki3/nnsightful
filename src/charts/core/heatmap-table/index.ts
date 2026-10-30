@@ -93,7 +93,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                     <div class="hmx-hdr-fixed"></div>
                     <div class="hmx-scroll"></div>
                 </div>
-            </div>`;
+            </div>`.trim();
         this.root = document.getElementById(this.uid)!;
         this.hdrEl = this.root.querySelector(".hmx-hdr-fixed")!;
         this.scrollEl = this.root.querySelector(".hmx-scroll")!;

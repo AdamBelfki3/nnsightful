@@ -370,7 +370,7 @@ export function createWidget(
                 <div class="ll-popup-body" id="${uid}_popup_body"></div>
             </div>
         </div>
-    `;
+    `.trim();
 
     const widgetEl = document.getElementById(uid)!;
     const heatmapEl = document.getElementById(uid + "_heatmap")!;
