@@ -86,11 +86,35 @@ types, so a wrong number fails, not just a wrong shape.
 Every tool through every way of running it:
 
 - **Local**: `tool(...)` returns the typed payload, and it survives JSON.
-- **Remote** (`--remote`): the blocking backend, the non-blocking
-  submit-then-poll flow workbench uses, and `AsyncRemoteBackend` (submit
-  with `non_blocking=True`, then `await` the backend) each return the typed
-  payload, built on NDIF, with the local run's labels and top predictions. The lenses also run with
-  `positions` set (a list, and a range), so both indexing forms run on NDIF.
+- **Exec modes** (no network): modes resolve by name, in any case; an
+  unknown name, a wrong type and a backend class that isn't a tool backend
+  raise; a run never changes a mode, and each gets its own backend; the
+  backends the tool builds carry the model's key and env; a non-blocking dict
+  without a backend is refused; a dict runs the session it describes, and its
+  backend is returned after running.
+- **Non-blocking backend** (no network; a fake HTTP client answers nnsight's
+  real `poll`): `from_job` keeps the job id, model key and env; a run submits
+  over HTTP rather than holding a websocket; `poll()` is `None` while the job
+  isn't registered yet (404) or still running, then the tool's result;
+  `result()` waits through those; an `ERROR` response raises `RemoteError`
+  from both; `result()` times out.
+- **Async backend** (no network; a fake websocket feeds nnsight's real
+  `stream()`): `result()` alone, streamed updates then `result()` without
+  reading again, a loop stopped at `COMPLETED` still has the result, one
+  stopped earlier makes `result()` say so, an `ERROR` raises from both, and
+  the stream is read once.
+- **Remote** (`--remote`): `ExecMode.REMOTE`; `REMOTE_NON_BLOCKING` collected
+  from a backend rebuilt from the job id (workbench's flow); `REMOTE_ASYNC`
+  awaited, and streamed then awaited. Each returns the typed payload, built on
+  NDIF, with the local run's labels and top predictions. The lenses also run
+  with `positions` set (a list, and a range), so both indexing forms run on
+  NDIF. `raw=True` through the non-blocking and async backends returns the
+  unformatted outputs (compared by shape, since NDIF's dtype can differ).
+- **Remote failure** (`--remote`): a job that fails on the server (a patching
+  position past the prompt, which nothing checks before the run) raises
+  `RemoteError` in every mode: blocking, from the non-blocking `result()`, and
+  from the async `updates()` (after yielding `ERROR`) and `result()`.
+- **Not yet covered**: a custom backend passed in a mapping on a remote run.
 
 ### `test_utils.py`, `test_viz.py`
 

@@ -1,11 +1,12 @@
 """Every tool through every way of running it, locally and on NDIF.
 
 Local: ``tool(...)`` returns the typed payload, which survives the JSON trip
-to the frontend.
+to the frontend; ``exec_mode`` resolves to the right session and backend.
 
-Remote (``--remote``): the blocking backend, the non-blocking submit-then-poll
-flow workbench uses, and nnsight's ``AsyncRemoteBackend`` (a ``RemoteRun``,
-awaited or streamed) each return the payload the local run does. The lenses
+Remote (``--remote``): ``ExecMode.REMOTE`` (blocking), the non-blocking
+submit-then-collect flow workbench uses (``REMOTE_NON_BLOCKING``, collected
+from a backend rebuilt from the job id) and ``REMOTE_ASYNC`` (awaited or
+streamed) each return the payload the local run does. The lenses
 also run with ``positions`` set (a list for the logit lens, a range for
 j-lens). Results are compared on what is robust to the server's hardware and
 dtype: the token labels and top predictions.
@@ -14,16 +15,21 @@ dtype: the token labels and top predictions.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import pytest
-from nnsight.intervention.backends.remote import AsyncRemoteBackend, RemoteBackend
-from nnsight.schema.response import Status
+from nnsight.intervention.backends.remote import RemoteBackend, RemoteError
+from nnsight.schema.response import ResponseModel, Status
+from nnsight.tracing.backend import Backend
 
-from nnsightful.tools._base import RemoteRun, Tool
+from nnsightful.tools._base import Tool
 from nnsightful.tools.activation_patching import activation_patching
+from nnsightful.tools.execution import (
+    AsyncToolBackend,
+    ExecMode,
+    NonBlockingToolBackend,
+)
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
 from nnsightful.types import ActivationPatchingData, JLensData, LogitLensData, ToolData
@@ -43,6 +49,7 @@ class ToolCase:
     inputs: Callable[[Any], tuple[tuple, dict]]
     key: Callable[[Any], Any]
     needs_lens: bool = False
+    raw_key: Callable[[Any], Any] = lambda raw: tuple(raw.shape)
 
     POLL_TIMEOUT = 600
 
@@ -103,6 +110,7 @@ CASES = [
         ActivationPatchingData,
         inputs=_patching_inputs,
         key=lambda d: d.tokenLabels[:2],
+        raw_key=lambda raw: (sorted(raw), len(raw["patched_logits"])),
     ),
 ]
 
@@ -113,6 +121,7 @@ def case(request) -> ToolCase:
 
 
 _local_payloads: dict[tuple[str, str], ToolData] = {}
+_local_raws: dict[tuple[str, str], Any] = {}
 
 
 @pytest.fixture
@@ -125,6 +134,16 @@ def local_payload(model, case):
     return _local_payloads[cache_key]
 
 
+@pytest.fixture
+def local_raw(model, case):
+    """``tool(..., raw=True)`` run locally, once per model and tool."""
+    cache_key = (model.repo_id, case.name)
+    if cache_key not in _local_raws:
+        args, kwargs = case.call_args(model)
+        _local_raws[cache_key] = case.tool(model, *args, raw=True, **kwargs)
+    return _local_raws[cache_key]
+
+
 class TestLocal:
     def test_call_returns_the_typed_payload(self, case, local_payload):
         assert type(local_payload) is case.data_type
@@ -134,63 +153,422 @@ class TestLocal:
         assert restored == local_payload
 
 
+class TestExecMode:
+    """``exec_mode`` resolves to a session and the backend the call returns."""
+
+    def test_modes_accept_their_names(self, model):
+        assert ExecMode.resolve("local", model) == {}
+        assert ExecMode.resolve("Remote", model) == {"remote": True}
+        session = ExecMode.resolve("REMOTE_ASYNC", model)
+        assert session["remote"] is True
+        assert type(session["backend"]) is AsyncToolBackend
+
+    def test_an_unknown_mode_raises(self, model):
+        with pytest.raises(ValueError, match="expected one of local, remote"):
+            ExecMode.resolve("cloud", model)
+
+    @pytest.mark.parametrize("bad", [None, True, ["remote"]], ids=repr)
+    def test_an_exec_mode_of_the_wrong_type_raises(self, model, bad):
+        with pytest.raises(TypeError, match="exec_mode must be an ExecMode"):
+            logit_lens(model, PROMPT, exec_mode=bad)
+
+    def test_a_backend_class_that_isnt_a_tool_backend_raises(self, model):
+        """Only a tool backend knows how to be built for a model."""
+        with pytest.raises(TypeError, match="RemoteBackend is a class"):
+            logit_lens(
+                model, PROMPT, exec_mode={"remote": True, "backend": RemoteBackend}
+            )
+
+    def test_a_run_never_changes_a_mode(self, model):
+        """Every call shares a mode's preset; each gets its own session and
+        its own backend."""
+        first = ExecMode.resolve(ExecMode.REMOTE_NON_BLOCKING, model)
+        first["blocking"] = True
+        second = ExecMode.resolve(ExecMode.REMOTE_NON_BLOCKING, model)
+        assert second["backend"] is not first["backend"]
+        assert ExecMode.REMOTE_NON_BLOCKING.value == {
+            "remote": True,
+            "backend": NonBlockingToolBackend,
+        }
+        with pytest.raises(TypeError):
+            ExecMode.REMOTE.value["blocking"] = False
+
+    def test_a_dict_backend_class_is_built_for_the_model(self, model):
+        session = ExecMode.resolve(
+            {"remote": True, "backend": NonBlockingToolBackend}, model
+        )
+        assert type(session["backend"]) is NonBlockingToolBackend
+        assert session["backend"].model_key == model.to_model_key()
+
+    @pytest.mark.parametrize(
+        "mode", [ExecMode.REMOTE_NON_BLOCKING, ExecMode.REMOTE_ASYNC]
+    )
+    def test_built_backends_carry_the_models_env(self, model, mode):
+        """What nnsight sends when it builds a remote backend itself."""
+        backend = ExecMode.resolve(mode, model)["backend"]
+        assert backend.model_key == model.to_model_key()
+        assert backend.env == model._remoteable_get_env()
+
+    def test_a_non_blocking_dict_without_a_backend_is_refused(self, model):
+        with pytest.raises(ValueError, match="REMOTE_NON_BLOCKING"):
+            logit_lens(model, PROMPT, exec_mode={"remote": True, "blocking": False})
+
+    def test_a_dict_runs_the_session_it_describes(self, model):
+        assert logit_lens(
+            model, PROMPT, top_k=3, exec_mode={"remote": False}
+        ) == logit_lens(model, PROMPT, top_k=3)
+
+    def test_a_dict_backend_is_returned_after_running(self, model):
+        class Recording(Backend):
+            ran = False
+
+            def __call__(self, tracer):
+                self.ran = True
+                super().__call__(tracer)
+
+        backend = Recording()
+        assert logit_lens(model, PROMPT, exec_mode={"backend": backend}) is backend
+        assert backend.ran
+
+
+class TestNonBlockingToolBackend:
+    """Collecting a submitted job's result, without the network: a fake HTTP
+    client answers nnsight's real ``poll``, and the result download is stubbed."""
+
+    class _Response:
+        """One answer to ``GET /response/{job_id}``: a status, or a 404."""
+
+        def __init__(self, status=None, description="", status_code=200):
+            self.status_code = status_code
+            url = "https://bucket.test/result" if status == Status.COMPLETED else None
+            self.text = (
+                ResponseModel(
+                    id="job-1", status=status, description=description, data=url
+                ).model_dump_json()
+                if status is not None
+                else ""
+            )
+
+        def raise_for_status(self):
+            pass
+
+    class _Client:
+        """Stands in for ``httpx.Client``, answering each GET in turn."""
+
+        def __init__(self, answers):
+            self.answers = iter(answers)
+            self.urls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers=None):
+            self.urls.append(url)
+            return next(self.answers)
+
+    def _backend(self, monkeypatch, answers):
+        backend = NonBlockingToolBackend("key", host="http://ndif.test", job_id="job-1")
+        client = self._Client(answers)
+        monkeypatch.setattr("httpx.Client", lambda **kwargs: client)
+        backend.download_result = lambda url: {"results": "data", "other": 1}
+        return backend, client
+
+    def test_from_job_keeps_the_job_id(self, model):
+        """How another request or process picks a submitted job back up."""
+        backend = NonBlockingToolBackend.from_job(model, "job-123")
+        assert backend.job_id == "job-123"
+        assert backend.blocking is False
+        assert backend.model_key == model.to_model_key()
+        assert backend.env == model._remoteable_get_env()
+
+    def test_a_run_submits_without_waiting(self):
+        """With no job yet, nnsight's backend submits over HTTP (no websocket
+        held open); once it has a job id, calling it polls instead."""
+        backend = NonBlockingToolBackend("key", host="http://ndif.test")
+        calls = []
+        backend.submit = lambda tracer: calls.append("submit")
+        backend.request = lambda request, tracer: calls.append("request")
+        backend(object())
+        assert backend.blocking is False
+        assert calls == ["submit"]
+
+    def test_poll_is_none_until_complete_then_the_tools_result(self, monkeypatch):
+        backend, client = self._backend(
+            monkeypatch,
+            [
+                self._Response(status_code=404),
+                self._Response(Status.RUNNING),
+                self._Response(Status.COMPLETED),
+            ],
+        )
+        assert backend.poll() is None  # not registered yet
+        assert backend.poll() is None
+        assert backend.status == Status.RUNNING
+        assert backend.poll() == "data"
+        assert backend.status == Status.COMPLETED
+        assert client.urls == ["http://ndif.test/response/job-1"] * 3
+
+    def test_result_waits_through_an_unregistered_and_running_job(self, monkeypatch):
+        backend, _ = self._backend(
+            monkeypatch,
+            [
+                self._Response(status_code=404),
+                self._Response(Status.QUEUED),
+                self._Response(Status.RUNNING),
+                self._Response(Status.COMPLETED),
+            ],
+        )
+        assert backend.result(interval=0) == "data"
+
+    def test_an_error_response_raises(self, monkeypatch):
+        backend, _ = self._backend(
+            monkeypatch,
+            [self._Response(Status.RUNNING), self._Response(Status.ERROR, "boom")],
+        )
+        assert backend.poll() is None
+        with pytest.raises(RemoteError, match="boom"):
+            backend.poll()
+
+        backend, _ = self._backend(
+            monkeypatch,
+            [self._Response(Status.QUEUED), self._Response(Status.ERROR, "boom")],
+        )
+        with pytest.raises(RemoteError, match="boom"):
+            backend.result(interval=0)
+
+    def test_result_times_out(self, monkeypatch):
+        backend, _ = self._backend(
+            monkeypatch, iter(lambda: self._Response(Status.RUNNING), None)
+        )
+        with pytest.raises(TimeoutError, match="job job-1"):
+            backend.result(timeout=0.01, interval=0)
+
+
+class TestAsyncToolBackend:
+    """Reading a submitted job's status stream, without the network: a fake
+    websocket hands back canned updates and the download is stubbed."""
+
+    class _Connection:
+        def __init__(self, statuses):
+            self.messages = [
+                ResponseModel(
+                    id="job",
+                    status=status,
+                    description="boom" if status == Status.ERROR else "",
+                ).model_dump_json()
+                for status in statuses
+            ]
+            self.closed = False
+
+        def recv(self):
+            return self.messages.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    def _backend(self, statuses):
+        backend = AsyncToolBackend("key", host="http://ndif.test")
+        backend.connection = connection = self._Connection(statuses)
+        downloads = []
+
+        async def download(url):
+            downloads.append(url)
+            return {"results": "data", "other": 1}
+
+        backend.download = download
+        return backend, connection, downloads
+
+    def test_result_waits_for_the_job(self):
+        backend, connection, _ = self._backend(
+            [Status.QUEUED, Status.RUNNING, Status.COMPLETED]
+        )
+        assert asyncio.run(backend.result()) == "data"
+        assert backend.job_id == "job"
+        assert connection.closed
+
+    def test_streamed_updates_then_result_without_reading_again(self):
+        backend, connection, downloads = self._backend(
+            [Status.QUEUED, Status.RUNNING, Status.COMPLETED]
+        )
+
+        async def run():
+            statuses = [update.status async for update in backend.updates()]
+            return statuses, await backend.result(), await backend.result()
+
+        statuses, first, again = asyncio.run(run())
+        assert statuses == [Status.QUEUED, Status.RUNNING, Status.COMPLETED]
+        assert first == again == "data"
+        assert len(downloads) == 1 and connection.messages == []
+
+    def test_a_loop_stopped_at_completed_still_has_the_result(self):
+        backend, _, _ = self._backend([Status.RUNNING, Status.COMPLETED])
+
+        async def run():
+            async for update in backend.updates():
+                if update.status == Status.COMPLETED:
+                    break
+            return await backend.result()
+
+        assert asyncio.run(run()) == "data"
+
+    def test_a_loop_stopped_early_makes_result_say_so(self):
+        backend, connection, _ = self._backend([Status.QUEUED, Status.COMPLETED])
+
+        async def run():
+            async for _ in backend.updates():
+                break
+            return await backend.result()
+
+        with pytest.raises(RuntimeError, match="stopped early"):
+            asyncio.run(run())
+        assert connection.closed
+
+    def test_an_error_raises_from_the_stream_and_from_result(self):
+        backend, _, _ = self._backend([Status.RUNNING, Status.ERROR])
+        seen = []
+
+        async def stream():
+            async for update in backend.updates():
+                seen.append(update.status)
+
+        with pytest.raises(RemoteError, match="boom"):
+            asyncio.run(stream())
+        assert seen == [Status.RUNNING, Status.ERROR]
+        with pytest.raises(RemoteError, match="boom"):
+            asyncio.run(backend.result())
+
+    def test_the_stream_is_read_once(self):
+        backend, _, _ = self._backend([Status.COMPLETED])
+
+        async def run():
+            await backend.result()
+            async for _ in backend.updates():
+                pass
+
+        with pytest.raises(RuntimeError, match="already read"):
+            asyncio.run(run())
+
+
 @pytest.mark.remote
 class TestRemote:
     def test_blocking(self, model, case, local_payload):
         args, kwargs = case.call_args(model)
-        data = case.tool(model, *args, remote=True, **kwargs)
+        data = case.tool(model, *args, exec_mode=ExecMode.REMOTE, **kwargs)
 
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
-    def test_non_blocking_submit_then_poll(self, model, case, local_payload):
-        """Workbench's flow: submit for a job id, poll it from a fresh backend."""
+    def test_non_blocking_collected_from_the_job_id(self, model, case, local_payload):
+        """Workbench's flow: submit, then collect from a backend rebuilt from
+        the job id (another request, possibly another process)."""
         args, kwargs = case.call_args(model)
-        submit = RemoteBackend(model.to_model_key(), blocking=False)
-        job_id = case.tool(
-            model, *args, remote=True, backend=submit, non_blocking=True, **kwargs
-        )
-        assert isinstance(job_id, str) and job_id
+        job = case.tool(model, *args, exec_mode=ExecMode.REMOTE_NON_BLOCKING, **kwargs)
+        assert type(job) is NonBlockingToolBackend
+        assert job.job_id
 
-        poll = RemoteBackend(model.to_model_key(), job_id=job_id, blocking=False)
-        deadline = time.monotonic() + case.POLL_TIMEOUT
-        saves = poll()
-        while saves is None:
-            assert time.monotonic() < deadline, f"job {job_id} didn't complete"
-            time.sleep(1)
-            saves = poll()
-
-        data = saves["results"]
+        collector = NonBlockingToolBackend.from_job(model, job.job_id)
+        data = collector.result(timeout=case.POLL_TIMEOUT)
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
-    def test_async_backend_await(self, model, case, local_payload):
-        """An ``AsyncRemoteBackend`` gives a ``RemoteRun``, which awaits to the data."""
+    def test_async_result(self, model, case, local_payload):
         args, kwargs = case.call_args(model)
 
         async def run():
-            backend = AsyncRemoteBackend(model.to_model_key())
-            remote_run = case.tool(model, *args, remote=True, backend=backend, **kwargs)
-            assert isinstance(remote_run, RemoteRun)
-            return await remote_run
+            backend = case.tool(model, *args, exec_mode=ExecMode.REMOTE_ASYNC, **kwargs)
+            assert type(backend) is AsyncToolBackend
+            return await backend.result()
 
         data = asyncio.run(run())
         assert type(data) is case.data_type
         assert case.key(data) == case.key(local_payload)
 
-    def test_async_backend_stream(self, model, case, local_payload):
-        """A ``RemoteRun`` streams the job's status updates, then holds the data."""
+    def test_async_updates_then_result(self, model, case, local_payload):
+        """Streamed status updates, then the result without waiting again."""
         args, kwargs = case.call_args(model)
 
         async def run():
-            backend = AsyncRemoteBackend(model.to_model_key())
-            remote_run = case.tool(model, *args, remote=True, backend=backend, **kwargs)
-            statuses = [update.status async for update in remote_run]
-            return remote_run, statuses
+            backend = case.tool(model, *args, exec_mode=ExecMode.REMOTE_ASYNC, **kwargs)
+            statuses = [update.status async for update in backend.updates()]
+            return backend, statuses, await backend.result()
 
-        remote_run, statuses = asyncio.run(run())
+        backend, statuses, data = asyncio.run(run())
         assert statuses[-1] == Status.COMPLETED
         assert Status.RUNNING in statuses
-        assert remote_run.job_id
-        assert type(remote_run.result) is case.data_type
-        assert case.key(remote_run.result) == case.key(local_payload)
+        assert backend.job_id
+        assert type(data) is case.data_type
+        assert case.key(data) == case.key(local_payload)
+
+    def test_raw_non_blocking(self, model, case, local_raw):
+        """``raw=True`` comes back through the backend as the unformatted
+        outputs (compared by shape: NDIF's dtype can differ)."""
+        args, kwargs = case.call_args(model)
+        job = case.tool(
+            model,
+            *args,
+            raw=True,
+            exec_mode=ExecMode.REMOTE_NON_BLOCKING,
+            **kwargs,
+        )
+        raw = job.result(timeout=case.POLL_TIMEOUT)
+        assert case.raw_key(raw) == case.raw_key(local_raw)
+
+    def test_raw_async(self, model, case, local_raw):
+        args, kwargs = case.call_args(model)
+
+        async def run():
+            backend = case.tool(
+                model, *args, raw=True, exec_mode=ExecMode.REMOTE_ASYNC, **kwargs
+            )
+            return await backend.result()
+
+        raw = asyncio.run(run())
+        assert case.raw_key(raw) == case.raw_key(local_raw)
+
+
+@pytest.mark.remote
+class TestRemoteFailure:
+    """A job that fails on the server surfaces as ``RemoteError`` in every mode.
+
+    The failing call patches a source position past the end of the prompt:
+    nothing checks it before the run, so the trace fails on NDIF.
+    """
+
+    @staticmethod
+    def _failing(model, exec_mode):
+        return activation_patching(
+            model,
+            SRC_PROMPT,
+            TGT_PROMPT,
+            src_pos=[999],
+            tgt_pos=[_patching_inputs(model)[1]["tgt_pos"][0]],
+            tgt_freeze=[],
+            exec_mode=exec_mode,
+        )
+
+    def test_blocking_raises(self, model):
+        with pytest.raises(RemoteError):
+            self._failing(model, ExecMode.REMOTE)
+
+    def test_non_blocking_result_raises(self, model):
+        job = self._failing(model, ExecMode.REMOTE_NON_BLOCKING)
+        assert job.job_id
+        with pytest.raises(RemoteError):
+            job.result(timeout=ToolCase.POLL_TIMEOUT)
+
+    def test_async_stream_and_result_raise(self, model):
+        statuses = []
+
+        async def run():
+            backend = self._failing(model, ExecMode.REMOTE_ASYNC)
+            with pytest.raises(RemoteError):
+                async for update in backend.updates():
+                    statuses.append(update.status)
+            with pytest.raises(RemoteError):
+                await backend.result()
+
+        asyncio.run(run())
+        assert statuses[-1] == Status.ERROR

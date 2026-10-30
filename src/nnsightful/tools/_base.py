@@ -1,60 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import nnsight
 import torch
-from nnsight.intervention.backends.remote import AsyncRemoteBackend, RemoteError
-from nnsight.schema.response import ResponseModel, Status
 
 from ..types import ToolData
 from ._utils import IndexSpec, resolve_indices
+from .execution import ExecMode
 
 if TYPE_CHECKING:
+    from nnsight.tracing.backend import Backend
     from nnterp import StandardizedTransformer
-
-
-class RemoteRun:
-    """A tool run submitted to NDIF through an ``AsyncRemoteBackend``.
-
-    Returned by a tool called with ``remote=True`` and an
-    ``AsyncRemoteBackend``: the job is already submitted, and nothing waits
-    on it until the run is consumed, on an asyncio event loop.
-
-    ``await`` it for the tool's result, or iterate it with ``async for`` to
-    get each NDIF status update (a ``ResponseModel``) as it lands — e.g. to
-    stream progress to a client — after which the result is on
-    :attr:`result`. Either way an ``ERROR`` status raises ``RemoteError``.
-    A run is consumed once: its backend's status stream can't be replayed.
-    """
-
-    def __init__(self, backend: AsyncRemoteBackend):
-        self.backend = backend
-        self.job_id: str | None = None
-        self.result: ToolData | Any = None
-
-    def __await__(self):
-        return self._resolve().__await__()
-
-    async def _resolve(self) -> ToolData | Any:
-        async for _ in self:
-            pass
-        return self.result
-
-    async def __aiter__(self):
-        """Yield each status update, then keep the job's result on :attr:`result`.
-
-        The job's saves come last from the backend; the tool saved its
-        result as ``results`` (see :meth:`Tool.__call__`).
-        """
-        async for update in self.backend:
-            if not isinstance(update, ResponseModel):
-                self.result = update["results"]
-                return
-            self.job_id = update.id
-            yield update
-            if update.status == Status.ERROR:
-                raise RemoteError(update.description)
 
 
 class Tool():
@@ -73,29 +31,20 @@ class Tool():
          NDIF it runs server-side and only the payload is sent back.
 
     Subclasses set :attr:`data_class` and implement those hooks; none of
-    them handles ``remote``, ``backend``, ``non_blocking`` or saving.
+    them handles where the run executes or saving.
 
-    End users call the tool directly::
+    Where it runs is the call's ``exec_mode`` (see
+    :mod:`nnsightful.tools.execution`)::
 
-        data = tool(model, prompt, ...)
+        data = tool(model, prompt)                                # local
+        data = tool(model, prompt, exec_mode=ExecMode.REMOTE)     # NDIF, blocking
 
-    For async two-phase patterns (e.g. workbench), submit without waiting and
-    read the instance from the job's results::
+        job = tool(model, prompt, exec_mode=ExecMode.REMOTE_NON_BLOCKING)
+        data = job.result()             # or job.poll(); or, elsewhere,
+        # NonBlockingToolBackend.from_job(model, job.job_id).poll()
 
-        job_id = tool(model, prompt, remote=True, backend=backend, non_blocking=True)
-        # ... later, from a backend polling that job ...
-        data = backend()["results"]
-
-    On an asyncio event loop, pass an ``AsyncRemoteBackend`` to get a
-    :class:`RemoteRun`, and await it or stream its status updates::
-
-        run = tool(model, prompt, remote=True,
-                   backend=AsyncRemoteBackend(model.to_model_key()))
-        data = await run
-        # or
-        async for update in run:
-            print(update.status)
-        data = run.result
+        run = tool(model, prompt, exec_mode=ExecMode.REMOTE_ASYNC)
+        data = await run.result()       # or: async for update in run.updates()
     """
 
     data_class: type[ToolData]
@@ -103,23 +52,23 @@ class Tool():
     def __call__(
         self,
         model: "StandardizedTransformer",
-        *args,
-        remote: bool = False,
-        backend=None,
-        non_blocking: bool = False,
+        *args: Any,
+        exec_mode: ExecMode | str | Mapping[str, Any] = ExecMode.LOCAL,
         raw: bool = False,
-        **kwargs,
-    ) -> ToolData | Any:
-        """Run the tool.
+        **kwargs: Any,
+    ) -> ToolData | Backend | Any:
+        """Run the tool, where ``exec_mode`` says.
 
-        Returns the :attr:`data_class` instance; with ``raw=True`` the
-        unformatted tensors (see :meth:`_raw`). Remote runs with an
-        ``AsyncRemoteBackend`` return a :class:`RemoteRun` for that result,
-        and other remote runs with ``non_blocking`` the NDIF job id to poll.
+        ``LOCAL`` and ``REMOTE`` return the :attr:`data_class` instance (with
+        ``raw=True``, the unformatted tensors; see :meth:`_raw`).
+        ``REMOTE_NON_BLOCKING`` and ``REMOTE_ASYNC`` return the backend to
+        collect it from, and a mapping with a ``backend`` returns that backend
+        (built for ``model`` when given as a class).
         """
+        session_kwargs = ExecMode.resolve(exec_mode, model)
         run_kwargs, format_kwargs = self._prepare(model, *args, **kwargs)
 
-        with torch.no_grad(), model.session(remote=remote, backend=backend):
+        with torch.no_grad(), model.session(**session_kwargs):
             outputs = self._run(model, **run_kwargs)
             if raw:
                 results = self._raw(model, outputs)
@@ -127,11 +76,9 @@ class Tool():
                 results = self._format(model, outputs, **format_kwargs)
             nnsight.save(results)
 
-        if remote and isinstance(backend, AsyncRemoteBackend):
-            return RemoteRun(backend)
-        if remote and non_blocking:
-            return backend.job_id
-
+        backend = session_kwargs.get("backend")
+        if backend is not None:
+            return backend
         return results
 
     def format(self, *args, **kwargs) -> ToolData:
@@ -206,4 +153,3 @@ class Tool():
         if selected[-1] - selected[0] + 1 == len(selected):
             return slice(selected[0], selected[-1] + 1)
         return selected
-
