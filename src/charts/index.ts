@@ -8,6 +8,7 @@
 export type {
     BaseWidgetInterface,
     LogitLensData,
+    LogitLensOptions,
     LogitLensUIState,
     LogitLensWidgetInterface,
     LinePlotData,
@@ -32,6 +33,10 @@ export { LogitLensCore } from "./visualizations/logit-lens";
 export { LinePlotCore } from "./core/line-plot";
 export { HeatmapTableCore } from "./core/heatmap-table";
 export { ActivationPatchingCore } from "./visualizations/activation-patching";
+
+// Snapshots: render a chart from its data + UI state and capture it as a PNG
+export { snapshotChart, captureElement } from "./snapshot";
+export type { ChartSnapshot, ChartSnapshotSpec, SnapshotOptions, CaptureOptions } from "./snapshot";
 
 // React wrappers
 export { LogitLensWidget } from "./react/LogitLensWidget";
