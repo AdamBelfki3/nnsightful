@@ -66,7 +66,10 @@ const LINE_WIDTH_OF: [style: string, width: string][] = [
 // XML 1.0 forbids most C0 controls and U+FFFE/U+FFFF; lone surrogates are not
 // characters at all (and make encodeURIComponent throw). Model tokens can
 // hold any of these.
-const INVALID_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const INVALID_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g;
+// (No lookbehind: it's a SyntaxError on Safari < 16.4, which would break the
+// whole bundle at parse time.) A matched surrogate pair is a real character.
+export const xmlSafe = (text: string) => text.replace(INVALID_XML, (m) => (m.length === 2 ? m : "\uFFFD"));
 
 /** Browser-default computed styles, per tag, probed in a blank iframe. */
 class StyleSandbox {
@@ -247,7 +250,7 @@ export async function captureElement(el: Element, options: CaptureOptions = {}):
             frame.appendChild(style);
         }
         frame.appendChild(root);
-        xhtml = new XMLSerializer().serializeToString(frame).replace(INVALID_XML, "�");
+        xhtml = xmlSafe(new XMLSerializer().serializeToString(frame));
     } finally {
         sandbox.destroy();
     }
@@ -269,8 +272,15 @@ export async function captureElement(el: Element, options: CaptureOptions = {}):
     }
     g.drawImage(img, 0, 0, canvas.width, canvas.height);
 
+    let dataUrl: string;
+    try {
+        dataUrl = canvas.toDataURL("image/png");
+    } catch (e) {
+        // WebKit has tainted canvases that drew an SVG <foreignObject>.
+        throw new Error(`Snapshot failed: this browser won't read back the rendered image (${(e as Error).message}).`);
+    }
     return {
-        dataUrl: canvas.toDataURL("image/png"),
+        dataUrl,
         width,
         height,
         scale,

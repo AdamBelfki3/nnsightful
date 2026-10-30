@@ -136,7 +136,9 @@ await snapshotChart({ kind: "activation-patching", data, mode: "rank", selectedT
 fit it, as on screen); activation patching also takes a `height`. `scale` is
 the pixel density, lowered automatically for images too large for a canvas.
 `captureElement(el, options)` captures any rendered element the same way.
-Both are also on the standalone bundle (`InterpTools.snapshotChart`).
+Both are also on the standalone bundle (`InterpTools.snapshotChart`). Verified
+in Chromium; WebKit browsers may refuse to read back the image (the snapshot
+then rejects with an error saying so).
 
 ## Project Structure
 
