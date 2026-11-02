@@ -187,6 +187,10 @@ export interface HeatmapTableOptions {
      *  viewport scrolls (also on a static table), snaps to whole rows and
      *  fires onRowWindowChange when a scroll comes to rest. */
     rowWindowMode?: "clip" | "scroll";
+    /** 'scroll' mode: whether the viewport takes the pointer (scrolls).
+     *  false leaves it inert, so wheel / touch scrolling goes to the page.
+     *  Default true. */
+    rowWindowScrollable?: boolean;
     /** The window's rows after a render that shows a different slice (null:
      *  no window, everything fits), or after a scroll ('scroll' mode). */
     onRowWindowChange?: (range: HeatmapRowRange | null, source: "render" | "scroll") => void;

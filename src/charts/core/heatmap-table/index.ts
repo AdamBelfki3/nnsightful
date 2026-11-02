@@ -442,6 +442,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         // first item when the window moved (or on first render); otherwise the
         // rebuild keeps the user's scroll position.
         this.root.classList.toggle("hmx-window-scroll", scrollWindow);
+        this.root.classList.toggle("hmx-window-inert", scrollWindow && o.rowWindowScrollable === false);
         this.scrollEl.style.maxHeight = scrollWindow ? `${o.rowWindow!.height}px` : "";
         this.windowPlan = scrollWindow ? plan : [];
         this.windowYs = scrollWindow ? ys : [];

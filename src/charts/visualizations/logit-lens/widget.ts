@@ -206,6 +206,7 @@ export function createWidget(
     // by the heatmap core.
     const windowRows = !interactive && !!options?.maxRows && options.maxRows > 0;
     let rowWindow: LogitLensRowWindow | null = null;
+    let rowScrollActive = options?.scrollRowsActive !== false;
 
     // ── Event bus (minimal, for on/off) ──
     const listeners: Record<string, ((data: unknown) => void)[]> = {};
@@ -570,6 +571,7 @@ export function createWidget(
             ...(windowRows ? {
                 rowWindow: { start: windowStart(), height: options!.maxRows! * ROW_H },
                 rowWindowMode: options?.scrollRows ? ("scroll" as const) : ("clip" as const),
+                rowWindowScrollable: rowScrollActive,
                 onRowWindowChange: (range, source) => {
                     rowWindow = range ? { ...range, total: nRows } : null;
                     if (source === "scroll" && range) state.rowStart = range.start;
@@ -1408,6 +1410,11 @@ export function createWidget(
         },
         getThemeMode: () => isDarkMode(),
         getRowWindow: () => rowWindow,
+        setRowScrollActive: (active: boolean) => {
+            if (active === rowScrollActive) return;
+            rowScrollActive = active;
+            renderHeatmap();
+        },
         hasEntropyData: () => !!v2Data && Array.isArray(v2Data.entropy) && v2Data.entropy.length > 0,
         hasRankData: () => {
             if (!v2Data?.tracked) return false;

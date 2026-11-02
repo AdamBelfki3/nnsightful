@@ -52,6 +52,10 @@ export class LogitLensCore implements LogitLensWidgetInterface {
         return this.widget?.getRowWindow() ?? null;
     }
 
+    setRowScrollActive(active: boolean): void {
+        this.widget?.setRowScrollActive(active);
+    }
+
     hasEntropyData(): boolean {
         return this.widget?.hasEntropyData() ?? false;
     }

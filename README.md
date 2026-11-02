@@ -144,7 +144,10 @@ taller than that many rows shows only a window of them, starting at
 `uiState.rowStart`, else around the selected (or first pinned) row, else at the
 last rows. With `scrollRows` the window is a viewport the user scrolls; it
 snaps to whole rows and fires `rowWindowChange` with `{ start, end, total }`
-(also via `getRowWindow()`), which a host saves back as `rowStart`. A snapshot
+(also via `getRowWindow()`), which a host saves back as `rowStart`. The
+viewport doesn't let scrolling at its first / last row run on into the page;
+`scrollRowsActive={false}` (or `setRowScrollActive(false)`) leaves it inert so
+page scrolling passes over it, e.g. until the user selects the chart. A snapshot
 with `maxRows` renders only the window's rows, and its result's `rows` says
 which.
 

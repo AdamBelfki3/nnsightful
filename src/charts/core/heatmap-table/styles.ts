@@ -199,7 +199,11 @@ export function generateHeatmapStyles(uid: string): string {
            and snaps to whole rows; a static table's content stays inert. */
         ${root}.hmx-window-scroll .hmx-scroll {
             overflow-y: auto; scroll-snap-type: y mandatory; pointer-events: auto;
+            /* Reaching the first / last row doesn't scroll the page instead. */
+            overscroll-behavior: contain;
         }
+        /* Not scrollable right now: the pointer goes through to the page. */
+        ${root}.hmx-window-scroll.hmx-window-inert .hmx-scroll { pointer-events: none; }
         ${root}.hmx-static.hmx-window-scroll .hmx-grid-inner { pointer-events: none; }
         ${root}.hmx-window-scroll .hmx-row,
         ${root}.hmx-window-scroll .hmx-collapsed { scroll-snap-align: start; }

@@ -109,6 +109,11 @@ export interface LogitLensOptions {
      *  through; it snaps to whole rows and fires `rowWindowChange`. Without
      *  it, only the window's rows are rendered (e.g. for a snapshot). */
     scrollRows?: boolean;
+    /** With scrollRows: whether the viewport scrolls now (default true).
+     *  Inert, wheel / touch scrolling over it goes to the page; a host
+     *  embedding the widget in a scrolling document can enable it only
+     *  while the embed is selected. Change it with setRowScrollActive. */
+    scrollRowsActive?: boolean;
 }
 
 /**
@@ -121,6 +126,8 @@ export interface LogitLensWidgetInterface extends BaseWidgetInterface<LogitLensD
     getThemeMode: () => boolean;
     /** The rows the row window shows; null when there is no window. */
     getRowWindow: () => LogitLensRowWindow | null;
+    /** Make a scrollRows viewport scroll, or leave it inert. */
+    setRowScrollActive: (active: boolean) => void;
     hasEntropyData: () => boolean;
     hasRankData: () => boolean;
     linkColumnsTo: (other: LogitLensWidgetInterface) => void;

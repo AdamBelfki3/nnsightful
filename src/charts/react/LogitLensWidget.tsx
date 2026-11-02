@@ -18,6 +18,9 @@ interface LogitLensWidgetProps {
     maxRows?: number;
     /** Static only: make the row window a scrollable viewport. */
     scrollRows?: boolean;
+    /** With scrollRows: whether the viewport scrolls now (default true);
+     *  inert, scrolling over it goes to the page. Can change any time. */
+    scrollRowsActive?: boolean;
     /** The rows the row window shows: once the widget is built ("render")
      *  and after each scroll that moves it ("scroll"). Null: no window. */
     onRowWindowChange?: (window: LogitLensRowWindow | null, source: "render" | "scroll") => void;
@@ -35,6 +38,7 @@ export function LogitLensWidget({
     pixelRatio,
     maxRows,
     scrollRows,
+    scrollRowsActive = true,
     onRowWindowChange,
 }: LogitLensWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -69,6 +73,7 @@ export function LogitLensWidget({
                 pixelRatio,
                 maxRows,
                 scrollRows,
+                scrollRowsActive,
             });
             coreRef.current = core;
             // The first window is reported during construction, before
@@ -95,6 +100,11 @@ export function LogitLensWidget({
             darkMode: darkMode ?? uiState.darkMode ?? null,
         });
     }, [uiState, darkMode]);
+
+    // Turn row-window scrolling on/off without a rebuild.
+    useEffect(() => {
+        coreRef.current?.setRowScrollActive(scrollRowsActive);
+    }, [scrollRowsActive]);
 
     // Sync dark mode imperatively (no rebuild).
     useEffect(() => {
