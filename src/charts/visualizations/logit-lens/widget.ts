@@ -1283,7 +1283,10 @@ export function createWidget(
     }
 
     renderAll();
-    scrollToBottom(); // default view: last prompt tokens
+    // Default view: the last prompt tokens. A static widget has no scrolling
+    // of its own (its row window, if any, picks its rows; scrolling it here
+    // would read as the user moving the window).
+    if (interactive) scrollToBottom();
     syncDark();
 
     // Re-fit columns/cells when the host resizes (both modes — Jupyter cell
@@ -1393,7 +1396,7 @@ export function createWidget(
             shownLayers = [];
             hmCore.setData(buildHeatmapData()); // new prompt → new rows/columns
             renderAll();
-            scrollToBottom(); // new data → show the last prompt tokens
+            if (interactive) scrollToBottom(); // new data → show the last prompt tokens
         },
         setTitle: () => { /* header is fixed in the new design */ },
         setThemeMode: (enabled: boolean) => {
