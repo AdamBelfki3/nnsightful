@@ -75,6 +75,17 @@ export interface LogitLensUIState {
     // Collapsible row sections (original ranges). The widget owns the
     // collapsed/expanded flags; this persists the current state.
     collapsedSections?: import("./heatmap-table").HeatmapCollapsedSection[];
+    // First row (original index) of a static widget's row window, see
+    // LogitLensOptions.maxRows. Null/absent: the default window.
+    rowStart?: number | null;
+}
+
+/** The rows a static widget's row window shows (original indices,
+ *  inclusive) out of `total` rows. */
+export interface LogitLensRowWindow {
+    start: number;
+    end: number;
+    total: number;
 }
 
 /**
@@ -89,6 +100,15 @@ export interface LogitLensOptions {
     interactive?: boolean;
     /** Canvas resolution for the trajectory plot; see LinePlotOptions. */
     pixelRatio?: number;
+    /** Static only: when the rows (folded sections counting as thin bands)
+     *  are taller than this many rows, show a window of that many. It starts
+     *  at `uiState.rowStart` if set, else around the selected (or first
+     *  pinned) row, else at the last rows. */
+    maxRows?: number;
+    /** Static only, with maxRows: the window is a viewport the user scrolls
+     *  through; it snaps to whole rows and fires `rowWindowChange`. Without
+     *  it, only the window's rows are rendered (e.g. for a snapshot). */
+    scrollRows?: boolean;
 }
 
 /**
@@ -99,6 +119,8 @@ export interface LogitLensWidgetInterface extends BaseWidgetInterface<LogitLensD
     setState: (state: Partial<LogitLensUIState>) => void;
     setTitle: (title: string) => void;
     getThemeMode: () => boolean;
+    /** The rows the row window shows; null when there is no window. */
+    getRowWindow: () => LogitLensRowWindow | null;
     hasEntropyData: () => boolean;
     hasRankData: () => boolean;
     linkColumnsTo: (other: LogitLensWidgetInterface) => void;

@@ -138,6 +138,16 @@ await shot.toBlob();
 await snapshotChart({ kind: "activation-patching", data, mode: "rank", selectedTokens: [0, 3] });
 ```
 
+Long logit lenses can be drawn as a row window: with `maxRows` (a
+`LogitLensOptions` / React prop, and a `snapshotChart` option) a static widget
+taller than that many rows shows only a window of them, starting at
+`uiState.rowStart`, else around the selected (or first pinned) row, else at the
+last rows. With `scrollRows` the window is a viewport the user scrolls; it
+snaps to whole rows and fires `rowWindowChange` with `{ start, end, total }`
+(also via `getRowWindow()`), which a host saves back as `rowStart`. A snapshot
+with `maxRows` renders only the window's rows, and its result's `rows` says
+which.
+
 `width` sets the layout width (the logit lens samples its layer columns to
 fit it, as on screen); activation patching also takes a `height`. `scale` is
 the pixel density, lowered automatically for images too large for a canvas.

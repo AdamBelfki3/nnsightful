@@ -1,6 +1,7 @@
 import type {
     HeatmapCollapsedSection,
     HeatmapColumnWindow,
+    HeatmapRowRange,
     HeatmapTableData,
     HeatmapTableOptions,
     HeatmapTableWidgetInterface,
@@ -63,6 +64,15 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
     // Set on a collapse/expand click; consumed by the next render() to keep the
     // viewport content stable across the height change.
     private pendingScroll: { scrollBefore: number; bandTop: number; delta: number } | null = null;
+    // Row window ('scroll' mode): the rendered plan, each item's top and
+    // height, the item the viewport is scrolled to, and the last range
+    // reported to the host.
+    private windowPlan: HeatmapRowPlanItem[] = [];
+    private windowYs: number[] = [];
+    private windowHs: number[] = [];
+    private windowFrom = -1;
+    private lastWindowKey = "";
+    private windowScrollTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(container: HTMLElement, data: HeatmapTableData, options: HeatmapTableOptions = {}) {
         this.container = container;
@@ -99,6 +109,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         this.scrollEl = this.root.querySelector(".hmx-scroll")!;
 
         if (this.isInteractive()) this.attachListeners();
+        this.scrollEl.addEventListener("scroll", this.onWindowScroll);
         this.render();
         this.setupResponsive();
     }
@@ -251,6 +262,21 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         }
         const rowH = this.resolveRowHeight(visibleRowCount, collapseExtraH);
         const tableW = rowHdrW + cellW * nCols;
+
+        // Row window: which plan items to show (clip) or scroll to (scroll).
+        const itemH = plan.map((it) =>
+            it.kind === "row" ? rowH : it.kind === "band" ? COLLAPSED_BAND_H : interactive ? EXPANDED_TOGGLE_H : 0);
+        let win: { from: number; to: number } | null = null;
+        if (o.rowWindow && itemH.reduce((a, b) => a + b, 0) > o.rowWindow.height) {
+            const at = plan.findIndex((it) => HeatmapTableCore.itemRows(it)[1] >= o.rowWindow!.start);
+            win = HeatmapTableCore.windowItems(itemH, at < 0 ? plan.length - 1 : at, o.rowWindow.height);
+        }
+        const scrollWindow = !!win && o.rowWindowMode === "scroll";
+        const shown = win && !scrollWindow ? plan.slice(win.from, win.to) : plan;
+        // Round the data block's outer corners on the first/last row shown.
+        const shownRows = shown.filter((it) => it.kind === "row") as { kind: "row"; row: number }[];
+        const firstRow = win && !scrollWindow ? shownRows[0]?.row ?? -1 : 0;
+        const lastRow = win && !scrollWindow ? shownRows[shownRows.length - 1]?.row ?? -1 : rowCount - 1;
         const tpl = `${rowHdrW}px repeat(${nCols}, ${cellW}px)`;
 
         const grid = o.showGrid
@@ -319,7 +345,7 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 const bold = cell.bold ? "font-weight:bold;" : "";
                 const op = cell.opacity != null && cell.opacity < 1 ? `opacity:${cell.opacity};` : "";
                 // Round the four outer corners of the (visible) data-cell block.
-                const top = r === 0, bot = r === rowCount - 1, left = di === 0, right = di === nCols - 1;
+                const top = r === firstRow, bot = r === lastRow, left = di === 0, right = di === nCols - 1;
                 let radius = "";
                 if (top && left) radius = "border-top-left-radius:8px;";
                 else if (top && right) radius = "border-top-right-radius:8px;";
@@ -351,7 +377,9 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         // Rows interleaved with collapse bands, in original-index order.
         let html = `<div class="hmx-grid-inner" style="width:${tableW}px;min-width:${tableW}px;">`;
         let y = 0;
-        for (const item of plan) {
+        const ys: number[] = [];
+        for (const item of shown) {
+            ys.push(y);
             if (item.kind === "band") {
                 const count = item.end - item.start + 1;
                 // Accent the band if it hides highlighted rows, so that cue
@@ -407,7 +435,26 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             }
         }
         html += `</div>`;
+        const scrollBefore = this.scrollEl.scrollTop;
         this.scrollEl.innerHTML = html;
+
+        // Row window viewport ('scroll'): the window's height, scrolled to its
+        // first item when the window moved (or on first render); otherwise the
+        // rebuild keeps the user's scroll position.
+        this.root.classList.toggle("hmx-window-scroll", scrollWindow);
+        this.scrollEl.style.maxHeight = scrollWindow ? `${o.rowWindow!.height}px` : "";
+        this.windowPlan = scrollWindow ? plan : [];
+        this.windowYs = scrollWindow ? ys : [];
+        this.windowHs = scrollWindow ? itemH : [];
+        if (scrollWindow) {
+            if (win!.from !== this.windowFrom) this.scrollEl.scrollTop = ys[win!.from];
+            else this.scrollEl.scrollTop = scrollBefore;
+            this.windowFrom = win!.from;
+        } else {
+            this.windowFrom = -1;
+        }
+        if (win) this.reportWindow(plan, win.from, win.to, "render");
+        else if (o.rowWindow) this.reportWindow(plan, -1, -1, "render");
 
         // Apply a pending scroll adjustment from a collapse/expand toggle so the
         // content the user was looking at stays put (shift only when the toggled
@@ -426,6 +473,35 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             this.lastVisibleCols = visibleCols;
         }
     }
+
+    /** Tell the host the rows of plan items [from, to) (from < 0: none). */
+    private reportWindow(plan: HeatmapRowPlanItem[], from: number, to: number, source: "render" | "scroll"): void {
+        const range: HeatmapRowRange | null = from < 0
+            ? null
+            : { start: HeatmapTableCore.itemRows(plan[from])[0], end: HeatmapTableCore.itemRows(plan[to - 1])[1] };
+        const key = range ? `${range.start}-${range.end}` : "none";
+        if (key === this.lastWindowKey) return;
+        this.lastWindowKey = key;
+        this.options.onRowWindowChange?.(range, source);
+    }
+
+    // 'scroll' row window: once a scroll comes to rest, snap to the item at
+    // the top of the viewport and report the window from there.
+    private onWindowScroll = (): void => {
+        if (!this.windowPlan.length) return;
+        if (this.windowScrollTimer) clearTimeout(this.windowScrollTimer);
+        this.windowScrollTimer = setTimeout(() => {
+            this.windowScrollTimer = null;
+            if (this.destroyed || !this.windowPlan.length) return;
+            const top = this.scrollEl.scrollTop;
+            let k = this.windowYs.findIndex((y, i) => y + this.windowHs[i] / 2 > top);
+            if (k < 0) k = this.windowYs.length - 1;
+            const { from, to } = HeatmapTableCore.windowItems(this.windowHs, k, this.options.rowWindow!.height);
+            if (Math.abs(this.scrollEl.scrollTop - this.windowYs[from]) > 1) this.scrollEl.scrollTop = this.windowYs[from];
+            this.windowFrom = from;
+            this.reportWindow(this.windowPlan, from, to, "scroll");
+        }, 150);
+    };
 
     private attachListeners(): void {
         // Hover outline (delegated; survives re-renders).
@@ -495,6 +571,29 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
      * section start so every handle/band sits at its own section's first row.
      * Sections reaching past the last row are clipped.
      */
+    /** The first and last ORIGINAL row a plan item covers. */
+    static itemRows(item: HeatmapRowPlanItem): [number, number] {
+        return item.kind === "row" ? [item.row, item.row] : [item.start, item.end];
+    }
+
+    /**
+     * The plan items [from, to) a row window shows: from item `at`, as many
+     * items as fit in `maxHeight` (at least one), moved back so a window that
+     * would run past the end ends at the last item instead. `heights` are the
+     * items' rendered heights.
+     */
+    static windowItems(heights: number[], at: number, maxHeight: number): { from: number; to: number } {
+        const n = heights.length;
+        if (n === 0) return { from: 0, to: 0 };
+        // The latest start that still fills the window.
+        let lastFrom = n;
+        for (let h = 0; lastFrom > 0 && h + heights[lastFrom - 1] <= maxHeight; ) h += heights[--lastFrom];
+        const from = Math.max(0, Math.min(at, lastFrom, n - 1));
+        let to = from;
+        for (let h = 0; to < n && (to === from || h + heights[to] <= maxHeight); ) h += heights[to++];
+        return { from, to };
+    }
+
     static planRows(rowCount: number, sections: HeatmapCollapsedSection[] = []): HeatmapRowPlanItem[] {
         const norm = sections
             .map((s, index) => ({
@@ -614,6 +713,8 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
         if (this.reflowRaf && typeof cancelAnimationFrame !== "undefined") cancelAnimationFrame(this.reflowRaf);
         this.resizeObserver?.disconnect();
         this.resizeObserver = null;
+        if (this.windowScrollTimer) clearTimeout(this.windowScrollTimer);
+        this.scrollEl.removeEventListener("scroll", this.onWindowScroll);
         this.clearHover();
         this.container.innerHTML = "";
         if (this.styleEl.parentNode) {

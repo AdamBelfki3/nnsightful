@@ -9,6 +9,7 @@ export type {
     BaseWidgetInterface,
     LogitLensData,
     LogitLensOptions,
+    LogitLensRowWindow,
     LogitLensUIState,
     LogitLensWidgetInterface,
     LinePlotData,

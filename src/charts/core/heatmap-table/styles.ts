@@ -194,6 +194,15 @@ export function generateHeatmapStyles(uid: string): string {
         /* static: a picture of the grid — no hover outline, pointer cursors
            or band hover states. */
         ${root}.hmx-static .hmx-frame { pointer-events: none; }
+
+        /* Scrollable row window: the viewport scrolls (also on a static table)
+           and snaps to whole rows; a static table's content stays inert. */
+        ${root}.hmx-window-scroll .hmx-scroll {
+            overflow-y: auto; scroll-snap-type: y mandatory; pointer-events: auto;
+        }
+        ${root}.hmx-static.hmx-window-scroll .hmx-grid-inner { pointer-events: none; }
+        ${root}.hmx-window-scroll .hmx-row,
+        ${root}.hmx-window-scroll .hmx-collapsed { scroll-snap-align: start; }
     `;
 }
 

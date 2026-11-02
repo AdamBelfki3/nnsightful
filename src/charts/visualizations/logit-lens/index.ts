@@ -1,4 +1,4 @@
-import type { LogitLensData, LogitLensOptions, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
+import type { LogitLensData, LogitLensOptions, LogitLensRowWindow, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import { createWidget } from "./widget";
 
 /**
@@ -46,6 +46,10 @@ export class LogitLensCore implements LogitLensWidgetInterface {
 
     getThemeMode(): boolean {
         return this.widget?.getThemeMode() ?? false;
+    }
+
+    getRowWindow(): LogitLensRowWindow | null {
+        return this.widget?.getRowWindow() ?? null;
     }
 
     hasEntropyData(): boolean {

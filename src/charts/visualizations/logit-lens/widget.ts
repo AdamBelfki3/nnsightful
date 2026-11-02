@@ -13,7 +13,7 @@
  * theme detector, and LinePlotCore for the kept trajectory panel.
  */
 
-import type { LogitLensData, LogitLensOptions, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
+import type { LogitLensData, LogitLensOptions, LogitLensRowWindow, LogitLensUIState, LogitLensWidgetInterface } from "../../types/logit-lens";
 import type { LinePlotLine } from "../../types/line-plot";
 import type { HeatmapTableData, HeatmapTableOptions, HeatmapRowHighlight, HeatmapCollapsedSection } from "../../types/heatmap-table";
 import { normalizeData, uncomputedSections, type NormalizedData } from "./normalize";
@@ -136,6 +136,8 @@ interface State {
     // collapsed/expanded flags and flips them on the core's toggle callback.
     // Host/user sections only — the data-derived locked ones live apart.
     collapsedSections: HeatmapCollapsedSection[];
+    // First row of a static widget's row window (null: the default window).
+    rowStart: number | null;
 }
 
 export function createWidget(
@@ -193,11 +195,17 @@ export function createWidget(
         // Clone so we can flip `collapsed` in place without mutating the
         // caller's (possibly frozen) ui_state object.
         collapsedSections: (uiState?.collapsedSections ?? []).map((s) => ({ ...s })),
+        rowStart: uiState?.rowStart ?? null,
     };
 
     // Transient anchor for on-demand range folding (shift-click a row or click
     // its ⊟ handle to set it, then again to fold the range). Not persisted.
     let foldAnchor: number | null = null;
+
+    // Static row window (options.maxRows): what it shows, as last reported
+    // by the heatmap core.
+    const windowRows = !interactive && !!options?.maxRows && options.maxRows > 0;
+    let rowWindow: LogitLensRowWindow | null = null;
 
     // ── Event bus (minimal, for on/off) ──
     const listeners: Record<string, ((data: unknown) => void)[]> = {};
@@ -559,6 +567,15 @@ export function createWidget(
                 ? state.collapsedSections.concat(lockedSections)
                 : state.collapsedSections,
             onVisibleColumnsChange: (visible) => { shownLayers = visible; },
+            ...(windowRows ? {
+                rowWindow: { start: windowStart(), height: options!.maxRows! * ROW_H },
+                rowWindowMode: options?.scrollRows ? ("scroll" as const) : ("clip" as const),
+                onRowWindowChange: (range, source) => {
+                    rowWindow = range ? { ...range, total: nRows } : null;
+                    if (source === "scroll" && range) state.rowStart = range.start;
+                    emit("rowWindowChange", { window: rowWindow, source });
+                },
+            } : {}),
         };
         if (!interactive) return display;
         return {
@@ -590,6 +607,15 @@ export function createWidget(
             },
             onCellLeave: () => { hideTooltip(); clearCellPreview(); },
         };
+    }
+
+    // Where the row window starts: the saved start, else centered on the
+    // selected (or first pinned) row, else at the end (the core moves a
+    // window that runs past the end back to the last rows).
+    function windowStart(): number {
+        if (state.rowStart != null) return state.rowStart;
+        const focus = state.selectedRow ?? state.pinnedRows[0] ?? null;
+        return focus != null ? Math.max(0, focus - Math.floor(options!.maxRows! / 2)) : Number.MAX_SAFE_INTEGER;
     }
 
     // Size the widget card (fill the panel, or cap to the aspect ratio in
@@ -1318,6 +1344,7 @@ export function createWidget(
             darkMode: state.darkModeOverride,
             rowHighlights: state.rowHighlights,
             collapsedSections: state.collapsedSections,
+            rowStart: state.rowStart,
         };
     }
 
@@ -1341,6 +1368,7 @@ export function createWidget(
             if (s.collapsedSections !== undefined) {
                 state.collapsedSections = s.collapsedSections.map((x) => ({ ...x }));
             }
+            if (s.rowStart !== undefined) state.rowStart = s.rowStart;
             recomputeDerived(); // clamp the restored layer window to the data
             syncDark();
             renderAll();
@@ -1359,6 +1387,7 @@ export function createWidget(
             state.colorIndex = 0;
             state.rowHighlights = [];
             state.collapsedSections = [];
+            state.rowStart = null;
             foldAnchor = null;
             recomputeDerived();
             shownLayers = [];
@@ -1375,6 +1404,7 @@ export function createWidget(
             updateLinePlot();
         },
         getThemeMode: () => isDarkMode(),
+        getRowWindow: () => rowWindow,
         hasEntropyData: () => !!v2Data && Array.isArray(v2Data.entropy) && v2Data.entropy.length > 0,
         hasRankData: () => {
             if (!v2Data?.tracked) return false;

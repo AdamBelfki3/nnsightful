@@ -93,6 +93,21 @@ export interface HeatmapRowRegion {
     color?: string;
 }
 
+/** A slice of the rows to show: from the row at ORIGINAL index `start` (or
+ *  the band standing in for it), as many rows and bands as fit in `height`
+ *  px. A slice running past the end is moved back to end at the last row. */
+export interface HeatmapRowWindow {
+    start: number;
+    height: number;
+}
+
+/** The rows a window shows, ORIGINAL indices (inclusive; a band at either
+ *  edge counts with all the rows it stands in for). */
+export interface HeatmapRowRange {
+    start: number;
+    end: number;
+}
+
 export interface HeatmapTableOptions {
     // ── Column sizing ──────────────────────────────────────────────
     /** 'fixed' (default): each column is exactly cellWidth, scroll if wide.
@@ -162,6 +177,19 @@ export interface HeatmapTableOptions {
      *  gutter). Collapse-responsive; the host should widen rowHeaderWidth to
      *  leave gutter space. */
     rowRegions?: HeatmapRowRegion[];
+
+    // ── Row window (long tables) ───────────────────────────────────
+    /** Show a slice of the rows (see HeatmapRowWindow). No effect when every
+     *  row already fits in its height. */
+    rowWindow?: HeatmapRowWindow | null;
+    /** 'clip' (default): render only the window's rows. 'scroll': render every
+     *  row in a viewport the window's height, scrolled to the window; the
+     *  viewport scrolls (also on a static table), snaps to whole rows and
+     *  fires onRowWindowChange when a scroll comes to rest. */
+    rowWindowMode?: "clip" | "scroll";
+    /** The window's rows after a render that shows a different slice (null:
+     *  no window, everything fits), or after a scroll ('scroll' mode). */
+    onRowWindowChange?: (range: HeatmapRowRange | null, source: "render" | "scroll") => void;
 
     // ── Interaction ────────────────────────────────────────────────
     /** false: a static rendering — no hover outline, no click callbacks, and

@@ -42,6 +42,10 @@ export interface SnapshotOptions extends CaptureOptions {
     height?: number;
     /** Draw the dark theme. Default false. */
     darkMode?: boolean;
+    /** Logit lens: draw at most this many rows, the window starting at
+     *  `uiState.rowStart` (see LogitLensOptions.maxRows). The result's `rows`
+     *  says which. Default: every row. */
+    maxRows?: number;
 }
 
 /** The widgets' card surfaces, the default snapshot background. */
@@ -91,15 +95,17 @@ export async function snapshotChart(spec: ChartSnapshotSpec, options: SnapshotOp
     document.body.appendChild(host);
 
     let destroy = () => {};
+    let rows: () => ChartSnapshot["rows"] = () => undefined;
     try {
         if (spec.kind === "logit-lens") {
             const core = new LogitLensCore(
                 mount,
                 spec.data,
                 { ...spec.uiState, darkMode: dark },
-                { interactive: false, pixelRatio: scale },
+                { interactive: false, pixelRatio: scale, maxRows: options.maxRows },
             );
             destroy = () => core.destroy();
+            rows = () => core.getRowWindow();
         } else {
             const height = Math.max(160, Math.round(options.height ?? width * 0.5));
             host.style.height = `${height}px`;
@@ -115,7 +121,8 @@ export async function snapshotChart(spec: ChartSnapshotSpec, options: SnapshotOp
             destroy = () => core.destroy();
         }
         await settle();
-        return await captureElement(host, { scale, background, padding: options.padding });
+        const shot = await captureElement(host, { scale, background, padding: options.padding });
+        return { ...shot, rows: rows() };
     } finally {
         destroy();
         host.remove();

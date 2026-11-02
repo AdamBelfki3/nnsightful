@@ -44,6 +44,9 @@ export interface ChartSnapshot {
     scale: number;
     /** The PNG as a Blob. */
     toBlob(): Promise<Blob>;
+    /** Set by snapshotChart for a logit lens drawn with a row window: the
+     *  rows it shows. */
+    rows?: import("../types/logit-lens").LogitLensRowWindow | null;
 }
 
 // Properties that don't change how a still image looks.
