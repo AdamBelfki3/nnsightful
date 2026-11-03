@@ -46,6 +46,9 @@ export interface SnapshotOptions extends CaptureOptions {
      *  `uiState.rowStart` (see LogitLensOptions.maxRows). The result's `rows`
      *  says which. Default: every row. */
     maxRows?: number;
+    /** Logit lens: false leaves out the layer navigator under the heatmap.
+     *  Default true. */
+    layerNavigator?: boolean;
 }
 
 /** The widgets' card surfaces, the default snapshot background. */
@@ -102,7 +105,12 @@ export async function snapshotChart(spec: ChartSnapshotSpec, options: SnapshotOp
                 mount,
                 spec.data,
                 { ...spec.uiState, darkMode: dark },
-                { interactive: false, pixelRatio: scale, maxRows: options.maxRows },
+                {
+                    interactive: false,
+                    pixelRatio: scale,
+                    maxRows: options.maxRows,
+                    layerNavigator: options.layerNavigator,
+                },
             );
             destroy = () => core.destroy();
             rows = () => core.getRowWindow();

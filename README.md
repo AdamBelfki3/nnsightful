@@ -149,7 +149,9 @@ viewport doesn't let scrolling at its first / last row run on into the page;
 `scrollRowsActive={false}` (or `setRowScrollActive(false)`) leaves it inert so
 page scrolling passes over it, e.g. until the user selects the chart. A snapshot
 with `maxRows` renders only the window's rows, and its result's `rows` says
-which.
+which. `layerNavigator: false` (also a `LogitLensOptions` / React prop and a
+`snapshotChart` option) leaves the layer navigator out of a static logit lens,
+e.g. for a thumbnail.
 
 `width` sets the layout width (the logit lens samples its layer columns to
 fit it, as on screen); activation patching also takes a `height`. `scale` is

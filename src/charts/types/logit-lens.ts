@@ -114,6 +114,9 @@ export interface LogitLensOptions {
      *  embedding the widget in a scrolling document can enable it only
      *  while the embed is selected. Change it with setRowScrollActive. */
     scrollRowsActive?: boolean;
+    /** Static only: false leaves out the layer navigator under the heatmap
+     *  (e.g. for a thumbnail). Default true. */
+    layerNavigator?: boolean;
 }
 
 /**

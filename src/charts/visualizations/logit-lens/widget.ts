@@ -150,6 +150,7 @@ export function createWidget(
     // Static: a picture of the UI state for a report or snapshot — full
     // content height, no controls, hover, popups or focus.
     const interactive = options?.interactive !== false;
+    const showNavigator = interactive || options?.layerNavigator !== false;
     let container: HTMLElement | null;
     if (typeof containerArg === "string") container = document.querySelector(containerArg);
     else if (containerArg instanceof Element) container = containerArg as HTMLElement;
@@ -364,7 +365,7 @@ export function createWidget(
     container.innerHTML = `
         <div id="${uid}"${interactive ? ' tabindex="-1"' : ' class="ll-static"'}>
             <div class="ll-heatmap" id="${uid}_heatmap"${interactive ? ' tabindex="0"' : ""}></div>
-            <div class="ll-nav" id="${uid}_nav"></div>
+            <div class="ll-nav${showNavigator ? "" : " ll-hidden"}" id="${uid}_nav"></div>
             <div class="ll-lineplot-wrap ll-hidden" id="${uid}_lp_wrap">
                 <div class="ll-lineplot-head">
                     <span class="ll-lineplot-title">trajectory</span>
@@ -654,6 +655,7 @@ export function createWidget(
     // RENDER: LAYER NAVIGATOR
     // ═══════════════════════════════════════════════════════════════
     function renderNavigator() {
+        if (!showNavigator) return;
         const hex = baseHex();
         const dark = isDarkMode();
         const start = clampStart(state.viewStart);

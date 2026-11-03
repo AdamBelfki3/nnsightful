@@ -21,6 +21,8 @@ interface LogitLensWidgetProps {
     /** With scrollRows: whether the viewport scrolls now (default true);
      *  inert, scrolling over it goes to the page. Can change any time. */
     scrollRowsActive?: boolean;
+    /** Static only: false leaves out the layer navigator. Fixed per `data`. */
+    layerNavigator?: boolean;
     /** The rows the row window shows: once the widget is built ("render")
      *  and after each scroll that moves it ("scroll"). Null: no window. */
     onRowWindowChange?: (window: LogitLensRowWindow | null, source: "render" | "scroll") => void;
@@ -39,6 +41,7 @@ export function LogitLensWidget({
     maxRows,
     scrollRows,
     scrollRowsActive = true,
+    layerNavigator,
     onRowWindowChange,
 }: LogitLensWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -74,6 +77,7 @@ export function LogitLensWidget({
                 maxRows,
                 scrollRows,
                 scrollRowsActive,
+                layerNavigator,
             });
             coreRef.current = core;
             // The first window is reported during construction, before

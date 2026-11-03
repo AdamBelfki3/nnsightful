@@ -178,6 +178,7 @@ export function generateStyles(uid: string): string {
 
         /* ── Layer navigator ── */
         ${root} .ll-nav { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
+        ${root} .ll-nav.ll-hidden { display: none; }
         ${root} .ll-nav-range {
             font-family: var(--ll-font-mono); font-size: 11.5px; color: var(--ll-text-2);
             white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 110px;
