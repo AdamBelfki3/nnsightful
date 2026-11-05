@@ -49,8 +49,9 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.chartContainer.style.cssText = "position:relative;flex:1;min-width:0;overflow:hidden;";
         container.appendChild(this.chartContainer);
 
+        const interactive = this.options.interactive !== false;
         this.canvas = document.createElement("canvas");
-        this.canvas.style.cssText = "display:block;width:100%;height:100%;cursor:crosshair;";
+        this.canvas.style.cssText = `display:block;width:100%;height:100%;cursor:${interactive ? "crosshair" : "default"};`;
         this.chartContainer.appendChild(this.canvas);
 
         // Tooltip
@@ -64,8 +65,10 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         container.appendChild(this.legendEl);
 
         // Events
-        this.canvas.addEventListener("mousemove", this.handleMouseMove);
-        this.canvas.addEventListener("mouseleave", this.handleMouseLeave);
+        if (interactive) {
+            this.canvas.addEventListener("mousemove", this.handleMouseMove);
+            this.canvas.addEventListener("mouseleave", this.handleMouseLeave);
+        }
 
         // Resize — only redraw when container size actually changes to avoid infinite loops
         this.resizeObserver = new ResizeObserver((entries) => {
@@ -119,15 +122,16 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             return;
         }
         this.legendEl.style.display = "";
-        updateLegend(this.legendEl, labels, this.hiddenLines, this.options.darkMode ?? false, {
-            onToggle: (idx) => this.toggleLine(idx),
-            onRemove: this.options.onLineRemoved ? (idx) => {
+        const callbacks = this.options.interactive === false ? null : {
+            onToggle: (idx: number) => this.toggleLine(idx),
+            onRemove: this.options.onLineRemoved ? (idx: number) => {
                 this.removeLine(idx, true);
                 this.draw();
                 this.updateLegendUI();
                 this.options.onLineRemoved!(idx);
             } : undefined,
-        }, this.data);
+        };
+        updateLegend(this.legendEl, labels, this.hiddenLines, this.options.darkMode ?? false, callbacks, this.data);
     }
 
     private handleMouseMove = (e: MouseEvent): void => {

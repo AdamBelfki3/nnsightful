@@ -12,6 +12,10 @@ interface ActivationPatchingWidgetProps {
     defaultSelectedTokens?: number[];
     onTokenSelectionChange?: (indices: number[]) => void;
     onModeChange?: (mode: ActivationPatchingMode) => void;
+    /** false: a static plot + legend, without the mode bar and token
+     *  selector. Fixed per `data` (the core is rebuilt when data changes). */
+    interactive?: boolean;
+    pixelRatio?: number;
 }
 
 export function ActivationPatchingWidget({
@@ -24,6 +28,8 @@ export function ActivationPatchingWidget({
     defaultSelectedTokens,
     onTokenSelectionChange,
     onModeChange,
+    interactive = true,
+    pixelRatio,
 }: ActivationPatchingWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const coreRef = useRef<ActivationPatchingCore | null>(null);
@@ -44,6 +50,8 @@ export function ActivationPatchingWidget({
             defaultSelectedTokens,
             onTokenSelectionChange: (indices) => onChangeRef.current?.(indices),
             onModeChange: (m) => onModeChangeRef.current?.(m),
+            interactive,
+            pixelRatio,
         });
         return () => {
             coreRef.current?.destroy();

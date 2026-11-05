@@ -112,6 +112,55 @@ is always collapsed — its band has no expand affordance and ignores clicks —
 and wins over any other section overlapping its rows; `label` replaces the
 "hidden" in "… N rows hidden".
 
+### Static rendering and snapshots
+
+Pass `interactive={false}` (or `{ interactive: false }` to `LogitLensCore` /
+`ActivationPatchingCore`) for a static rendering of a chart's UI state, e.g.
+to embed it in a document. The logit lens then shows its full content height
+— every row, with collapsed sections as bands — without controls, hover,
+popups or keyboard focus; activation patching shows the plot and its legend
+without the mode bar and token selector. Updating `uiState` still re-renders.
+
+`snapshotChart` draws the same static rendering offscreen from a chart's data
+and UI state — the state the widget emits on `stateChange` — and captures it
+as a PNG, in the browser:
+
+```ts
+import { snapshotChart } from "nnsightful";
+
+const shot = await snapshotChart(
+    { kind: "logit-lens", data, uiState },          // logit lens and j-lens
+    { width: 880, scale: 2, darkMode: false },
+);
+shot.dataUrl;          // PNG data URL, shot.width × shot.height CSS px
+await shot.toBlob();
+
+await snapshotChart({ kind: "activation-patching", data, mode: "rank", selectedTokens: [0, 3] });
+```
+
+Long logit lenses can be drawn as a row window: with `maxRows` (a
+`LogitLensOptions` / React prop, and a `snapshotChart` option) a static widget
+taller than that many rows shows only a window of them, starting at
+`uiState.rowStart`, else around the selected (or first pinned) row, else at the
+last rows. With `scrollRows` the window is a viewport the user scrolls; it
+snaps to whole rows and fires `rowWindowChange` with `{ start, end, total }`
+(also via `getRowWindow()`), which a host saves back as `rowStart`. The
+viewport doesn't let scrolling at its first / last row run on into the page;
+`scrollRowsActive={false}` (or `setRowScrollActive(false)`) leaves it inert so
+page scrolling passes over it, e.g. until the user selects the chart. A snapshot
+with `maxRows` renders only the window's rows, and its result's `rows` says
+which. `layerNavigator: false` (also a `LogitLensOptions` / React prop and a
+`snapshotChart` option) leaves the layer navigator out of a static logit lens,
+e.g. for a thumbnail.
+
+`width` sets the layout width (the logit lens samples its layer columns to
+fit it, as on screen); activation patching also takes a `height`. `scale` is
+the pixel density, lowered automatically for images too large for a canvas.
+`captureElement(el, options)` captures any rendered element the same way.
+Both are also on the standalone bundle (`InterpTools.snapshotChart`). Verified
+in Chromium; WebKit browsers may refuse to read back the image (the snapshot
+then rejects with an error saying so).
+
 ## Project Structure
 
 ```

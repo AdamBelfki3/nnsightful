@@ -34,6 +34,7 @@ export function generateHeatmapStyles(uid: string): string {
             padding: 16px;
             overflow: hidden;
             -webkit-user-select: none; user-select: none;
+            white-space: normal; word-break: normal;
         }
         ${root} *, ${root} *::before, ${root} *::after { box-sizing: border-box; }
         ${root}.hmx-dark {
@@ -189,6 +190,23 @@ export function generateHeatmapStyles(uid: string): string {
             color: var(--hmx-text-muted); cursor: pointer;
         }
         ${root} .hmx-toggle-x:hover { color: var(--hmx-text); }
+
+        /* static: a picture of the grid — no hover outline, pointer cursors
+           or band hover states. */
+        ${root}.hmx-static .hmx-frame { pointer-events: none; }
+
+        /* Scrollable row window: the viewport scrolls (also on a static table)
+           and snaps to whole rows; a static table's content stays inert. */
+        ${root}.hmx-window-scroll .hmx-scroll {
+            overflow-y: auto; scroll-snap-type: y mandatory; pointer-events: auto;
+            /* Reaching the first / last row doesn't scroll the page instead. */
+            overscroll-behavior: contain;
+        }
+        /* Not scrollable right now: the pointer goes through to the page. */
+        ${root}.hmx-window-scroll.hmx-window-inert .hmx-scroll { pointer-events: none; }
+        ${root}.hmx-static.hmx-window-scroll .hmx-grid-inner { pointer-events: none; }
+        ${root}.hmx-window-scroll .hmx-row,
+        ${root}.hmx-window-scroll .hmx-collapsed { scroll-snap-align: start; }
     `;
 }
 

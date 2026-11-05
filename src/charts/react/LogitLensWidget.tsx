@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useCallback } from "react";
-import type { LogitLensData, LogitLensUIState } from "../types/logit-lens";
+import type { LogitLensData, LogitLensRowWindow, LogitLensUIState } from "../types/logit-lens";
 import { LogitLensCore } from "../visualizations/logit-lens";
 
 interface LogitLensWidgetProps {
@@ -10,6 +10,22 @@ interface LogitLensWidgetProps {
     className?: string;
     titleSize?: string;
     contentSize?: string;
+    /** false: a static rendering of `uiState` (see LogitLensOptions). Fixed
+     *  per `data` (the core is rebuilt when data changes). */
+    interactive?: boolean;
+    pixelRatio?: number;
+    /** Static only: row window height in rows (see LogitLensOptions). */
+    maxRows?: number;
+    /** Static only: make the row window a scrollable viewport. */
+    scrollRows?: boolean;
+    /** With scrollRows: whether the viewport scrolls now (default true);
+     *  inert, scrolling over it goes to the page. Can change any time. */
+    scrollRowsActive?: boolean;
+    /** Static only: false leaves out the layer navigator. Fixed per `data`. */
+    layerNavigator?: boolean;
+    /** The rows the row window shows: once the widget is built ("render")
+     *  and after each scroll that moves it ("scroll"). Null: no window. */
+    onRowWindowChange?: (window: LogitLensRowWindow | null, source: "render" | "scroll") => void;
 }
 
 export function LogitLensWidget({
@@ -20,6 +36,13 @@ export function LogitLensWidget({
     className,
     titleSize = "16px",
     contentSize = "12px",
+    interactive = true,
+    pixelRatio,
+    maxRows,
+    scrollRows,
+    scrollRowsActive = true,
+    layerNavigator,
+    onRowWindowChange,
 }: LogitLensWidgetProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const coreRef = useRef<LogitLensCore | null>(null);
@@ -27,6 +50,8 @@ export function LogitLensWidget({
     // re-applying the host's persisted echo of that same state (which would
     // otherwise fight the widget's own live interaction).
     const lastEmittedRef = useRef<string | null>(null);
+    const onRowWindowChangeRef = useRef(onRowWindowChange);
+    onRowWindowChangeRef.current = onRowWindowChange;
 
     // Construct the core ONCE per `data`. Rebuilding on every uiState change
     // tears down the transient top-k popup / overlay DOM (which isn't part of
@@ -46,7 +71,22 @@ export function LogitLensWidget({
                 ...uiState,
                 darkMode: darkMode ?? uiState?.darkMode ?? null,
             };
-            coreRef.current = new LogitLensCore(containerRef.current, data, mergedState);
+            const core = new LogitLensCore(containerRef.current, data, mergedState, {
+                interactive,
+                pixelRatio,
+                maxRows,
+                scrollRows,
+                scrollRowsActive,
+                layerNavigator,
+            });
+            coreRef.current = core;
+            // The first window is reported during construction, before
+            // anyone listens: hand it over now, then follow changes.
+            onRowWindowChangeRef.current?.(core.getRowWindow(), "render");
+            core.on("rowWindowChange", (e) => {
+                const { window, source } = e as { window: LogitLensRowWindow | null; source: "render" | "scroll" };
+                onRowWindowChangeRef.current?.(window, source);
+            });
         } catch (e) {
             console.error("Failed to create LogitLensWidget:", e);
         }
@@ -64,6 +104,11 @@ export function LogitLensWidget({
             darkMode: darkMode ?? uiState.darkMode ?? null,
         });
     }, [uiState, darkMode]);
+
+    // Turn row-window scrolling on/off without a rebuild.
+    useEffect(() => {
+        coreRef.current?.setRowScrollActive(scrollRowsActive);
+    }, [scrollRowsActive]);
 
     // Sync dark mode imperatively (no rebuild).
     useEffect(() => {
