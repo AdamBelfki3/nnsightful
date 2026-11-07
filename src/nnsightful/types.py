@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from pydantic import BaseModel
 
@@ -330,3 +330,63 @@ class ActivationPatchingData(ToolData):
         return display_activation_patching(
             data, options=options, return_html=return_html, **kwargs
         )
+
+
+class GenerationData(ToolData):
+    input_ids: list[int]  # The prompt the model saw (chat template applied)
+    completion_ids: list[int]  # Generated tokens, without the stop token
+    completion: list[str]  # Each generated token decoded on its own
+    text: str  # The completion decoded as a continuation of the prompt
+    finish_reason: Literal["stop", "length"]  # A stop token, or max_new_tokens
+
+    @classmethod
+    def format(
+        cls,
+        model: "StandardizedTransformer",
+        token_ids: Sequence[int],
+        *,
+        n_prompt: int,
+        stop_ids: Sequence[int] = (),
+        mode: str = "chat",
+    ) -> "GenerationData":
+        """Build the generation data from ``model.generate``'s whole sequence.
+
+        ``token_ids`` is the prompt's ``n_prompt`` ids followed by the
+        generated ones, as ``generate(..., raw=True)["token_ids"]`` holds it.
+        The completion is cut at the first of ``stop_ids``. ``text`` is the
+        prompt and completion decoded together, minus the prompt's own
+        decoding (special tokens skipped), so a leading space survives
+        tokenizers that drop it from a lone token; chat mode strips it.
+        """
+        tokenizer = model.tokenizer
+        prompt_ids = [int(i) for i in token_ids[:n_prompt]]
+        new_ids = [int(i) for i in token_ids[n_prompt:]]
+
+        finish_reason = "length"
+        stops = set(stop_ids)
+        for i, token_id in enumerate(new_ids):
+            if token_id in stops:
+                new_ids = new_ids[:i]
+                finish_reason = "stop"
+                break
+
+        whole = tokenizer.decode(prompt_ids + new_ids, skip_special_tokens=True)
+        head = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+        if whole.startswith(head):
+            text = whole[len(head) :]
+        else:
+            text = tokenizer.decode(new_ids, skip_special_tokens=True)
+        if mode == "chat":
+            text = text.strip()
+
+        return cls(
+            input_ids=prompt_ids,
+            completion_ids=new_ids,
+            completion=[str(tokenizer.decode(token_id)) for token_id in new_ids],
+            text=text,
+            finish_reason=finish_reason,
+        )
+
+    def display(self, **kwargs):
+        """Print the generated text; a generation has no chart."""
+        print(self.text)

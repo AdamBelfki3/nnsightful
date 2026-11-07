@@ -8,10 +8,12 @@ from nnsightful.tools.execution import (
     ExecMode,
     NonBlockingToolBackend,
 )
+from nnsightful.tools.generate import generate
 from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
 from nnsightful.types import (
     ActivationPatchingData,
+    GenerationData,
     JLensData,
     JLensMeta,
     LogitLensData,
@@ -32,6 +34,7 @@ ndif.register('nnsightful')
 
 __all__ = [
     "activation_patching",
+    "generate",
     "j_lens",
     "logit_lens",
     "Tool",
@@ -42,6 +45,7 @@ __all__ = [
     "IndexSpec",
     "resolve_indices",
     "ActivationPatchingData",
+    "GenerationData",
     "JLensData",
     "JLensMeta",
     "LogitLensData",
