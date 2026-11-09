@@ -38,7 +38,8 @@ data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_
 
 # Generation — a chat reply, with the tokenizer's chat template applied
 # (temperature=0 is greedy), or a base model's continuation of a text.
-# Returns GenerationData: `text`, the token ids and labels, `finish_reason`
+# Returns GenerationData: `text`, the token ids and labels, `finish_reason`,
+# and `reasoning` for a reply that keeps its thinking apart (gpt-oss)
 messages = [{"role": "user", "content": "Which city is the capital of France?"}]
 data = generate(model, messages, max_new_tokens=128, temperature=0.7)
 data = generate(model, "The capital of France is", mode="completion")

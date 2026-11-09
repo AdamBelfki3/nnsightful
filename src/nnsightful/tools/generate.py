@@ -30,7 +30,9 @@ class GenerateTool(Tool):
     ``generation_config`` EOS ids and, in chat mode, whichever of
     :attr:`END_OF_TURN_TOKENS` the tokenizer has as a special token (Gemma,
     e.g., also has a plain-text ``</s>``), plus any ``stop_token_ids`` given.
-    ``temperature=0`` decodes greedily.
+    Phi's ``<|end|>`` is left to its ``generation_config``: gpt-oss ends each
+    message of a reply with it, its reasoning included, and ends the reply
+    itself with ``<|return|>``. ``temperature=0`` decodes greedily.
     """
 
     data_class = GenerationData
@@ -42,7 +44,6 @@ class GenerateTool(Tool):
         "<|eot_id|>",  # Llama 3
         "<|eom_id|>",  # Llama 3.1 tool calls
         "<|im_end|>",  # Qwen, ChatML
-        "<|end|>",  # Phi
         "<|endoftext|>",
         "<|end_of_text|>",
         "</s>",
