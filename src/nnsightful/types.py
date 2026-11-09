@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Sequence
 
 from pydantic import BaseModel
 
@@ -338,6 +338,17 @@ class GenerationData(ToolData):
     completion: list[str]  # Each generated token decoded on its own
     text: str  # The completion decoded as a continuation of the prompt
     finish_reason: Literal["stop", "length"]  # A stop token, or max_new_tokens
+    reasoning: Optional[str] = None  # A chat reply's thinking, kept apart from its text
+
+    # gpt-oss's chat format ("harmony"): a reply is messages, each a header
+    # naming its channel, then <|message|> and the content. These tokens
+    # start or end one.
+    HARMONY_BREAKS: ClassVar[tuple[str, ...]] = (
+        "<|start|>",
+        "<|end|>",
+        "<|return|>",
+        "<|call|>",
+    )
 
     @classmethod
     def format(
@@ -356,7 +367,10 @@ class GenerationData(ToolData):
         The completion is cut at the first of ``stop_ids``. ``text`` is the
         prompt and completion decoded together, minus the prompt's own
         decoding (special tokens skipped), so a leading space survives
-        tokenizers that drop it from a lone token; chat mode strips it.
+        tokenizers that drop it from a lone token; chat mode strips it. A
+        chat reply in gpt-oss's format is split by channel instead
+        (``harmony_parts``): its analysis is the ``reasoning``, the rest the
+        ``text``.
         """
         tokenizer = model.tokenizer
         prompt_ids = [int(i) for i in token_ids[:n_prompt]]
@@ -370,14 +384,19 @@ class GenerationData(ToolData):
                 finish_reason = "stop"
                 break
 
-        whole = tokenizer.decode(prompt_ids + new_ids, skip_special_tokens=True)
-        head = tokenizer.decode(prompt_ids, skip_special_tokens=True)
-        if whole.startswith(head):
-            text = whole[len(head) :]
+        harmony = cls.harmony_parts(tokenizer, new_ids) if mode == "chat" else None
+        reasoning = None
+        if harmony is not None:
+            text, reasoning = harmony
         else:
-            text = tokenizer.decode(new_ids, skip_special_tokens=True)
-        if mode == "chat":
-            text = text.strip()
+            whole = tokenizer.decode(prompt_ids + new_ids, skip_special_tokens=True)
+            head = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+            if whole.startswith(head):
+                text = whole[len(head) :]
+            else:
+                text = tokenizer.decode(new_ids, skip_special_tokens=True)
+            if mode == "chat":
+                text = text.strip()
 
         return cls(
             input_ids=prompt_ids,
@@ -385,7 +404,48 @@ class GenerationData(ToolData):
             completion=[str(tokenizer.decode(token_id)) for token_id in new_ids],
             text=text,
             finish_reason=finish_reason,
+            reasoning=reasoning,
         )
+
+    @classmethod
+    def harmony_parts(
+        cls, tokenizer: Any, new_ids: Sequence[int]
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """A reply in gpt-oss's format, as its text and its reasoning.
+
+        The reply's messages are split at :attr:`HARMONY_BREAKS`; each one's
+        channel is the first word after ``<|channel|>`` in its header. The
+        ``analysis`` messages are the reasoning (None without one) and the
+        others (``final``, and any ``commentary``) the text, each joined by
+        blank lines. A message cut off before its ``<|message|>`` is left
+        out. None for a tokenizer without the format's tokens, or a reply
+        with no message in it.
+        """
+        vocab = tokenizer.get_added_vocab()
+        if "<|channel|>" not in vocab or "<|message|>" not in vocab:
+            return None
+        breaks = {vocab[token] for token in cls.HARMONY_BREAKS if token in vocab}
+        content_start = vocab["<|message|>"]
+
+        messages: list[list[int]] = [[]]
+        for token_id in new_ids:
+            if token_id in breaks:
+                messages.append([])
+            else:
+                messages[-1].append(int(token_id))
+        messages = [ids for ids in messages if content_start in ids]
+        if not messages:
+            return None
+
+        text: list[str] = []
+        reasoning: list[str] = []
+        for ids in messages:
+            at = ids.index(content_start)
+            channel = tokenizer.decode(ids[:at]).partition("<|channel|>")[2].split()
+            content = tokenizer.decode(ids[at + 1 :], skip_special_tokens=True).strip()
+            if content:
+                (reasoning if channel[:1] == ["analysis"] else text).append(content)
+        return "\n\n".join(text), "\n\n".join(reasoning) or None
 
     def display(self, **kwargs):
         """Print the generated text; a generation has no chart."""
