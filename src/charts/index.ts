@@ -27,6 +27,7 @@ export type {
     ActivationPatchingMode,
     ActivationPatchingOptions,
     ActivationPatchingWidgetInterface,
+    GenerationData,
 } from "./types";
 
 // Core classes (framework-agnostic)

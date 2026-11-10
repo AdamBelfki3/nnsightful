@@ -16,7 +16,7 @@ pip install git+https://github.com/AdamBelfki3/nnsightful.git
 
 ```python
 from nnterp import StandardizedTransformer
-from nnsightful import activation_patching, j_lens, logit_lens
+from nnsightful import activation_patching, generate, j_lens, logit_lens
 
 model = StandardizedTransformer("gpt2")
 
@@ -35,6 +35,15 @@ data = j_lens(model, prompt, max_new_tokens=5, positions=-1)
 
 # Activation patching — returns ActivationPatchingData directly
 data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
+
+# Generation — a chat reply, with the tokenizer's chat template applied
+# (temperature=0 is greedy), or a base model's continuation of a text.
+# Returns GenerationData: `text`, the token ids and labels, `finish_reason`,
+# and `reasoning`, a thinking model's reasoning kept apart from its answer
+# (gpt-oss's analysis channel, or a `<think>` block)
+messages = [{"role": "user", "content": "Which city is the capital of France?"}]
+data = generate(model, messages, max_new_tokens=128, temperature=0.7)
+data = generate(model, "The capital of France is", mode="completion")
 ```
 
 ### Running on NDIF

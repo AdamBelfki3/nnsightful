@@ -30,9 +30,16 @@ from nnsightful.tools.execution import (
     ExecMode,
     NonBlockingToolBackend,
 )
+from nnsightful.tools.generate import generate
 from nnsightful.tools.j_lens import JLensTool, j_lens
 from nnsightful.tools.logit_lens import logit_lens
-from nnsightful.types import ActivationPatchingData, JLensData, LogitLensData, ToolData
+from nnsightful.types import (
+    ActivationPatchingData,
+    GenerationData,
+    JLensData,
+    LogitLensData,
+    ToolData,
+)
 
 PROMPT = "The capital of France is"
 SRC_PROMPT = "The Eiffel Tower is in Paris. The Eiffel Tower is in"
@@ -111,6 +118,17 @@ CASES = [
         inputs=_patching_inputs,
         key=lambda d: d.tokenLabels[:2],
         raw_key=lambda raw: (sorted(raw), len(raw["patched_logits"])),
+    ),
+    ToolCase(
+        "generate",
+        generate,
+        GenerationData,
+        inputs=lambda model: (
+            (PROMPT,),
+            dict(mode="completion", max_new_tokens=3, temperature=0),
+        ),
+        key=lambda d: (d.input_ids, d.completion_ids[:1]),
+        raw_key=lambda raw: (sorted(raw), len(raw["token_ids"])),
     ),
 ]
 

@@ -81,6 +81,22 @@ types, so a wrong number fails, not just a wrong shape.
   `activation_patching.format(**raw)` turns into exactly the non-raw
   payload.
 
+### `test_generate.py`
+
+- **Completion**: the prompt is the text tokenized with special tokens, or
+  the messages' contents as one document; greedy decoding starts with the
+  model's own top token; without a stop the run reaches `max_new_tokens`;
+  `text` continues the prompt; a stop token cuts the completion before it.
+- **Chat** (gpt2 has no chat template, so the tests give it one): the
+  rendered conversation is tokenized without extra special tokens and the
+  reply is stripped; a string is one user turn; a template that rejects the
+  `system` role gets it folded into the next user turn; EOS is a stop token.
+- **Tool**: `raw=True` returns the whole token sequence, which
+  `generate.format(...)` turns into exactly the non-raw payload.
+- **Bad input**, each before anything is generated: chat mode without a
+  chat template, an unknown mode, `max_new_tokens < 1`, a negative
+  temperature, an empty document, a conversation the template rejects.
+
 ### `test_execution_modes.py`
 
 Every tool through every way of running it:
