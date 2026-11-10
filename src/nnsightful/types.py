@@ -350,6 +350,11 @@ class GenerationData(ToolData):
         "<|call|>",
     )
 
+    # Most other thinking models (Qwen3, QwQ, DeepSeek-R1, SmolLM3, Olmo
+    # Think) write their reasoning between these tags, before the answer.
+    THINK_OPEN: ClassVar[str] = "<think>"
+    THINK_CLOSE: ClassVar[str] = "</think>"
+
     @classmethod
     def format(
         cls,
@@ -370,7 +375,8 @@ class GenerationData(ToolData):
         tokenizers that drop it from a lone token; chat mode strips it. A
         chat reply in gpt-oss's format is split by channel instead
         (``harmony_parts``): its analysis is the ``reasoning``, the rest the
-        ``text``.
+        ``text``. Another chat reply that thinks in ``<think>`` tags has its
+        thinking split off the same way (``think_parts``).
         """
         tokenizer = model.tokenizer
         prompt_ids = [int(i) for i in token_ids[:n_prompt]]
@@ -396,7 +402,8 @@ class GenerationData(ToolData):
             else:
                 text = tokenizer.decode(new_ids, skip_special_tokens=True)
             if mode == "chat":
-                text = text.strip()
+                opened = head.rstrip().endswith(cls.THINK_OPEN)
+                text, reasoning = cls.think_parts(text, opened)
 
         return cls(
             input_ids=prompt_ids,
@@ -446,6 +453,26 @@ class GenerationData(ToolData):
             if content:
                 (reasoning if channel[:1] == ["analysis"] else text).append(content)
         return "\n\n".join(text), "\n\n".join(reasoning) or None
+
+    @classmethod
+    def think_parts(cls, text: str, opened: bool) -> tuple[str, Optional[str]]:
+        """A chat reply's text and its reasoning, for models that think in tags.
+
+        The reasoning is what comes before ``</think>``, when the reply starts
+        with ``<think>`` or its prompt ended with one (``opened``: the
+        templates of DeepSeek-R1, QwQ and Olmo Think open it for the model).
+        A reply cut off before ``</think>`` is all reasoning. An empty think
+        block (Qwen3 with thinking off) is no reasoning, and a reply that
+        doesn't start thinking is all text, whatever tags it mentions later.
+        Both parts are stripped.
+        """
+        body = text.lstrip()
+        if body.startswith(cls.THINK_OPEN):
+            body = body[len(cls.THINK_OPEN) :]
+        elif not opened:
+            return text.strip(), None
+        reasoning, closed, answer = body.partition(cls.THINK_CLOSE)
+        return (answer.strip() if closed else ""), reasoning.strip() or None
 
     def display(self, **kwargs):
         """Print the generated text; a generation has no chart."""

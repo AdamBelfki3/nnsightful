@@ -8,6 +8,6 @@ export interface GenerationData {
     completion: string[];
     text: string;
     finish_reason: "stop" | "length";
-    /** A chat reply's thinking, kept apart from its text (gpt-oss's analysis channel). */
+    /** A chat reply's thinking, kept apart from its text (gpt-oss's analysis channel, or a `<think>` block). */
     reasoning?: string | null;
 }
