@@ -17,6 +17,9 @@ const MODES: ActivationPatchingMode[] = ["probability", "prob_diff", "rank"];
  * It manages mode switching, token selection, and renders built-in controls.
  */
 export class ActivationPatchingCore implements ActivationPatchingWidgetInterface {
+    /** Most tokens in the default selection, the source and clean predictions included. */
+    static readonly MAX_DEFAULT_TOKENS = 10;
+
     private linePlot: LinePlotCore;
     private allData: ActivationPatchingData;
     private mode: ActivationPatchingMode;
@@ -33,6 +36,7 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
 
     private selectedTokens: Set<number>;
     private defaultTokens: Set<number>;
+    private customDefaultTokens: boolean;
     private onTokenSelectionChange?: (indices: number[]) => void;
     private onModeChange?: (mode: ActivationPatchingMode) => void;
 
@@ -48,8 +52,8 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
         this.onTokenSelectionChange = options.onTokenSelectionChange;
         this.onModeChange = options.onModeChange;
 
-        const n = data.tokenLabels?.length ?? data.lines?.length ?? 0;
-        const defaultArr = options.defaultSelectedTokens ?? Array.from({ length: Math.min(2, n) }, (_, i) => i);
+        const defaultArr = options.defaultSelectedTokens ?? ActivationPatchingCore.defaultSelection(data);
+        this.customDefaultTokens = options.defaultSelectedTokens !== undefined;
         this.defaultTokens = new Set(defaultArr);
         this.selectedTokens = new Set(
             options.selectedTokens ?? defaultArr
@@ -79,6 +83,31 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
 
         // LinePlotCore sets height:100% which conflicts with flex:1.
         plotContainer.style.height = "auto";
+    }
+
+    // ── Default selection ────────────────────────────────────────────
+
+    /**
+     * Tokens shown when the caller gives no selection: the source and clean
+     * predictions (indices 0 and 1), always, plus every other token that is
+     * the top prediction (rank 0 in the 0-indexed `ranks`) at one layer or
+     * more. The selection holds at most MAX_DEFAULT_TOKENS tokens; when more
+     * reach the top, the ones with the highest peak probability across
+     * layers are kept. Returned in ascending index order.
+     */
+    static defaultSelection(data: ActivationPatchingData): number[] {
+        const n = data.tokenLabels?.length ?? data.lines?.length ?? 0;
+        const selection = new Set(Array.from({ length: Math.min(2, n) }, (_, i) => i));
+
+        const peak = (i: number) => Math.max(...(data.lines?.[i] ?? [0]));
+        (data.ranks ?? [])
+            .slice(0, n)
+            .flatMap((layerRanks, i) => (!selection.has(i) && layerRanks.includes(0) ? [i] : []))
+            .sort((a, b) => peak(b) - peak(a) || a - b)
+            .slice(0, ActivationPatchingCore.MAX_DEFAULT_TOKENS - selection.size)
+            .forEach(i => selection.add(i));
+
+        return Array.from(selection).sort((a, b) => a - b);
     }
 
     // ── Token selector integration ───────────────────────────────────
@@ -236,7 +265,9 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
     setData(data: ActivationPatchingData): void {
         this.allData = data;
         const n = data.tokenLabels?.length ?? data.lines?.length ?? 0;
-        this.defaultTokens = new Set(Array.from({ length: Math.min(2, n) }, (_, i) => i));
+        if (!this.customDefaultTokens) {
+            this.defaultTokens = new Set(ActivationPatchingCore.defaultSelection(data));
+        }
         // Preserve existing selection if indices are still valid; fall back to defaults
         const valid = new Set([...this.selectedTokens].filter(i => i < n));
         this.selectedTokens = valid.size > 0 ? valid : new Set(this.defaultTokens);
