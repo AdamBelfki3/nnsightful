@@ -34,16 +34,26 @@ test("source and clean stay selected when they never reach rank 1", () => {
     assert.deepEqual(ActivationPatchingCore.defaultSelection(data), [0, 1, 2]);
 });
 
-test("rank-1 tokens are capped to those with the highest peak probability", () => {
-    const cap = ActivationPatchingCore.MAX_DEFAULT_TOP_TOKENS;
+test("the selection is capped, keeping source, clean and the highest peak probabilities", () => {
+    const cap = ActivationPatchingCore.MAX_DEFAULT_TOKENS;
     const extra = 4;
-    const nTop = cap + extra;
+    const nTop = cap - 2 + extra;
     // Tokens 0 and 1 never top a layer; tokens 2.. each top one layer, and a
     // later token has a higher peak probability.
     const ranks = [[1], [1], ...Array.from({ length: nTop }, () => [0])];
     const lines = [[0], [0], ...Array.from({ length: nTop }, (_, k) => [(k + 1) / 100])];
-    const kept = Array.from({ length: cap }, (_, k) => 2 + extra + k);
-    assert.deepEqual(ActivationPatchingCore.defaultSelection(payload(ranks, lines)), [0, 1, ...kept]);
+    const kept = Array.from({ length: cap - 2 }, (_, k) => 2 + extra + k);
+    const selection = ActivationPatchingCore.defaultSelection(payload(ranks, lines));
+    assert.equal(selection.length, cap);
+    assert.deepEqual(selection, [0, 1, ...kept]);
+});
+
+test("source and clean take two of the capped slots when they reach rank 1 too", () => {
+    const cap = ActivationPatchingCore.MAX_DEFAULT_TOKENS;
+    const ranks = Array.from({ length: cap + 5 }, () => [0]);
+    const lines = ranks.map((_, i) => [i / 100]);
+    const selection = ActivationPatchingCore.defaultSelection(payload(ranks, lines));
+    assert.deepEqual(selection, [0, 1, ...Array.from({ length: cap - 2 }, (_, k) => 7 + k)]);
 });
 
 test("payloads without ranks fall back to source and clean", () => {
