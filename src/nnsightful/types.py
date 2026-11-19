@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Sequence
 
 from pydantic import BaseModel
 
@@ -330,3 +330,150 @@ class ActivationPatchingData(ToolData):
         return display_activation_patching(
             data, options=options, return_html=return_html, **kwargs
         )
+
+
+class GenerationData(ToolData):
+    input_ids: list[int]  # The prompt the model saw (chat template applied)
+    completion_ids: list[int]  # Generated tokens, without the stop token
+    completion: list[str]  # Each generated token decoded on its own
+    text: str  # The completion decoded as a continuation of the prompt
+    finish_reason: Literal["stop", "length"]  # A stop token, or max_new_tokens
+    reasoning: Optional[str] = None  # A chat reply's thinking, kept apart from its text
+
+    # gpt-oss's chat format ("harmony"): a reply is messages, each a header
+    # naming its channel, then <|message|> and the content. These tokens
+    # start or end one.
+    HARMONY_BREAKS: ClassVar[tuple[str, ...]] = (
+        "<|start|>",
+        "<|end|>",
+        "<|return|>",
+        "<|call|>",
+    )
+
+    # Most other thinking models (Qwen3, QwQ, DeepSeek-R1, SmolLM3, Olmo
+    # Think) write their reasoning between these tags, before the answer.
+    THINK_OPEN: ClassVar[str] = "<think>"
+    THINK_CLOSE: ClassVar[str] = "</think>"
+
+    @classmethod
+    def format(
+        cls,
+        model: "StandardizedTransformer",
+        token_ids: Sequence[int],
+        *,
+        n_prompt: int,
+        stop_ids: Sequence[int] = (),
+        mode: str = "chat",
+    ) -> "GenerationData":
+        """Build the generation data from ``model.generate``'s whole sequence.
+
+        ``token_ids`` is the prompt's ``n_prompt`` ids followed by the
+        generated ones, as ``generate(..., raw=True)["token_ids"]`` holds it.
+        The completion is cut at the first of ``stop_ids``. ``text`` is the
+        prompt and completion decoded together, minus the prompt's own
+        decoding (special tokens skipped), so a leading space survives
+        tokenizers that drop it from a lone token; chat mode strips it. A
+        chat reply in gpt-oss's format is split by channel instead
+        (``harmony_parts``): its analysis is the ``reasoning``, the rest the
+        ``text``. Another chat reply that thinks in ``<think>`` tags has its
+        thinking split off the same way (``think_parts``).
+        """
+        tokenizer = model.tokenizer
+        prompt_ids = [int(i) for i in token_ids[:n_prompt]]
+        new_ids = [int(i) for i in token_ids[n_prompt:]]
+
+        finish_reason = "length"
+        stops = set(stop_ids)
+        for i, token_id in enumerate(new_ids):
+            if token_id in stops:
+                new_ids = new_ids[:i]
+                finish_reason = "stop"
+                break
+
+        harmony = cls.harmony_parts(tokenizer, new_ids) if mode == "chat" else None
+        reasoning = None
+        if harmony is not None:
+            text, reasoning = harmony
+        else:
+            whole = tokenizer.decode(prompt_ids + new_ids, skip_special_tokens=True)
+            head = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+            if whole.startswith(head):
+                text = whole[len(head) :]
+            else:
+                text = tokenizer.decode(new_ids, skip_special_tokens=True)
+            if mode == "chat":
+                opened = head.rstrip().endswith(cls.THINK_OPEN)
+                text, reasoning = cls.think_parts(text, opened)
+
+        return cls(
+            input_ids=prompt_ids,
+            completion_ids=new_ids,
+            completion=[str(tokenizer.decode(token_id)) for token_id in new_ids],
+            text=text,
+            finish_reason=finish_reason,
+            reasoning=reasoning,
+        )
+
+    @classmethod
+    def harmony_parts(
+        cls, tokenizer: Any, new_ids: Sequence[int]
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """A reply in gpt-oss's format, as its text and its reasoning.
+
+        The reply's messages are split at :attr:`HARMONY_BREAKS`; each one's
+        channel is the first word after ``<|channel|>`` in its header. The
+        ``analysis`` messages are the reasoning (None without one) and the
+        others (``final``, and any ``commentary``) the text, each joined by
+        blank lines. A message cut off before its ``<|message|>`` is left
+        out. None for a tokenizer without the format's tokens, or a reply
+        with no message in it.
+        """
+        vocab = tokenizer.get_added_vocab()
+        if "<|channel|>" not in vocab or "<|message|>" not in vocab:
+            return None
+        breaks = {vocab[token] for token in cls.HARMONY_BREAKS if token in vocab}
+        content_start = vocab["<|message|>"]
+
+        messages: list[list[int]] = [[]]
+        for token_id in new_ids:
+            if token_id in breaks:
+                messages.append([])
+            else:
+                messages[-1].append(int(token_id))
+        messages = [ids for ids in messages if content_start in ids]
+        if not messages:
+            return None
+
+        text: list[str] = []
+        reasoning: list[str] = []
+        for ids in messages:
+            at = ids.index(content_start)
+            channel = tokenizer.decode(ids[:at]).partition("<|channel|>")[2].split()
+            content = tokenizer.decode(ids[at + 1 :], skip_special_tokens=True).strip()
+            if content:
+                (reasoning if channel[:1] == ["analysis"] else text).append(content)
+        return "\n\n".join(text), "\n\n".join(reasoning) or None
+
+    @classmethod
+    def think_parts(cls, text: str, opened: bool) -> tuple[str, Optional[str]]:
+        """A chat reply's text and its reasoning, for models that think in tags.
+
+        The reasoning is what comes before ``</think>``, when the reply starts
+        with ``<think>`` or its prompt ended with one (``opened``: the
+        templates of DeepSeek-R1, QwQ and Olmo Think open it for the model).
+        A reply cut off before ``</think>`` is all reasoning. An empty think
+        block (Qwen3 with thinking off) is no reasoning, and a reply that
+        doesn't start thinking is all text, whatever tags it mentions later.
+        Both parts are stripped.
+        """
+        body = text.lstrip()
+        if body.startswith(cls.THINK_OPEN):
+            body = body[len(cls.THINK_OPEN) :]
+        elif not opened:
+            return text.strip(), None
+        reasoning, closed, answer = body.partition(cls.THINK_CLOSE)
+        return (answer.strip() if closed else ""), reasoning.strip() or None
+
+    def display(self, **kwargs):
+        """Print the generated text; a generation has no chart."""
+        print(self.text)

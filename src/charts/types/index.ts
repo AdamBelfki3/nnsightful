@@ -33,3 +33,5 @@ export type {
     ActivationPatchingOptions,
     ActivationPatchingWidgetInterface,
 } from "./activation-patching";
+
+export type { GenerationData } from "./generation";
