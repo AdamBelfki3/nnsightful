@@ -124,6 +124,9 @@ class TestModel:
         expected = {0: [], 1: [5, 9], 4: [5, 9], 5: [9], 8: [9], 9: [], 13: [], 15: []}
         assert {v: looped.restart_visits(v) for v in expected} == expected
 
+    def test_a_pass_another_follows_ends_by_handing_on_the_restart_state(self, looped):
+        assert [v for v in range(len(VISITS)) if looped.hands_restart(v)] == [5, 9]
+
     def test_sections_are_the_prelude_the_passes_and_the_coda(self, looped):
         """Each pass covers two blocks of two layers, the second marked by a divider."""
         sections = [(s.label, s.start, s.end, s.dividers) for s in looped.sections]
@@ -233,11 +236,11 @@ class TestActivationPatching:
         assert torch.allclose(same, one, atol=1e-5)
         assert not torch.allclose(mean, one, atol=1e-3)
 
-    def test_state_is_the_default_patch(self, looped):
+    def test_full_state_is_the_default_patch(self, looped):
         last = everywhere(looped, TGT_PROMPT)[-1]
         default = patched_logits(looped, [last], [last], [])
-        state = patched_logits(looped, [last], [last], [], patch="state")
-        assert torch.equal(default, state)
+        full = patched_logits(looped, [last], [last], [], patch="full_state")
+        assert torch.equal(default, full)
 
     def test_an_unknown_patch_is_refused(self, looped):
         last = everywhere(looped, TGT_PROMPT)[-1]
@@ -247,12 +250,66 @@ class TestActivationPatching:
             )
 
 
-class TestOutputPatching:
-    """``patch="output"``: only what the visit's layer returns is replaced."""
+class TestLiveStatePatching:
+    """``patch="live_state"``: the state, without the copy later passes restart from."""
+
+    @staticmethod
+    def by_hand(model, pos: int) -> torch.Tensor:
+        """The target run's last logits with only pass 1's blocks, as pass 2 reads them, overwritten."""
+        messages = model.decoder.message_input
+        with torch.no_grad():
+            with model.trace(SRC_PROMPT) as tracer:
+                for _ in tracer.iter[0]:
+                    blocks, hidden = messages.inputs[0][:2]
+                    src_blocks = blocks[0, pos].save()
+                    src_hidden = hidden[0, pos].save()
+            with model.trace(TGT_PROMPT) as tracer:
+                for _ in tracer.iter[0]:
+                    blocks, hidden = messages.inputs[0][:2]
+                    blocks[0, pos] = src_blocks
+                    hidden[0, pos] = src_hidden
+                logits = model.logits[0, -1].save()
+        return logits.float().cpu()
+
+    def test_it_is_the_full_state_where_no_pass_restarts_afterwards(self, looped):
+        """Before the loop, and from the last pass on."""
+        last = everywhere(looped, TGT_PROMPT)[-1]
+        live = patched_logits(looped, [last], [last], [], patch="live_state", batch_size=1)
+        full = patched_logits(looped, [last], [last], [], patch="full_state", batch_size=1)
+        same = [0, 1, *range(10, len(VISITS))]
+        assert torch.allclose(live[same], full[same], atol=1e-5)
+
+    def test_it_leaves_the_restart_copy_to_the_target(self, looped):
+        """Every position patched inside passes 1 and 2 is not the source run."""
+        positions = everywhere(looped, TGT_PROMPT)
+        source = model_logits(looped, SRC_PROMPT)[-1]
+        live = patched_logits(looped, positions, positions, [], patch="live_state")
+        full = patched_logits(looped, positions, positions, [], patch="full_state")
+        for visit in range(2, 10):
+            assert torch.allclose(full[visit], source, atol=1e-4), visit
+            assert not torch.allclose(live[visit], source, atol=1e-3), visit
+
+    def test_a_pass_end_hands_on_only_its_blocks(self, looped):
+        """At pass 1's last visit the patch writes what pass 2 reads messages from, and nothing else."""
+        last = everywhere(looped, TGT_PROMPT)[-1]
+        live = patched_logits(looped, [last], [last], [], patch="live_state", batch_size=1)
+        assert torch.allclose(live[5], self.by_hand(looped, last), atol=1e-5)
+
+    def test_freezing_every_position_gives_the_clean_run(self, looped):
+        positions = everywhere(looped, TGT_PROMPT)
+        clean = model_logits(looped, TGT_PROMPT)[-1]
+        patched = patched_logits(
+            looped, positions[:1], positions[:1], positions, patch="live_state"
+        )
+        assert torch.allclose(patched[:-1], clean.expand_as(patched[:-1]), atol=1e-4)
+
+
+class TestActiveBlockPatching:
+    """``patch="active_block"``: only what the visit's layer returns is replaced."""
 
     @staticmethod
     def by_hand(model, visit: int, pos: int) -> torch.Tensor:
-        """The target run's last logits with one visit's layer output overwritten."""
+        """The target run's last logits with one visit's active block overwritten."""
         layer_idx, pass_idx = VISITS[visit]
         layer = model.decoder.layers[layer_idx]
         with torch.no_grad():
@@ -265,26 +322,28 @@ class TestOutputPatching:
                 logits = model.logits[0, -1].save()
         return logits.float().cpu()
 
-    def test_it_overwrites_the_layer_output_and_nothing_else(self, looped):
+    def test_it_overwrites_the_active_block_and_nothing_else(self, looped):
         last = everywhere(looped, TGT_PROMPT)[-1]
-        patched = patched_logits(looped, [last], [last], [], patch="output", batch_size=1)
+        patched = patched_logits(
+            looped, [last], [last], [], patch="active_block", batch_size=1
+        )
         assert patched.shape[0] == len(VISITS)
         for visit in range(len(VISITS)):
             by_hand = self.by_hand(looped, visit, last)
             assert torch.allclose(patched[visit], by_hand, atol=1e-5), visit
 
     def test_it_leaves_the_completed_blocks_to_the_target(self, looped):
-        """Unlike the state patch, every position patched is not the source run."""
+        """Unlike the full-state patch, every position patched is not the source run."""
         positions = everywhere(looped, TGT_PROMPT)
-        output = patched_logits(looped, positions, positions, [], patch="output")
-        state = patched_logits(looped, positions, positions, [], patch="state")
-        assert not torch.allclose(output, state, atol=1e-3)
+        block = patched_logits(looped, positions, positions, [], patch="active_block")
+        full = patched_logits(looped, positions, positions, [], patch="full_state")
+        assert not torch.allclose(block, full, atol=1e-3)
 
     def test_freezing_every_position_gives_the_clean_run(self, looped):
         positions = everywhere(looped, TGT_PROMPT)
         clean = model_logits(looped, TGT_PROMPT)[-1]
         patched = patched_logits(
-            looped, positions[:1], positions[:1], positions, patch="output"
+            looped, positions[:1], positions[:1], positions, patch="active_block"
         )
         assert torch.allclose(patched[:-1], clean.expand_as(patched[:-1]), atol=1e-4)
 

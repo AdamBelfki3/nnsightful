@@ -28,7 +28,8 @@ Two things set these models apart:
 
 So the state at a visit is several tensors, not one: the lens mixes them the
 way the model does before its head, and patching overwrites all of them, or
-on request the active block alone (``patch="output"``).
+on request less of them: the state without the copy later passes restart from
+(``patch="live_state"``), or the active block alone (``patch="active_block"``).
 """
 
 from __future__ import annotations
@@ -81,22 +82,28 @@ class LoopedLogitLensTool(LogitLensTool):
 class LoopedActivationPatchingTool(ActivationPatchingTool):
     """Activation patching over a looped model's layer visits.
 
-    A visit is patched one of two ways, chosen by ``patch``:
+    A visit is patched one of three ways, chosen by ``patch``, each replacing
+    more of what the model holds at the patched positions than the next:
 
-    * ``"state"`` (the default) replaces, at the patched positions, the whole
-      state the visit leaves (:meth:`LoopedTransformer.state`), so that
-      everything computed there afterwards starts from the source run's.
-      Once the loop has begun that includes the state later passes restart
-      from, which is replaced where each picks it up
+    * ``"full_state"`` (the default) replaces the whole state the visit
+      leaves (:meth:`LoopedTransformer.state`), so that everything computed
+      there afterwards starts from the source run's. Once the loop has begun
+      that includes the copy of the pre-loop state later passes restart from,
+      which is replaced where each picks it up
       (:meth:`LoopedTransformer.restart_visits`). Patching every position at
       a visit gives back the source run's output.
-    * ``"output"`` replaces only what the visit's layer returns, the active
-      block (:meth:`LoopedTransformer.active_block`). The completed blocks,
-      the token's embedding among them, stay the target run's, so the patch
-      carries what the current group of layers has written so far and
-      nothing else.
+    * ``"live_state"`` replaces what the visit's pass is working with: the
+      same state, without that copy. A later pass then restarts from the
+      target run's own, and the patch reaches it only through the messages
+      it reads from the patched pass. Before the loop, and from the last pass
+      on, no pass restarts afterwards and it is the full state.
+    * ``"active_block"`` replaces only the active block, which is what the
+      visit's layer returns (:meth:`LoopedTransformer.active_block`). The
+      completed blocks, the token's embedding among them, stay the target
+      run's, so the patch carries what the current group of layers has
+      written so far and nothing else.
 
-    Frozen positions are held at the clean run's whole state under both.
+    Frozen positions are held at the clean run's whole state under all three.
     The data carries the model's sections
     (:attr:`LoopedTransformer.sections`), so its plot marks the loop's passes.
 
@@ -104,7 +111,7 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
         PATCHES: The values ``patch`` takes, the default first.
     """
 
-    PATCHES = ("state", "output")
+    PATCHES = ("full_state", "live_state", "active_block")
 
     def _prepare(
         self, model: LoopedTransformer, *args: Any, patch: str = PATCHES[0], **kwargs: Any
@@ -162,10 +169,14 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
             with model.trace() as tracer:
                 for visit in range(batch_start, batch_end):
                     with tracer.invoke(tgt_prompt):
-                        restarts = model.restart_visits(visit) if patch == "state" else []
+                        values = sources[visit]
+                        restarts = []
+                        if patch == "full_state":
+                            restarts = model.restart_visits(visit)
+                        elif patch == "live_state" and model.hands_restart(visit):
+                            values = [*values[:-2], None, None]
                         self._write(
-                            self._patched(model, tracer, visit, patch),
-                            (tgt_pos, sources[visit]),
+                            self._patched(model, tracer, visit, patch), (tgt_pos, values)
                         )
 
                         for later in range(visit + 1, num_visits):
@@ -206,7 +217,7 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
         model: LoopedTransformer, tracer: Any, visit: int, patch: str
     ) -> Iterator[torch.Tensor]:
         """The tensors ``patch`` overwrites at a visit, each as the model reaches it."""
-        if patch == "output":
+        if patch == "active_block":
             yield model.active_block(tracer, visit)
         else:
             yield from model.state(tracer, visit)
@@ -356,6 +367,15 @@ class LoopedTransformer(TransformersModel):
         restarting = range(config.loop_num_passes - 1)
         pass_ends = [loop_start + (p + 1) * loop_len - 1 for p in restarting]
         return [end for end in pass_ends if end > visit]
+
+    def hands_restart(self, visit: int) -> bool:
+        """Whether the state a visit leaves is the one a later pass restarts from.
+
+        True for the last visit of a pass that another follows. What it hands
+        the next layer is the pre-loop state, kept since the loop began (the
+        last two tensors of its :meth:`state`), not anything its pass computed.
+        """
+        return visit in self.restart_visits(visit - 1)
 
     # -- the state (inside a trace) -------------------------------------------------
 
