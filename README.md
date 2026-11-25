@@ -89,9 +89,8 @@ display_line_plot({
 
 See `nnsightful/tools/looped.py`.
 
-These checkpoints need a `transformers` that has their architecture (its
-`add-inkling2-mini` branch until a release does) and `torchvision`, which
-their processor loads.
+These checkpoints need `transformers` 5.24.0 or later, the first release with
+their architecture, and `torchvision`, which their processor loads.
 
 ### Running on NDIF
 
