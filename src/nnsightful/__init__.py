@@ -10,6 +10,7 @@ from nnsightful.tools.execution import (
 )
 from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
+from nnsightful.tools.looped import LoopedTransformer
 from nnsightful.types import (
     ActivationPatchingData,
     JLensData,
@@ -34,6 +35,7 @@ __all__ = [
     "activation_patching",
     "j_lens",
     "logit_lens",
+    "LoopedTransformer",
     "Tool",
     "ExecMode",
     "NonBlockingToolBackend",

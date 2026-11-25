@@ -37,6 +37,46 @@ data = j_lens(model, prompt, max_new_tokens=5, positions=-1)
 data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
 ```
 
+### Looped models
+
+Inkling 2 Mini and TML-d24-varloop-research run their middle layers several
+times over and keep no single residual stream, so nnterp does not standardize
+them. They load with nnsightful's own `LoopedTransformer`, and the same calls
+run on it:
+
+```python
+from nnsightful import ExecMode, LoopedTransformer
+
+model = LoopedTransformer("thinkingmachines/Inkling-2-Mini")
+data = logit_lens(model, prompt, exec_mode=ExecMode.REMOTE)
+data = activation_patching(
+    model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze,
+    exec_mode=ExecMode.REMOTE,
+)
+```
+
+A logit-lens row or a patching point is one layer *visit* rather than one
+layer: Inkling 2 Mini's 24 layers make 48 visits, its layers 6 to 17 running
+three times. The lens reads a visit the way the model reads its last one
+(its block mixed with the completed ones, then the final norm and head), and
+patching replaces everything a visit leaves at the patched positions. With
+`patch="output"` it replaces only what the visit's layer returns, the block its
+group of layers is still building, and leaves the completed blocks alone:
+
+```python
+data = activation_patching(
+    model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze,
+    patch="output",  # the default is "state"
+    exec_mode=ExecMode.REMOTE,
+)
+```
+
+See `nnsightful/tools/looped.py`.
+
+These checkpoints need a `transformers` that has their architecture (its
+`add-inkling2-mini` branch until a release does) and `torchvision`, which
+their processor loads.
+
 ### Running on NDIF
 
 Where a tool runs is its `exec_mode`. On [NDIF](https://ndif.us) the result is

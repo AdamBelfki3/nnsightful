@@ -65,21 +65,31 @@ class Tool():
         collect it from, and a mapping with a ``backend`` returns that backend
         (built for ``model`` when given as a class).
         """
+        tool = self._for_model(model)
         session_kwargs = ExecMode.resolve(exec_mode, model)
-        run_kwargs, format_kwargs = self._prepare(model, *args, **kwargs)
+        run_kwargs, format_kwargs = tool._prepare(model, *args, **kwargs)
 
         with torch.no_grad(), model.session(**session_kwargs):
-            outputs = self._run(model, **run_kwargs)
+            outputs = tool._run(model, **run_kwargs)
             if raw:
-                results = self._raw(model, outputs)
+                results = tool._raw(model, outputs)
             else:
-                results = self._format(model, outputs, **format_kwargs)
+                results = tool._format(model, outputs, **format_kwargs)
             nnsight.save(results)
 
         backend = session_kwargs.get("backend")
         if backend is not None:
             return backend
         return results
+
+    def _for_model(self, model: "StandardizedTransformer") -> Tool:
+        """The implementation of this tool that runs on ``model``.
+
+        This one, unless the model's class brings its own for it: a ``TOOLS``
+        mapping from a tool's class to the instance that stands in for it, as
+        :class:`~nnsightful.tools.looped.LoopedTransformer` has.
+        """
+        return getattr(type(model), "TOOLS", {}).get(type(self), self)
 
     def format(self, *args, **kwargs) -> ToolData:
         """Format a run's tensors into a :attr:`data_class` instance.
