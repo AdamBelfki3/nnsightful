@@ -27,7 +27,8 @@ Two things set these models apart:
   only through messages its layers read from that pass's two blocks.
 
 So the state at a visit is several tensors, not one: the lens mixes them the
-way the model does before its head, and patching overwrites all of them, or
+way the model does before its head (or on request runs the layers after the
+loop on them first, ``lens="coda"``), and patching overwrites all of them, or
 on request less of them: the state without the copy later passes restart from
 (``patch="live_state"``), or the active block alone (``patch="active_block"``).
 """
@@ -47,7 +48,35 @@ from .logit_lens import LogitLensTool
 
 
 class LoopedLogitLensTool(LogitLensTool):
-    """The logit lens over a looped model's layer visits."""
+    """The logit lens over a looped model's layer visits.
+
+    A visit is read one of two ways, chosen by ``lens``:
+
+    * ``"logit"`` (the default) projects the state the visit leaves the way
+      the model projects its last (:meth:`LoopedTransformer.project_on_vocab`).
+    * ``"coda"`` first runs the layers after the loop, the coda, on that
+      state (:meth:`LoopedTransformer.through_coda`) and projects what they
+      leave: the model's own way from the loop to its output, taken early.
+      The coda's attention reads other positions, so it runs on the whole
+      context whatever ``positions`` selects. A visit inside the coda is
+      projected directly, as under ``"logit"``: the coda is already at work
+      there. The loop's last visit gives the model's own logits.
+
+    Attributes:
+        LENSES: The values ``lens`` takes, the default first.
+    """
+
+    LENSES = ("logit", "coda")
+
+    def _prepare(
+        self, model: LoopedTransformer, *args: Any, lens: str = LENSES[0], **kwargs: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve the call's arguments, ``lens`` among them (see :attr:`LENSES`)."""
+        if lens not in self.LENSES:
+            raise ValueError(f"lens={lens!r} is not one of {self.LENSES}.")
+
+        run_kwargs, format_kwargs = super()._prepare(model, *args, **kwargs)
+        return {**run_kwargs, "lens": lens}, format_kwargs
 
     def _run(
         self,
@@ -56,15 +85,25 @@ class LoopedLogitLensTool(LogitLensTool):
         prompt: str,
         positions: list[int] | None,
         index: slice | list[int],
+        lens: str,
     ) -> dict[str, Any]:
         """Project the ``positions`` rows (via ``index``) of every visit.
 
         The logits are float32, as the model's own are.
         """
+        coda_visits = model.coda_visits
         with model.trace(prompt) as tracer:
-            logits = None
+            states, coda = [], []
             for visit in range(model.num_layers):
-                hidden, blocks = model.visit_output(tracer, visit)
+                layer, args, kwargs, output = model.visit_call(tracer, visit)
+                states.append(model.left_by(layer, args, output))
+                if visit in coda_visits:
+                    coda.append((layer, kwargs))
+
+            logits = None
+            for visit, (hidden, blocks) in enumerate(states):
+                if lens == "coda" and visit not in coda_visits:
+                    hidden, blocks = model.through_coda(hidden, blocks, coda)
                 visit_logits = model.project_on_vocab(
                     hidden[:, index], blocks[:, index]
                 )[0]
@@ -259,8 +298,8 @@ class LoopedTransformer(TransformersModel):
     and formatters use on any model (``num_layers``, ``vocab_size``,
     ``logits``, ``project_on_vocab``), counted and read the way these models
     need (see the module docstring), and the accessors the looped tools read
-    and patch the state through (:meth:`visit_output`, :meth:`active_block`,
-    :meth:`state`).
+    and patch the state through (:meth:`visit_call`, :meth:`visit_output`,
+    :meth:`through_coda`, :meth:`active_block`, :meth:`state`).
 
     The loop's shape is read off the running model's config, so on NDIF it is
     the deployment's: a variable-loop checkpoint runs the number of passes it
@@ -346,6 +385,13 @@ class LoopedTransformer(TransformersModel):
         return self.decoder.config.total_num_hidden_layers
 
     @property
+    def coda_visits(self) -> range:
+        """The visits of the layers after the loop, which run once and end the forward."""
+        config = self.decoder.config
+        after = config.num_hidden_layers - config.loop_layer_index_end
+        return range(self.num_layers - after, self.num_layers)
+
+    @property
     def vocab_size(self) -> int:
         return self.lm_head.weight.shape[0]
 
@@ -384,22 +430,62 @@ class LoopedTransformer(TransformersModel):
         """The logits the model returns, ``[batch, seq, vocab_size]``, softcapped."""
         return self.output.logits
 
-    def visit_output(
+    def visit_call(
         self, tracer: Any, visit: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """What a visit leaves to read: its active block and the completed blocks.
+    ) -> tuple[Any, tuple[Any, ...], dict[str, Any], torch.Tensor]:
+        """A visit's layer, the arguments the model calls it with and what it returns.
 
-        ``[batch, seq, hidden]`` and ``[batch, seq, blocks, hidden]``. A layer
-        that starts a block completes the one it was handed.
+        The positional arguments start with the active block and the completed
+        blocks the layer is handed; the keyword arguments are the attention
+        masks and positions of the run.
         """
         layer_idx, pass_idx = self.visits[visit]
         layer = self.decoder.layers[layer_idx]
         for _ in tracer.iter[pass_idx]:
-            hidden, blocks = layer.inputs[0][:2]
+            args, kwargs = layer.inputs
             output = layer.output
+        return layer, args, kwargs, output
+
+    @staticmethod
+    def left_by(
+        layer: Any, args: tuple[Any, ...], output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """What a layer's call leaves to read: its active block and the completed blocks.
+
+        ``[batch, seq, hidden]`` and ``[batch, seq, blocks, hidden]``. A layer
+        that starts a block completes the one it was handed.
+        """
+        hidden, blocks = args[:2]
         if layer.is_block_boundary:
             blocks = torch.cat([blocks.to(hidden.device), hidden.unsqueeze(-2)], dim=-2)
         return output, blocks
+
+    def visit_output(
+        self, tracer: Any, visit: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """What a visit leaves to read (see :meth:`left_by`)."""
+        layer, args, _, output = self.visit_call(tracer, visit)
+        return self.left_by(layer, args, output)
+
+    def through_coda(
+        self,
+        hidden: torch.Tensor,
+        blocks: torch.Tensor,
+        coda: list[tuple[Any, dict[str, Any]]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The state the layers after the loop leave when run on a state.
+
+        Runs them as the model runs them on the loop's last state, so on that
+        one it gives the state the model's own output is projected from.
+        ``coda`` is those layers, each with the keyword arguments of its own
+        call in the trace (:meth:`visit_call` at :attr:`coda_visits`): the
+        state must cover the same positions, since their attention reads
+        across them. No cache is passed on, so the trace's own is untouched.
+        """
+        for layer, kwargs in coda:
+            output = layer(hidden, blocks, **{**kwargs, "cache": None})
+            hidden, blocks = self.left_by(layer, (hidden, blocks), output)
+        return hidden, blocks
 
     def active_block(self, tracer: Any, visit: int) -> torch.Tensor:
         """The active block a visit leaves, to read or edit in place.

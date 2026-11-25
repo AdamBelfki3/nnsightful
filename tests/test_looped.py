@@ -180,6 +180,57 @@ class TestLogitLens:
         some = logit_lens(looped, PROMPT, positions=[0, -1], raw=True)
         assert torch.allclose(some, full[:, [0, -1]], atol=1e-5)
 
+    def test_logit_is_the_default_lens(self, looped):
+        default = logit_lens(looped, PROMPT, raw=True)
+        logit = logit_lens(looped, PROMPT, lens="logit", raw=True)
+        assert torch.equal(default, logit)
+
+    def test_an_unknown_lens_is_refused(self, looped):
+        with pytest.raises(ValueError, match="lens='tuned'"):
+            logit_lens(looped, PROMPT, lens="tuned")
+
+
+class TestCodaLens:
+    """``lens="coda"``: the layers after the loop run on a visit's state before it is projected."""
+
+    @pytest.fixture(scope="class")
+    def lenses(self, looped):
+        return {
+            "logit": logit_lens(looped, PROMPT, raw=True),
+            "coda": logit_lens(looped, PROMPT, lens="coda", raw=True),
+        }
+
+    def test_the_coda_visits_are_the_layers_after_the_loop(self, looped):
+        assert [VISITS[v] for v in looped.coda_visits] == [(6, 0), (7, 0)]
+
+    def test_the_loops_last_visit_gives_the_models_own_logits(self, looped, lenses):
+        """Its state is the one the coda really runs on."""
+        last_of_loop = looped.coda_visits.start - 1
+        own = model_logits(looped, PROMPT)
+        assert torch.allclose(lenses["coda"][last_of_loop], own, atol=1e-4)
+        assert not torch.allclose(lenses["logit"][last_of_loop], own, atol=1e-3)
+
+    def test_visits_inside_the_coda_are_projected_directly(self, looped, lenses):
+        inside = list(looped.coda_visits)
+        assert torch.allclose(lenses["coda"][inside], lenses["logit"][inside], atol=1e-5)
+
+    def test_earlier_visits_differ_from_the_logit_lens_and_from_each_other(self, looped, lenses):
+        coda, logit = lenses["coda"], lenses["logit"]
+        before = range(looped.coda_visits.start)
+        assert all(not torch.allclose(coda[v], logit[v], atol=1e-3) for v in before)
+        assert all(not torch.allclose(coda[v], coda[v + 1], atol=1e-4) for v in before[:-1])
+
+    def test_positions_select_rows_of_the_full_run(self, looped, lenses):
+        """The coda still runs on the whole context."""
+        some = logit_lens(looped, PROMPT, lens="coda", positions=[0, -1], raw=True)
+        assert torch.allclose(some, lenses["coda"][:, [0, -1]], atol=1e-5)
+
+    def test_it_leaves_the_runs_own_output_alone(self, looped):
+        """Running the coda by hand inside the trace does not change what the model returns."""
+        before = model_logits(looped, PROMPT)
+        logit_lens(looped, PROMPT, lens="coda", raw=True)
+        assert torch.equal(model_logits(looped, PROMPT), before)
+
 
 class TestActivationPatching:
     @pytest.fixture(scope="class")
@@ -366,6 +417,13 @@ class TestRemote:
 
         assert len(data.layers) == hosted.num_layers
         assert data.topk[-1][-1] == [hosted.tokenizer.decode(int(prediction))]
+
+    def test_coda_lens_reads_the_prediction_at_the_end_of_the_loop(self, hosted):
+        data = logit_lens(hosted, PROMPT, top_k=1, lens="coda", exec_mode=ExecMode.REMOTE)
+        last_of_loop = hosted.coda_visits.start - 1
+
+        assert len(data.layers) == hosted.num_layers
+        assert data.topk[last_of_loop][-1] == data.topk[-1][-1]
 
     @pytest.mark.parametrize("patch", LoopedActivationPatchingTool.PATCHES)
     def test_patching_runs_a_point_per_visit(self, hosted, patch):

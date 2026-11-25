@@ -58,7 +58,17 @@ data = activation_patching(
 A logit-lens row or a patching point is one layer *visit* rather than one
 layer: Inkling 2 Mini's 24 layers make 48 visits, its layers 6 to 17 running
 three times. The lens reads a visit the way the model reads its last one
-(its block mixed with the completed ones, then the final norm and head).
+(its block mixed with the completed ones, then the final norm and head). With
+`lens="coda"` it first runs the layers after the loop, the coda, on the
+visit's state, which reads much earlier visits than the plain projection does:
+
+```python
+data = logit_lens(model, prompt, lens="coda", exec_mode=ExecMode.REMOTE)
+```
+
+The coda's attention reads other positions, so it runs on the whole prompt
+even when `positions` selects a few, once per visit before the coda. Visits
+inside the coda are projected directly.
 
 Patching takes a `patch` that says how much of what the model holds at the
 patched positions a visit replaces:
