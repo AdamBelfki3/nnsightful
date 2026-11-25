@@ -17,7 +17,9 @@ from nnsightful.types import (
     JLensMeta,
     LogitLensData,
     LogitLensMeta,
+    ToolChoice,
     ToolData,
+    ToolOption,
 )
 from nnsightful.viz import (
     display_activation_patching,
@@ -41,6 +43,8 @@ __all__ = [
     "NonBlockingToolBackend",
     "AsyncToolBackend",
     "ToolData",
+    "ToolOption",
+    "ToolChoice",
     "IndexSpec",
     "resolve_indices",
     "ActivationPatchingData",

@@ -42,7 +42,7 @@ import torch
 import torch.nn.functional as F
 from nnsight import TransformersModel
 
-from ..types import PlotSection
+from ..types import PlotSection, ToolChoice, ToolOption
 from .activation_patching import ActivationPatchingTool
 from .logit_lens import LogitLensTool
 
@@ -63,20 +63,34 @@ class LoopedLogitLensTool(LogitLensTool):
       there. The loop's last visit gives the model's own logits.
 
     Attributes:
-        LENSES: The values ``lens`` takes, the default first.
+        LENS: The ``lens`` option.
     """
 
-    LENSES = ("logit", "coda")
-
-    def _prepare(
-        self, model: LoopedTransformer, *args: Any, lens: str = LENSES[0], **kwargs: Any
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Resolve the call's arguments, ``lens`` among them (see :attr:`LENSES`)."""
-        if lens not in self.LENSES:
-            raise ValueError(f"lens={lens!r} is not one of {self.LENSES}.")
-
-        run_kwargs, format_kwargs = super()._prepare(model, *args, **kwargs)
-        return {**run_kwargs, "lens": lens}, format_kwargs
+    LENS = ToolOption(
+        name="lens",
+        label="Lens",
+        default="logit",
+        choices=[
+            ToolChoice(
+                value="logit",
+                label="Logit lens",
+                description=(
+                    "Reads the state each layer visit leaves the way the model "
+                    "reads its last one."
+                ),
+            ),
+            ToolChoice(
+                value="coda",
+                label="Coda lens",
+                description=(
+                    "Runs the model's final block, the coda, on each layer "
+                    "visit's state before reading it, which makes earlier "
+                    "visits readable. Visits inside the coda are read directly."
+                ),
+            ),
+        ],
+    )
+    OPTIONS = (LENS,)
 
     def _run(
         self,
@@ -145,20 +159,45 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
     Frozen positions are held at the clean run's whole state under all three.
 
     Attributes:
-        PATCHES: The values ``patch`` takes, the default first.
+        PATCH: The ``patch`` option, its values from the one that replaces
+            least to the one that replaces most.
     """
 
-    PATCHES = ("full_state", "live_state", "active_block")
-
-    def _prepare(
-        self, model: LoopedTransformer, *args: Any, patch: str = PATCHES[0], **kwargs: Any
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Resolve the call's arguments, ``patch`` among them (see :attr:`PATCHES`)."""
-        if patch not in self.PATCHES:
-            raise ValueError(f"patch={patch!r} is not one of {self.PATCHES}.")
-
-        run_kwargs, format_kwargs = super()._prepare(model, *args, **kwargs)
-        return {**run_kwargs, "patch": patch}, format_kwargs
+    PATCH = ToolOption(
+        name="patch",
+        label="Patch",
+        default="full_state",
+        choices=[
+            ToolChoice(
+                value="active_block",
+                label="Active block",
+                description=(
+                    "Replaces only the active block: what the layer returns, "
+                    "the block its group of layers is still building. "
+                    "Completed blocks stay the target's."
+                ),
+            ),
+            ToolChoice(
+                value="live_state",
+                label="Live state",
+                description=(
+                    "Replaces what the pass is working with at the token: the "
+                    "active block and the completed blocks. The copy later "
+                    "passes restart from stays the target's."
+                ),
+            ),
+            ToolChoice(
+                value="full_state",
+                label="Full state",
+                description=(
+                    "Replaces everything the model holds at the token: the "
+                    "live state, and the copy of the pre-loop state that "
+                    "later passes restart from."
+                ),
+            ),
+        ],
+    )
+    OPTIONS = (PATCH,)
 
     def _run(
         self,

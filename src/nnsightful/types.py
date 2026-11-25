@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 if TYPE_CHECKING:
     import torch
@@ -29,6 +29,61 @@ class ToolData(BaseModel):
     def display(self, **kwargs):
         """Display a visualization of the data."""
         ...
+
+
+class ToolChoice(BaseModel):
+    """One value a :class:`ToolOption` takes.
+
+    Attributes:
+        value: The value passed for the option.
+        label: What a control calls it.
+        description: What a run does with it, for a tooltip or a note.
+    """
+
+    value: str
+    label: str
+    description: str = ""
+
+
+class ToolOption(BaseModel):
+    """A keyword argument of a tool that takes one of a few named values.
+
+    A tool declares the options it takes beyond its base arguments as its
+    ``OPTIONS`` (see :class:`~nnsightful.tools._base.Tool`), which is all an
+    interface needs to offer them: ``tool.options(model)`` lists those of the
+    tool's implementation for a model.
+
+    Attributes:
+        name: The keyword argument.
+        label: What the option is called.
+        choices: The values it takes, in the order they are offered.
+        default: The value a call without the argument runs with.
+    """
+
+    name: str
+    label: str
+    choices: list[ToolChoice]
+    default: str
+
+    @model_validator(mode="after")
+    def _default_is_a_choice(self) -> "ToolOption":
+        self.check(self.default)
+        return self
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        """The values the option takes."""
+        return tuple(choice.value for choice in self.choices)
+
+    def check(self, value: Any) -> str:
+        """``value`` if it is one of the option's.
+
+        Raises:
+            ValueError: if it is not.
+        """
+        if value not in self.values:
+            raise ValueError(f"{self.name}={value!r} is not one of {self.values}.")
+        return value
 
 
 class PlotSection(BaseModel):

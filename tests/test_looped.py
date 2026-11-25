@@ -12,8 +12,9 @@ import pytest
 import torch
 from nnsight import TransformersModel
 
-from nnsightful import ExecMode, LoopedTransformer
+from nnsightful import ExecMode, LoopedTransformer, ToolChoice, ToolOption
 from nnsightful.tools.activation_patching import activation_patching
+from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
 from nnsightful.tools.looped import (
     LoopedActivationPatchingTool,
@@ -109,6 +110,38 @@ def patched_logits(model, src_pos, tgt_pos, tgt_freeze, **kwargs) -> torch.Tenso
         model, SRC_PROMPT, TGT_PROMPT, src_pos, tgt_pos, tgt_freeze, raw=True, **kwargs
     )
     return torch.stack([logits.float().cpu() for logits in raw["patched_logits"]])
+
+
+class TestOptions:
+    """The options a looped model's tools declare, which an interface offers."""
+
+    def test_the_lens_and_patching_declare_theirs(self, looped):
+        assert logit_lens.options(looped) == (LoopedLogitLensTool.LENS,)
+        assert activation_patching.options(looped) == (LoopedActivationPatchingTool.PATCH,)
+        assert j_lens.options(looped) == ()
+
+    def test_the_models_class_lists_them_without_a_model(self, looped):
+        assert logit_lens.options(LoopedTransformer) == logit_lens.options(looped)
+
+    def test_a_model_the_tools_run_on_as_is_has_none(self):
+        assert logit_lens.options(TransformersModel) == ()
+        assert activation_patching.options(TransformersModel) == ()
+
+    @pytest.mark.parametrize(
+        "option", [LoopedLogitLensTool.LENS, LoopedActivationPatchingTool.PATCH]
+    )
+    def test_an_option_describes_each_value_and_defaults_to_one(self, option):
+        assert option.default in option.values
+        assert all(choice.label and choice.description for choice in option.choices)
+
+    def test_an_option_refuses_a_default_it_does_not_offer(self):
+        with pytest.raises(ValueError, match="lens='tuned'"):
+            ToolOption(
+                name="lens",
+                label="Lens",
+                default="tuned",
+                choices=[ToolChoice(value="logit", label="Logit lens")],
+            )
 
 
 class TestModel:
@@ -429,7 +462,7 @@ class TestRemote:
         assert len(data.layers) == hosted.num_layers
         assert data.topk[last_of_loop][-1] == data.topk[-1][-1]
 
-    @pytest.mark.parametrize("patch", LoopedActivationPatchingTool.PATCHES)
+    @pytest.mark.parametrize("patch", LoopedActivationPatchingTool.PATCH.values)
     def test_patching_runs_a_point_per_visit(self, hosted, patch):
         last = everywhere(hosted, TGT_PROMPT)[-1]
         data = activation_patching(

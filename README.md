@@ -89,6 +89,21 @@ data = activation_patching(
 )
 ```
 
+`lens` and `patch` are options the looped tools declare (`Tool.OPTIONS`). A
+tool lists the options it takes on a model, or on the model's class, each
+with its values, their labels and descriptions and its default, which is all
+an interface needs to offer them:
+
+```python
+logit_lens.options(model)                # (ToolOption(name="lens", ...),)
+activation_patching.options(LoopedTransformer)[0].values
+# ("active_block", "live_state", "full_state")
+```
+
+A tool that declares an option gets it in its `_run` by name: the base tool
+checks the value a call gives, or fills in the default. On a model the tool
+runs on as is, `options` is empty.
+
 Both tools' data carry the model's `sections`: the layers before the loop
 (`prelude`), each pass, and the layers after it (`coda`). The patching plot
 draws them as subtle bands over the visit axis, with a faint line where a new

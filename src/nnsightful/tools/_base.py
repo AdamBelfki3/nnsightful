@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 import nnsight
 import torch
 
-from ..types import ToolData
+from ..types import ToolData, ToolOption
 from ._utils import IndexSpec, resolve_indices
 from .execution import ExecMode
 
@@ -33,6 +33,12 @@ class Tool():
     Subclasses set :attr:`data_class` and implement those hooks; none of
     them handles where the run executes or saving.
 
+    A tool that takes more than its base arguments, such as a model's own
+    implementation of one, declares them as :attr:`OPTIONS`. A call's options
+    are checked before :meth:`_prepare` and handed to :meth:`_run` by name,
+    each at its default when the call leaves it out; :meth:`options` lists
+    them for an interface to offer.
+
     Where it runs is the call's ``exec_mode`` (see
     :mod:`nnsightful.tools.execution`)::
 
@@ -48,6 +54,7 @@ class Tool():
     """
 
     data_class: type[ToolData]
+    OPTIONS: tuple[ToolOption, ...] = ()
 
     def __call__(
         self,
@@ -67,7 +74,9 @@ class Tool():
         """
         tool = self._for_model(model)
         session_kwargs = ExecMode.resolve(exec_mode, model)
+        options = tool._take_options(kwargs)
         run_kwargs, format_kwargs = tool._prepare(model, *args, **kwargs)
+        run_kwargs = {**run_kwargs, **options}
 
         with torch.no_grad(), model.session(**session_kwargs):
             outputs = tool._run(model, **run_kwargs)
@@ -82,14 +91,39 @@ class Tool():
             return backend
         return results
 
-    def _for_model(self, model: "StandardizedTransformer") -> Tool:
+    def options(
+        self, model: "StandardizedTransformer | type"
+    ) -> tuple[ToolOption, ...]:
+        """The options this tool takes on ``model``: a model, or the class of one.
+
+        They are the :attr:`OPTIONS` of the implementation that runs on it
+        (see :meth:`_for_model`), so none for a model the tool runs on as is.
+        """
+        return self._for_model(model).OPTIONS
+
+    def _for_model(self, model: "StandardizedTransformer | type") -> Tool:
         """The implementation of this tool that runs on ``model``.
 
         This one, unless the model's class brings its own for it: a ``TOOLS``
         mapping from a tool's class to the instance that stands in for it, as
-        :class:`~nnsightful.tools.looped.LoopedTransformer` has.
+        :class:`~nnsightful.tools.looped.LoopedTransformer` has. ``model`` may
+        be that class itself.
         """
-        return getattr(type(model), "TOOLS", {}).get(type(self), self)
+        model_class = model if isinstance(model, type) else type(model)
+        return getattr(model_class, "TOOLS", {}).get(type(self), self)
+
+    def _take_options(self, kwargs: dict[str, Any]) -> dict[str, str]:
+        """Take this tool's :attr:`OPTIONS` out of a call's keyword arguments.
+
+        Returns each by name: the value given, or its default.
+
+        Raises:
+            ValueError: if a value is not one the option takes.
+        """
+        return {
+            option.name: option.check(kwargs.pop(option.name, option.default))
+            for option in self.OPTIONS
+        }
 
     def format(self, *args, **kwargs) -> ToolData:
         """Format a run's tensors into a :attr:`data_class` instance.
