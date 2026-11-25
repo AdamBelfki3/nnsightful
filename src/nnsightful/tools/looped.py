@@ -42,7 +42,7 @@ import torch
 import torch.nn.functional as F
 from nnsight import TransformersModel
 
-from ..types import ActivationPatchingData, PlotSection
+from ..types import PlotSection
 from .activation_patching import ActivationPatchingTool
 from .logit_lens import LogitLensTool
 
@@ -143,8 +143,6 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
       written so far and nothing else.
 
     Frozen positions are held at the clean run's whole state under all three.
-    The data carries the model's sections
-    (:attr:`LoopedTransformer.sections`), so its plot marks the loop's passes.
 
     Attributes:
         PATCHES: The values ``patch`` takes, the default first.
@@ -237,19 +235,6 @@ class LoopedActivationPatchingTool(ActivationPatchingTool):
             "patched_logits": patched_logits,
             "clean_probs": clean_probs,
         }
-
-    def _format(
-        self, model: LoopedTransformer, outputs: dict[str, Any]
-    ) -> ActivationPatchingData:
-        return self.format(**self._raw(model, outputs))
-
-    def _raw(self, model: LoopedTransformer, outputs: dict[str, Any]) -> dict[str, Any]:
-        """The arguments of :meth:`format`: the run's outputs, the tokenizer and the model's sections.
-
-        Written out rather than extended from the base tool's: it runs inside
-        the session, and a remote run's copy of a method has no ``super()``.
-        """
-        return {"tokenizer": model.tokenizer, "sections": model.sections, **outputs}
 
     @staticmethod
     def _patched(
@@ -354,7 +339,7 @@ class LoopedTransformer(TransformersModel):
 
     @property
     def sections(self) -> list[PlotSection]:
-        """The spans of the visit axis a plot marks.
+        """The spans of the visit axis a chart marks, which the tools' data carry.
 
         The layers before the loop (``prelude``), each pass over the loop's
         layers, and the layers after it (``coda``), in order, with a divider

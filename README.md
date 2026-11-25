@@ -89,11 +89,14 @@ data = activation_patching(
 )
 ```
 
-The patching data also carries the model's `sections`: the layers before the
-loop (`prelude`), each pass, and the layers after it (`coda`). Its plot draws
-them as subtle bands over the visit axis, with a faint line where a new block
-of layers starts, and keeps every visit's tick. Any line plot takes sections
-the same way:
+Both tools' data carry the model's `sections`: the layers before the loop
+(`prelude`), each pass, and the layers after it (`coda`). The patching plot
+draws them as subtle bands over the visit axis, with a faint line where a new
+block of layers starts, and keeps every visit's tick. The lens names them in a
+row over its heatmap's columns, on a rule that breaks where a new block
+starts, and draws the same bands in its trajectory plot. Any model with a
+`sections` attribute gets them in both tools' data (`PlotSection.of`), and any
+line plot takes sections the same way:
 
 ```python
 display_line_plot({
@@ -183,7 +186,10 @@ array) and only they are persisted.
 In the generic heatmap core, a `collapsedSections` entry with `locked: true`
 is always collapsed — its band has no expand affordance and ignores clicks —
 and wins over any other section overlapping its rows; `label` replaces the
-"hidden" in "… N rows hidden".
+"hidden" in "… N rows hidden". Its `columnSections` option names runs of
+columns the same way a line plot's `sections` name spans of its x axis: a
+label on a rule over the columns shown, with a hairline before each run's
+first column.
 
 ### Static rendering and snapshots
 

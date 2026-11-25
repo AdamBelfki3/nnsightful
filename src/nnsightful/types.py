@@ -31,6 +31,32 @@ class ToolData(BaseModel):
         ...
 
 
+class PlotSection(BaseModel):
+    """A named span of a tool's layer axis, which its chart marks.
+
+    A model whose layers come in named groups gives them as its ``sections``
+    (as :class:`~nnsightful.tools.looped.LoopedTransformer` does), and the
+    lens and patching data of such a model carry them (:meth:`of`).
+
+    Attributes:
+        start: The first layer index the section covers.
+        end: The last one, inclusive.
+        label: The name shown for the section.
+        dividers: Layer indices inside the section where a part of it begins,
+            each marked by a faint line or a break.
+    """
+
+    start: int
+    end: int
+    label: str | None = None
+    dividers: list[int] = []
+
+    @staticmethod
+    def of(model: Any) -> "list[PlotSection] | None":
+        """The sections of a model's layer axis, or ``None`` for one that names none."""
+        return getattr(model, "sections", None) or None
+
+
 class LogitLensMeta(BaseModel):
     version: int = 2
     timestamp: str
@@ -115,6 +141,7 @@ class LogitLensData(_LensData):
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
     topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
+    sections: list[PlotSection] | None = None  # Spans of the layer axis to mark
 
     @classmethod
     def format(
@@ -144,7 +171,12 @@ class LogitLensData(_LensData):
             positions = list(range(len(input_tokens)))
 
         lens = cls._format_lens(logits, model, top_k, include_entropy)
-        return cls(input=input_tokens, positions=positions, **lens)
+        return cls(
+            input=input_tokens,
+            positions=positions,
+            sections=PlotSection.of(model),
+            **lens,
+        )
 
     def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
@@ -239,23 +271,6 @@ class JLensData(_LensData):
         from nnsightful.viz import display_j_lens
 
         return display_j_lens(self, **kwargs)
-
-
-class PlotSection(BaseModel):
-    """A named span of a line plot's layer axis, which the plot marks as a band.
-
-    Attributes:
-        start: The first layer index the section covers.
-        end: The last one, inclusive.
-        label: The name shown over the band.
-        dividers: Layer indices inside the section where a part of it begins,
-            each marked by a faint line.
-    """
-
-    start: int
-    end: int
-    label: str | None = None
-    dividers: list[int] = []
 
 
 class ActivationPatchingData(ToolData):

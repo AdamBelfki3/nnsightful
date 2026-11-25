@@ -165,6 +165,9 @@ class TestLogitLens:
         assert [len(row) for row in data.topk] == [len(tokens)] * len(VISITS)
         assert all(len(cell) == 3 for row in data.topk for cell in row)
 
+    def test_payload_carries_the_models_sections(self, looped):
+        assert logit_lens(looped, PROMPT, top_k=1).sections == looped.sections
+
     def test_last_visit_is_the_models_own_logits(self, looped):
         raw = logit_lens(looped, PROMPT, raw=True)
         assert raw.shape[0] == len(VISITS)
@@ -417,6 +420,7 @@ class TestRemote:
 
         assert len(data.layers) == hosted.num_layers
         assert data.topk[-1][-1] == [hosted.tokenizer.decode(int(prediction))]
+        assert data.sections == hosted.sections
 
     def test_coda_lens_reads_the_prediction_at_the_end_of_the_loop(self, hosted):
         data = logit_lens(hosted, PROMPT, top_k=1, lens="coda", exec_mode=ExecMode.REMOTE)
