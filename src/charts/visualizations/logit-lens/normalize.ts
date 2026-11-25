@@ -1,3 +1,4 @@
+import type { LinePlotSection } from "../../types/line-plot";
 import type { LogitLensData } from "../../types/logit-lens";
 import type { HeatmapCollapsedSection } from "../../types/heatmap-table";
 
@@ -21,6 +22,8 @@ export interface NormalizedData {
     meta: Record<string, unknown>;
     /** Sorted rows the lens was computed at; null when every row was. */
     computedRows: number[] | null;
+    /** The payload's spans of the layer axis, if it names any. */
+    sections?: LinePlotSection[] | null;
 }
 
 export interface NormalizeResult {
@@ -148,6 +151,7 @@ export function normalizeData(data: LogitLensData): NormalizeResult {
         cells,
         meta: (dense.meta as Record<string, unknown>) || {},
         computedRows,
+        sections: dense.sections,
     };
 
     return { normalized, v2Data: dense };

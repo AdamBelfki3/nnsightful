@@ -24,6 +24,7 @@ export type {
     HeatmapTableData,
     HeatmapTableOptions,
     HeatmapTableWidgetInterface,
+    HeatmapColumnSection,
     ActivationPatchingData,
     ActivationPatchingMode,
     ActivationPatchingOptions,

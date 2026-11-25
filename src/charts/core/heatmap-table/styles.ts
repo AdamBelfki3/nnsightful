@@ -90,6 +90,27 @@ export function generateHeatmapStyles(uid: string): string {
             color: var(--hmx-text-muted); font-variant-numeric: tabular-nums;
             overflow: hidden; white-space: nowrap;
         }
+        /* Column sections: a label on a rule over each run of columns, the
+           rule broken where a part of the section starts, and a hairline
+           before a section's first column in every row. */
+        ${root} .hmx-sec-row { height: 18px; align-items: end; padding-bottom: 2px; }
+        ${root} .hmx-sec {
+            min-width: 0; padding: 0 3px;
+            display: flex; flex-direction: column; gap: 3px;
+        }
+        ${root} .hmx-sec-label {
+            font-size: 9px; font-weight: 600; line-height: 11px;
+            letter-spacing: 0.1em; text-transform: uppercase; text-align: center;
+            color: var(--hmx-text-muted);
+            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+        }
+        ${root} .hmx-sec-rule { display: flex; gap: 3px; height: 2px; }
+        ${root} .hmx-sec-rule i { min-width: 0; border-radius: 1px; background: var(--hmx-card-border); }
+        ${root} .hmx-cell.hmx-sec-start::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+            background: rgba(255,255,255,0.92); pointer-events: none;
+        }
+        ${root}.hmx-dark .hmx-cell.hmx-sec-start::before { background: rgba(0,0,0,0.6); }
         ${root} .hmx-grid-inner { position: relative; }
         /* Region trackers (rail + rotated label) — sit in the left gutter and
            scroll with the rows (children of grid-inner). Position/height are

@@ -26,6 +26,7 @@ export type {
     HeatmapTableWidgetInterface,
     HeatmapRowWindow,
     HeatmapRowRange,
+    HeatmapColumnSection,
 } from "./heatmap-table";
 
 export type {
