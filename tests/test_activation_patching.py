@@ -43,6 +43,9 @@ class TestPayload:
             assert {len(row) for row in series} == {model.num_layers}
         assert all(0 <= rank < model.vocab_size for row in data.ranks for rank in row)
 
+    def test_a_single_stack_of_layers_has_no_sections(self, setup):
+        assert setup["data"].sections is None
+
     def test_ranks_order_the_probabilities(self, setup):
         data = setup["data"]
         for layer in range(len(data.lines[0])):

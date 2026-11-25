@@ -241,11 +241,29 @@ class JLensData(_LensData):
         return display_j_lens(self, **kwargs)
 
 
+class PlotSection(BaseModel):
+    """A named span of a line plot's layer axis, which the plot marks as a band.
+
+    Attributes:
+        start: The first layer index the section covers.
+        end: The last one, inclusive.
+        label: The name shown over the band.
+        dividers: Layer indices inside the section where a part of it begins,
+            each marked by a faint line.
+    """
+
+    start: int
+    end: int
+    label: str | None = None
+    dividers: list[int] = []
+
+
 class ActivationPatchingData(ToolData):
     lines: list[list[float]]  # [token][layer] probabilities
     ranks: list[list[int]]  # [token][layer] ranks
     prob_diffs: list[list[float]]  # [token][layer] prob diffs
     tokenLabels: list[str]  # Token text labels for each line
+    sections: list[PlotSection] | None = None  # Spans of the layer axis to mark
 
     @classmethod
     def format(
@@ -255,6 +273,7 @@ class ActivationPatchingData(ToolData):
         patched_logits: "Sequence[torch.Tensor]",
         clean_probs: "torch.Tensor",
         tokenizer: "PreTrainedTokenizerBase",
+        sections: "Sequence[PlotSection] | None" = None,
     ) -> "ActivationPatchingData":
         """Build the activation-patching data.
 
@@ -268,6 +287,8 @@ class ActivationPatchingData(ToolData):
         every layer's top 10 ordered by total rank across layers. For each,
         ``lines``, ``ranks`` and ``prob_diffs`` (relative to the clean run)
         give its per-layer probability, exact rank and probability change.
+        ``sections`` are the spans of the layer axis a plot of the data marks,
+        for a model whose layers come in named groups.
         """
         import torch
         import torch.nn.functional as F
@@ -315,7 +336,11 @@ class ActivationPatchingData(ToolData):
         labels = [tokenizer.decode(int(tid)) for tid in token_ids]
 
         return cls(
-            lines=probabilities, ranks=ranks, prob_diffs=prob_diffs, tokenLabels=labels
+            lines=probabilities,
+            ranks=ranks,
+            prob_diffs=prob_diffs,
+            tokenLabels=labels,
+            sections=list(sections) if sections else None,
         )
 
     def display(self, tokens: list[int] | None = None, return_html: bool = False, **kwargs):

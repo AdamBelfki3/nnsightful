@@ -71,6 +71,22 @@ data = activation_patching(
 )
 ```
 
+The patching data also carries the model's `sections`: the layers before the
+loop (`prelude`), each pass, and the layers after it (`coda`). Its plot draws
+them as subtle bands over the visit axis, with a faint line where a new block
+of layers starts, and keeps every visit's tick. Any line plot takes sections
+the same way:
+
+```python
+display_line_plot({
+    "lines": [...],
+    "sections": [
+        {"start": 0, "end": 5, "label": "prelude"},
+        {"start": 6, "end": 17, "label": "pass 1", "dividers": [12]},
+    ],
+})
+```
+
 See `nnsightful/tools/looped.py`.
 
 These checkpoints need a `transformers` that has their architecture (its

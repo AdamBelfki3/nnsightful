@@ -124,6 +124,17 @@ class TestModel:
         expected = {0: [], 1: [5, 9], 4: [5, 9], 5: [9], 8: [9], 9: [], 13: [], 15: []}
         assert {v: looped.restart_visits(v) for v in expected} == expected
 
+    def test_sections_are_the_prelude_the_passes_and_the_coda(self, looped):
+        """Each pass covers two blocks of two layers, the second marked by a divider."""
+        sections = [(s.label, s.start, s.end, s.dividers) for s in looped.sections]
+        assert sections == [
+            ("prelude", 0, 1, []),
+            ("pass 1", 2, 5, [4]),
+            ("pass 2", 6, 9, [8]),
+            ("pass 3", 10, 13, [12]),
+            ("coda", 14, 15, []),
+        ]
+
     def test_supports_reads_the_model_type(self, looped):
         assert LoopedTransformer.supports(looped.config)
         assert not LoopedTransformer.supports(looped.config.text_config)
@@ -180,6 +191,13 @@ class TestActivationPatching:
         data = activation_patching(looped, SRC_PROMPT, TGT_PROMPT, [last], [last], [])
         assert all(len(line) == len(VISITS) for line in data.lines)
         assert len(data.tokenLabels) == len(data.lines)
+
+    def test_payload_carries_the_models_sections(self, looped):
+        last = everywhere(looped, TGT_PROMPT)[-1]
+        data = activation_patching(looped, SRC_PROMPT, TGT_PROMPT, [last], [last], [])
+        raw = activation_patching(looped, SRC_PROMPT, TGT_PROMPT, [last], [last], [], raw=True)
+        assert data.sections == looped.sections
+        assert activation_patching.format(**raw).sections == looped.sections
 
     @pytest.mark.parametrize("batch_size", [1, 5])
     def test_patching_every_position_gives_the_source_run(
@@ -304,3 +322,4 @@ class TestRemote:
             exec_mode=ExecMode.REMOTE,
         )
         assert all(len(line) == hosted.num_layers for line in data.lines)
+        assert data.sections == hosted.sections
