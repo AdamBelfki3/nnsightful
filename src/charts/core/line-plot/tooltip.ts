@@ -1,6 +1,7 @@
-import type { LinePlotData, LinePlotLine, LinePlotOptions } from "../../types/line-plot";
+import type { LinePlotData, LinePlotLine, LinePlotOptions, LinePlotSection } from "../../types/line-plot";
 import { LINE_COLORS } from "./colors";
-import { renderTokenHTML, resolveLines } from "./utils";
+import { SectionBands } from "./sections";
+import { escapeHTML, renderTokenHTML, resolveLines } from "./utils";
 
 export interface TooltipState {
     visible: boolean;
@@ -112,6 +113,7 @@ export function updateTooltipDOM(
     xLabels?: (string | number)[],
     xAxisLabel?: string,
     mode?: string,
+    sections?: LinePlotSection[] | null,
 ): void {
     if (!tip) {
         el.style.opacity = "0";
@@ -131,6 +133,13 @@ export function updateTooltipDOM(
         `left:${tip.x}px;top:${tip.y}px;transform:translate(${tx},-50%);`;
 
     const layerLabel = xLabels ? String(xLabels[tip.layerIdx] ?? tip.layerIdx) : String(tip.layerIdx);
+    const section = SectionBands.labelAt(sections, tip.layerIdx);
+    const sectionRow = section
+        ? `<div style="display:flex;justify-content:space-between;gap:16px;margin-bottom:2px;">
+                    <span style="color:${muted}">Section</span>
+                    <span style="font-weight:500;color:${fg}">${escapeHTML(section)}</span>
+                </div>`
+        : "";
 
     el.innerHTML = `
         <div style="background:${bg};border:1px solid ${border};border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.12);padding:8px 12px;min-width:120px;backdrop-filter:blur(8px);">
@@ -139,6 +148,7 @@ export function updateTooltipDOM(
                 <span style="font-size:12px;font-weight:500;color:${fg};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px;">${renderTokenHTML(tip.label)}</span>
             </div>
             <div style="font-size:11px;">
+                ${sectionRow}
                 <div style="display:flex;justify-content:space-between;gap:16px;">
                     <span style="color:${muted}">${xAxisLabel ?? "Layer"}</span>
                     <span style="font-weight:500;color:${fg}">${layerLabel}</span>

@@ -14,6 +14,22 @@ export interface LinePlotLine {
 }
 
 /**
+ * A named span of the x axis, drawn behind the lines as a subtle band: every
+ * other one tinted, its label in a row over the plot. The x ticks stay as
+ * they are.
+ */
+export interface LinePlotSection {
+    /** The first x index the section covers. */
+    start: number;
+    /** The last one, inclusive. */
+    end: number;
+    label?: string;
+    /** x indices inside the section where a part of it begins, each marked by
+     *  a faint line. */
+    dividers?: number[];
+}
+
+/**
  * Data for a line plot visualization
  */
 export interface LinePlotData {
@@ -21,6 +37,8 @@ export interface LinePlotData {
     labels?: string[];
     richLines?: LinePlotLine[];
     xLabels?: (string | number)[];
+    /** Spans of the x axis to mark, in order (see `LinePlotSection`). */
+    sections?: LinePlotSection[] | null;
 }
 
 /**

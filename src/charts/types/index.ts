@@ -13,6 +13,7 @@ export type {
     LinePlotLine,
     LinePlotMode,
     LinePlotOptions,
+    LinePlotSection,
     LinePlotWidgetInterface,
 } from "./line-plot";
 

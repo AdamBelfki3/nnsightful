@@ -16,6 +16,7 @@ export type {
     LinePlotLine,
     LinePlotMode,
     LinePlotOptions,
+    LinePlotSection,
     LinePlotWidgetInterface,
     HeatmapRow,
     HeatmapColumn,

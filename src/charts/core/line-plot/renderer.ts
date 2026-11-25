@@ -1,6 +1,7 @@
 import type { LinePlotData, LinePlotLine, LinePlotOptions } from "../../types/line-plot";
 import type { ChartGeometry, TooltipState } from "./tooltip";
 import { LINE_COLORS } from "./colors";
+import { SectionBands } from "./sections";
 import { resolveLines } from "./utils";
 
 export interface ChartConfig {
@@ -134,8 +135,14 @@ export function drawChart(
         xRangeStart = 0;
     }
     const showDataPoints = options.showDataPoints ?? true;
+    const sections = data.sections ?? [];
 
-    const margin = { top: title ? 48 : 24, right: 24, bottom: 56, left: 72 };
+    const margin = {
+        top: (title ? 48 : 24) + (SectionBands.labelled(sections) ? SectionBands.LABEL_ROOM : 0),
+        right: 24,
+        bottom: 56,
+        left: 72,
+    };
     const chartWidth = width - margin.left - margin.right;
     const chartHeight = height - margin.top - margin.bottom;
 
@@ -188,6 +195,15 @@ export function drawChart(
             ? margin.top + normalized * chartHeight
             : margin.top + chartHeight - normalized * chartHeight;
     };
+
+    // Sections, behind everything else on the plot
+    SectionBands.draw(
+        ctx,
+        SectionBands.layout(sections, xRangeStart, config.numLayers - 1, margin.left, chartWidth),
+        margin.top,
+        chartHeight,
+        darkMode,
+    );
 
     // Grid lines
     ctx.setLineDash([4, 4]);

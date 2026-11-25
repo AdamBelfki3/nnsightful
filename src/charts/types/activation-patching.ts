@@ -1,4 +1,5 @@
 import type { BaseWidgetInterface } from "./base";
+import type { LinePlotSection } from "./line-plot";
 
 /**
  * Data types for the Activation Patching visualization
@@ -9,6 +10,9 @@ export interface ActivationPatchingData {
     ranks: number[][];
     prob_diffs: number[][];
     tokenLabels: string[];
+    /** Spans of the layer axis the plot marks, such as a looped model's
+     *  passes. Absent or null for a model with nothing to mark. */
+    sections?: LinePlotSection[] | null;
 }
 
 export type ActivationPatchingMode = "probability" | "rank" | "prob_diff";
