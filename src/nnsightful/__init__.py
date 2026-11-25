@@ -10,13 +10,16 @@ from nnsightful.tools.execution import (
 )
 from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
+from nnsightful.tools.looped import LoopedTransformer
 from nnsightful.types import (
     ActivationPatchingData,
     JLensData,
     JLensMeta,
     LogitLensData,
     LogitLensMeta,
+    ToolChoice,
     ToolData,
+    ToolOption,
 )
 from nnsightful.viz import (
     display_activation_patching,
@@ -34,11 +37,14 @@ __all__ = [
     "activation_patching",
     "j_lens",
     "logit_lens",
+    "LoopedTransformer",
     "Tool",
     "ExecMode",
     "NonBlockingToolBackend",
     "AsyncToolBackend",
     "ToolData",
+    "ToolOption",
+    "ToolChoice",
     "IndexSpec",
     "resolve_indices",
     "ActivationPatchingData",

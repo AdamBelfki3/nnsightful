@@ -13,6 +13,7 @@ export type {
     LinePlotLine,
     LinePlotMode,
     LinePlotOptions,
+    LinePlotSection,
     LinePlotWidgetInterface,
 } from "./line-plot";
 
@@ -25,6 +26,7 @@ export type {
     HeatmapTableWidgetInterface,
     HeatmapRowWindow,
     HeatmapRowRange,
+    HeatmapColumnSection,
 } from "./heatmap-table";
 
 export type {

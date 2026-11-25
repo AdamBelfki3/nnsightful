@@ -1,5 +1,7 @@
 import type {
     HeatmapCollapsedSection,
+    HeatmapColumnSection,
+    HeatmapColumnSpan,
     HeatmapColumnWindow,
     HeatmapRowRange,
     HeatmapTableData,
@@ -285,8 +287,24 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 : "border-right:1px solid rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.45);")
             : "";
 
+        // Column sections: a row of labelled rules over the header, and a
+        // hairline before each section's first column in the rows below.
+        const spans = HeatmapTableCore.columnSpans(visibleCols, o.columnSections ?? []);
+        const sectionStarts = new Set(spans.map((span) => span.from).filter((from) => from > 0));
+
         // Fixed column header (outside the scroll, so rows can't bleed over it).
-        let hdr = `<div class="hmx-hdr-row" style="display:grid;grid-template-columns:${tpl};height:${hdrH}px;width:${tableW}px;min-width:${tableW}px;">`;
+        let hdr = "";
+        if (spans.length > 0) {
+            hdr += `<div class="hmx-sec-row" style="display:grid;grid-template-columns:${tpl};width:${tableW}px;min-width:${tableW}px;">`;
+            for (const span of spans) {
+                const rule = span.parts.map((n) => `<i style="flex:${n}"></i>`).join("");
+                hdr += `<div class="hmx-sec" style="grid-row:1;grid-column:${span.from + 2} / span ${span.to - span.from + 1};">`
+                    + `<span class="hmx-sec-label">${escapeHtml(span.label ?? "")}</span>`
+                    + `<span class="hmx-sec-rule">${rule}</span></div>`;
+            }
+            hdr += `</div>`;
+        }
+        hdr += `<div class="hmx-hdr-row" style="display:grid;grid-template-columns:${tpl};height:${hdrH}px;width:${tableW}px;min-width:${tableW}px;">`;
         hdr += `<div class="hmx-corner">${escapeHtml(o.cornerLabel ?? "")}</div>`;
         for (let di = 0; di < nCols; di++) {
             hdr += `<div class="hmx-col">${tokenInnerHTML(cols[visibleCols[di]].label)}</div>`;
@@ -351,7 +369,8 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
                 else if (top && right) radius = "border-top-right-radius:8px;";
                 else if (bot && left) radius = "border-bottom-left-radius:8px;";
                 else if (bot && right) radius = "border-bottom-right-radius:8px;";
-                s += `<div class="hmx-cell${cell.className ? " " + cell.className : ""}" data-row="${r}" data-col="${c}" `
+                const sec = sectionStarts.has(di) ? " hmx-sec-start" : "";
+                s += `<div class="hmx-cell${sec}${cell.className ? " " + cell.className : ""}" data-row="${r}" data-col="${c}" `
                     + `style="background:${cell.color};color:${cell.textColor};padding:0 6px;${op}${grid}${ring}${bold}${radius}">`
                     + `<span class="hmx-cell-text">${tokenInnerHTML(cell.text)}</span>`
                     + `</div>`;
@@ -559,6 +578,30 @@ export class HeatmapTableCore implements HeatmapTableWidgetInterface {
             const cell = target.closest(".hmx-cell") as HTMLElement | null;
             if (cell) this.options.onCellClick?.(parseInt(cell.dataset.row!), parseInt(cell.dataset.col!), e);
         });
+    }
+
+    /**
+     * The shown columns each section covers (see HeatmapColumnSpan). `visible`
+     * are the shown columns' absolute indices, ascending.
+     */
+    static columnSpans(visible: number[], sections: HeatmapColumnSection[] = []): HeatmapColumnSpan[] {
+        const spans: HeatmapColumnSpan[] = [];
+        for (const section of sections) {
+            const shown = visible
+                .map((column, display) => ({ column, display }))
+                .filter(({ column }) => column >= section.start && column <= section.end);
+            if (shown.length === 0) continue;
+            const cuts = (section.dividers ?? []).filter((d) => d > section.start && d <= section.end);
+            const parts: number[] = new Array(cuts.length + 1).fill(0);
+            for (const { column } of shown) parts[cuts.filter((d) => d <= column).length]++;
+            spans.push({
+                label: section.label,
+                from: shown[0].display,
+                to: shown[shown.length - 1].display,
+                parts: parts.filter((n) => n > 0),
+            });
+        }
+        return spans;
     }
 
     /**

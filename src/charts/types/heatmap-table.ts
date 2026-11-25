@@ -59,6 +59,27 @@ export interface HeatmapColumnWindow {
     size: number;
 }
 
+/** A named run of columns (inclusive, ABSOLUTE indices), drawn over the column
+ *  header as its label on a rule. The rule breaks at each divider (the
+ *  absolute index a part of the section starts at), and a section's first
+ *  column is set a hairline apart from the column before it. Only the columns
+ *  shown count: a section, or a part, with none of them is left out. */
+export interface HeatmapColumnSection {
+    start: number;
+    end: number;
+    label?: string;
+    dividers?: number[];
+}
+
+/** The shown columns a section covers: display indices `from`..`to`
+ *  (inclusive) and the widths, in columns, of the parts its dividers cut. */
+export interface HeatmapColumnSpan {
+    label?: string;
+    from: number;
+    to: number;
+    parts: number[];
+}
+
 /** A contiguous range of rows (inclusive, ORIGINAL indices) that can be hidden
  *  behind a thin "… N rows hidden" band. `collapsed` defaults true; false shows
  *  the rows with a re-collapse handle. The host owns the collapsed/expanded
@@ -153,6 +174,9 @@ export interface HeatmapTableOptions {
     // ── Misc display ───────────────────────────────────────────────
     darkMode?: boolean;
     cornerLabel?: string;
+    /** Named runs of columns, in order (see HeatmapColumnSection). The header
+     *  grows a row for them while any has a column shown. */
+    columnSections?: HeatmapColumnSection[] | null;
     showGrid?: boolean;
     maxRows?: number | null;
 

@@ -214,7 +214,7 @@ export class ActivationPatchingCore implements ActivationPatchingWidgetInterface
                 color: LINE_COLORS[i % LINE_COLORS.length],
             }));
 
-        return { richLines };
+        return { richLines, sections: this.allData.sections };
     }
 
     private getModeTitle(): string {

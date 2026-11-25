@@ -6,7 +6,7 @@ import math
 
 import torch.nn.functional as F
 
-from ..types import ActivationPatchingData
+from ..types import ActivationPatchingData, PlotSection
 from ._base import Tool
 
 if TYPE_CHECKING:
@@ -109,13 +109,19 @@ class ActivationPatchingTool(Tool):
     def _format(
         self, model: "StandardizedTransformer", outputs: dict[str, Any]
     ) -> ActivationPatchingData:
-        return self.format(**outputs, tokenizer=model.tokenizer)
+        return self.format(**self._raw(model, outputs))
 
     def _raw(
         self, model: "StandardizedTransformer", outputs: dict[str, Any]
     ) -> dict[str, Any]:
-        """The run's outputs plus the tokenizer: the arguments of :meth:`format`."""
-        return {"tokenizer": model.tokenizer, **outputs}
+        """The run's outputs plus the tokenizer: the arguments of :meth:`format`.
+
+        A model that names sections of its layer axis adds them
+        (:meth:`~nnsightful.types.PlotSection.of`).
+        """
+        raw = {"tokenizer": model.tokenizer, **outputs}
+        sections = PlotSection.of(model)
+        return {**raw, "sections": sections} if sections else raw
 
 
 activation_patching = ActivationPatchingTool()

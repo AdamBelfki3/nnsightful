@@ -201,6 +201,8 @@ export function generateStyles(uid: string): string {
             pointer-events: none;
         }
         ${root} .ll-skyline-bar { flex: 1; min-width: 1px; }
+        ${root} .ll-skyline-secs { position: absolute; inset: 0; pointer-events: none; }
+        ${root} .ll-skyline-secs i { position: absolute; top: 0; bottom: 0; background: var(--ll-line-2); opacity: 0.55; }
         ${root} .ll-skyline-win {
             position: absolute; top: -1px; bottom: -1px;
             background: var(--ll-primary-007); border: 1.5px solid var(--ll-primary);

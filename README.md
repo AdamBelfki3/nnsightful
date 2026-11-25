@@ -37,6 +37,97 @@ data = j_lens(model, prompt, max_new_tokens=5, positions=-1)
 data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
 ```
 
+### Looped models
+
+Inkling 2 Mini and TML-d24-varloop-research run their middle layers several
+times over and keep no single residual stream, so nnterp does not standardize
+them. They load with nnsightful's own `LoopedTransformer`, and the same calls
+run on it:
+
+```python
+from nnsightful import ExecMode, LoopedTransformer
+
+model = LoopedTransformer("thinkingmachines/Inkling-2-Mini")
+data = logit_lens(model, prompt, exec_mode=ExecMode.REMOTE)
+data = activation_patching(
+    model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze,
+    exec_mode=ExecMode.REMOTE,
+)
+```
+
+A logit-lens row or a patching point is one layer *visit* rather than one
+layer: Inkling 2 Mini's 24 layers make 48 visits, its layers 6 to 17 running
+three times. The lens reads a visit the way the model reads its last one
+(its block mixed with the completed ones, then the final norm and head). With
+`lens="coda"` it first runs the layers after the loop, the coda, on the
+visit's state, which reads much earlier visits than the plain projection does:
+
+```python
+data = logit_lens(model, prompt, lens="coda", exec_mode=ExecMode.REMOTE)
+```
+
+The coda's attention reads other positions, so it runs on the whole prompt
+even when `positions` selects a few, once per visit before the coda. Visits
+inside the coda are projected directly.
+
+Patching takes a `patch` that says how much of what the model holds at the
+patched positions a visit replaces:
+
+- `"full_state"` (the default): everything the visit leaves, including the
+  copy of the pre-loop state that later passes restart from.
+- `"live_state"`: what the visit's pass is working with, without that copy. A
+  later pass restarts from the target's own state and sees the patch only
+  through the messages between passes.
+- `"active_block"`: only what the visit's layer returns, the block its group
+  of layers is still building. The completed blocks stay the target's.
+
+```python
+data = activation_patching(
+    model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze,
+    patch="live_state",
+    exec_mode=ExecMode.REMOTE,
+)
+```
+
+`lens` and `patch` are options the looped tools declare (`Tool.OPTIONS`). A
+tool lists the options it takes on a model, or on the model's class, each
+with its values, their labels and descriptions and its default, which is all
+an interface needs to offer them:
+
+```python
+logit_lens.options(model)                # (ToolOption(name="lens", ...),)
+activation_patching.options(LoopedTransformer)[0].values
+# ("active_block", "live_state", "full_state")
+```
+
+A tool that declares an option gets it in its `_run` by name: the base tool
+checks the value a call gives, or fills in the default. On a model the tool
+runs on as is, `options` is empty.
+
+Both tools' data carry the model's `sections`: the layers before the loop
+(`prelude`), each pass, and the layers after it (`coda`). The patching plot
+draws them as subtle bands over the visit axis, with a faint line where a new
+block of layers starts, and keeps every visit's tick. The lens names them in a
+row over its heatmap's columns, on a rule that breaks where a new block
+starts, and draws the same bands in its trajectory plot. Any model with a
+`sections` attribute gets them in both tools' data (`PlotSection.of`), and any
+line plot takes sections the same way:
+
+```python
+display_line_plot({
+    "lines": [...],
+    "sections": [
+        {"start": 0, "end": 5, "label": "prelude"},
+        {"start": 6, "end": 17, "label": "pass 1", "dividers": [12]},
+    ],
+})
+```
+
+See `nnsightful/tools/looped.py`.
+
+These checkpoints need `transformers` 5.24.0 or later, the first release with
+their architecture, and `torchvision`, which their processor loads.
+
 ### Running on NDIF
 
 Where a tool runs is its `exec_mode`. On [NDIF](https://ndif.us) the result is
@@ -110,7 +201,10 @@ array) and only they are persisted.
 In the generic heatmap core, a `collapsedSections` entry with `locked: true`
 is always collapsed — its band has no expand affordance and ignores clicks —
 and wins over any other section overlapping its rows; `label` replaces the
-"hidden" in "… N rows hidden".
+"hidden" in "… N rows hidden". Its `columnSections` option names runs of
+columns the same way a line plot's `sections` name spans of its x axis: a
+label on a rule over the columns shown, with a hairline before each run's
+first column.
 
 ### Static rendering and snapshots
 

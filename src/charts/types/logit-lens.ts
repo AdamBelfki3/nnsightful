@@ -1,4 +1,5 @@
 import type { BaseWidgetInterface } from "./base";
+import type { LinePlotSection } from "./line-plot";
 
 /**
  * LogitLensKit V2 Data Format
@@ -24,6 +25,10 @@ export interface LogitLensData {
     tracked: Record<string, number[]>[];
     topk: string[][][];
     entropy?: number[][] | null;
+    /** Spans of the layer axis the widget marks, such as a looped model's
+     *  passes: over the heatmap's columns, in the layer navigator and behind
+     *  the trajectory plot. Absent or null for a model with nothing to mark. */
+    sections?: LinePlotSection[] | null;
 }
 
 /**

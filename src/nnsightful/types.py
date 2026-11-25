@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 if TYPE_CHECKING:
     import torch
@@ -29,6 +29,87 @@ class ToolData(BaseModel):
     def display(self, **kwargs):
         """Display a visualization of the data."""
         ...
+
+
+class ToolChoice(BaseModel):
+    """One value a :class:`ToolOption` takes.
+
+    Attributes:
+        value: The value passed for the option.
+        label: What a control calls it.
+        description: What a run does with it, for a tooltip or a note.
+    """
+
+    value: str
+    label: str
+    description: str = ""
+
+
+class ToolOption(BaseModel):
+    """A keyword argument of a tool that takes one of a few named values.
+
+    A tool declares the options it takes beyond its base arguments as its
+    ``OPTIONS`` (see :class:`~nnsightful.tools._base.Tool`), which is all an
+    interface needs to offer them: ``tool.options(model)`` lists those of the
+    tool's implementation for a model.
+
+    Attributes:
+        name: The keyword argument.
+        label: What the option is called.
+        choices: The values it takes, in the order they are offered.
+        default: The value a call without the argument runs with.
+    """
+
+    name: str
+    label: str
+    choices: list[ToolChoice]
+    default: str
+
+    @model_validator(mode="after")
+    def _default_is_a_choice(self) -> "ToolOption":
+        self.check(self.default)
+        return self
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        """The values the option takes."""
+        return tuple(choice.value for choice in self.choices)
+
+    def check(self, value: Any) -> str:
+        """``value`` if it is one of the option's.
+
+        Raises:
+            ValueError: if it is not.
+        """
+        if value not in self.values:
+            raise ValueError(f"{self.name}={value!r} is not one of {self.values}.")
+        return value
+
+
+class PlotSection(BaseModel):
+    """A named span of a tool's layer axis, which its chart marks.
+
+    A model whose layers come in named groups gives them as its ``sections``
+    (as :class:`~nnsightful.tools.looped.LoopedTransformer` does), and the
+    lens and patching data of such a model carry them (:meth:`of`).
+
+    Attributes:
+        start: The first layer index the section covers.
+        end: The last one, inclusive.
+        label: The name shown for the section.
+        dividers: Layer indices inside the section where a part of it begins,
+            each marked by a faint line or a break.
+    """
+
+    start: int
+    end: int
+    label: str | None = None
+    dividers: list[int] = []
+
+    @staticmethod
+    def of(model: Any) -> "list[PlotSection] | None":
+        """The sections of a model's layer axis, or ``None`` for one that names none."""
+        return getattr(model, "sections", None) or None
 
 
 class LogitLensMeta(BaseModel):
@@ -115,6 +196,7 @@ class LogitLensData(_LensData):
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
     topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
+    sections: list[PlotSection] | None = None  # Spans of the layer axis to mark
 
     @classmethod
     def format(
@@ -144,7 +226,12 @@ class LogitLensData(_LensData):
             positions = list(range(len(input_tokens)))
 
         lens = cls._format_lens(logits, model, top_k, include_entropy)
-        return cls(input=input_tokens, positions=positions, **lens)
+        return cls(
+            input=input_tokens,
+            positions=positions,
+            sections=PlotSection.of(model),
+            **lens,
+        )
 
     def display(self, **kwargs):
         from nnsightful.viz import display_logit_lens
@@ -246,6 +333,7 @@ class ActivationPatchingData(ToolData):
     ranks: list[list[int]]  # [token][layer] ranks
     prob_diffs: list[list[float]]  # [token][layer] prob diffs
     tokenLabels: list[str]  # Token text labels for each line
+    sections: list[PlotSection] | None = None  # Spans of the layer axis to mark
 
     @classmethod
     def format(
@@ -255,6 +343,7 @@ class ActivationPatchingData(ToolData):
         patched_logits: "Sequence[torch.Tensor]",
         clean_probs: "torch.Tensor",
         tokenizer: "PreTrainedTokenizerBase",
+        sections: "Sequence[PlotSection] | None" = None,
     ) -> "ActivationPatchingData":
         """Build the activation-patching data.
 
@@ -268,6 +357,8 @@ class ActivationPatchingData(ToolData):
         every layer's top 10 ordered by total rank across layers. For each,
         ``lines``, ``ranks`` and ``prob_diffs`` (relative to the clean run)
         give its per-layer probability, exact rank and probability change.
+        ``sections`` are the spans of the layer axis a plot of the data marks,
+        for a model whose layers come in named groups.
         """
         import torch
         import torch.nn.functional as F
@@ -315,7 +406,11 @@ class ActivationPatchingData(ToolData):
         labels = [tokenizer.decode(int(tid)) for tid in token_ids]
 
         return cls(
-            lines=probabilities, ranks=ranks, prob_diffs=prob_diffs, tokenLabels=labels
+            lines=probabilities,
+            ranks=ranks,
+            prob_diffs=prob_diffs,
+            tokenLabels=labels,
+            sections=list(sections) if sections else None,
         )
 
     def display(self, tokens: list[int] | None = None, return_html: bool = False, **kwargs):

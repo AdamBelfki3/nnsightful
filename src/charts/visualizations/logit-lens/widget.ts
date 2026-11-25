@@ -560,6 +560,7 @@ export function createWidget(
             height: fillMode || aspectHW != null ? "fill" : "content",
             chrome: "none",
             cornerLabel: "token",
+            columnSections: widgetData.sections,
             showGrid: state.showGrid,
             darkMode: isDarkMode(),
             renderRowLabel,
@@ -684,6 +685,15 @@ export function createWidget(
         const winLeft = (start / nLayers) * 100;
         const winWidth = (size / nLayers) * 100;
 
+        // Every other section of the layer axis, tinted behind the bars.
+        let tints = "";
+        (widgetData.sections ?? []).forEach((section, i) => {
+            if (i % 2 === 0) return;
+            const left = (section.start / nLayers) * 100;
+            const width = ((section.end - section.start + 1) / nLayers) * 100;
+            tints += `<i style="left:${left}%;width:${width}%"></i>`;
+        });
+
         // Ticks: multiples of 8 (by layer index) plus the final layer.
         const tickIdxs: number[] = [];
         for (let l = 0; l < nLayers; l += 8) tickIdxs.push(l);
@@ -702,6 +712,7 @@ export function createWidget(
             <div class="ll-nav-range">${rangeHtml}</div>
             <div class="ll-nav-mid">
                 <div class="ll-skyline" id="${uid}_sky">
+                    <div class="ll-skyline-secs">${tints}</div>
                     <div class="ll-skyline-bars">${bars}</div>
                     <div class="ll-skyline-win" id="${uid}_win" style="left:${winLeft}%;width:${winWidth}%">
                         <div class="ll-skyline-handle" style="left:-1px"></div>
@@ -955,7 +966,12 @@ export function createWidget(
                     ? "position " + posLabel(positions[0])
                     : "";
 
-            const plotData = { lines: [] as number[][], richLines, xLabels: widgetData.layers };
+            const plotData = {
+                lines: [] as number[][],
+                richLines,
+                xLabels: widgetData.layers,
+                sections: widgetData.sections,
+            };
             const plotOptions: Record<string, unknown> = {
                 darkMode: isDarkMode(),
                 mode: "probability" as const,
