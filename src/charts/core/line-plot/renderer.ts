@@ -1,6 +1,7 @@
 import type { LinePlotData, LinePlotLine, LinePlotOptions } from "../../types/line-plot";
 import type { ChartGeometry, TooltipState } from "./tooltip";
 import { LINE_COLORS } from "./colors";
+import { PlotLayout } from "./layout";
 import { SectionBands } from "./sections";
 import { resolveLines } from "./utils";
 
@@ -108,6 +109,7 @@ export function drawChart(
     hiddenLines: Set<number>,
     tooltip: TooltipState | null,
     overlay?: LinePlotLine | null,
+    compact = false,
 ): ChartGeometry {
     const ctx = canvas.getContext("2d")!;
 
@@ -137,78 +139,16 @@ export function drawChart(
     const showDataPoints = options.showDataPoints ?? true;
     const sections = data.sections ?? [];
 
-    const margin = {
-        top: (title ? 48 : 24) + (SectionBands.labelled(sections) ? SectionBands.LABEL_ROOM : 0),
-        right: 24,
-        bottom: 56,
-        left: 72,
+    const fonts = {
+        title: "500 14px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+        tick: "400 11px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+        axis: "500 10px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
     };
-    const chartWidth = width - margin.left - margin.right;
-    const chartHeight = height - margin.top - margin.bottom;
-
-    const geometry: ChartGeometry = { margin, chartWidth, chartHeight, width, height };
-
-    const colors = {
-        background: darkMode ? "#0a0a0a" : "#fafafa",
-        text: "#71717a",
-        textMuted: darkMode ? "#52525b" : "#a1a1aa",
-        grid: darkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)",
-        axis: darkMode ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)",
-        titleText: darkMode ? "#e4e4e7" : "#27272a",
-    };
-
-    // Clear
-    if (options.transparentBackground) {
-        ctx.clearRect(0, 0, width, height);
-    } else {
-        ctx.fillStyle = colors.background;
-        ctx.fillRect(0, 0, width, height);
-    }
-
-    // Title
-    if (title) {
-        ctx.fillStyle = colors.titleText;
-        ctx.font = "500 14px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText(title, margin.left, 28);
-    }
-
-    // Scale functions
-    const effectiveRange = (config.numLayers - 1) - xRangeStart;
-    const xScale = (layerIdx: number) => {
-        if (effectiveRange <= 0) return margin.left + chartWidth / 2;
-        return margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
-    };
+    const offsets = PlotLayout.offsets(compact);
+    const measure = (text: string) => ctx.measureText(text).width;
 
     const logMin = logScale ? Math.log(Math.max(1, config.minValue)) : 0;
     const logMax = logScale ? Math.log(Math.max(1, config.maxValue)) : 0;
-
-    const yScale = (value: number) => {
-        let normalized: number;
-        if (logScale) {
-            const logVal = Math.log(Math.max(1, value));
-            normalized = (logMax - logMin) > 0 ? (logVal - logMin) / (logMax - logMin) : 0.5;
-        } else {
-            normalized = (value - config.minValue) / (config.maxValue - config.minValue);
-        }
-        return invertYAxis
-            ? margin.top + normalized * chartHeight
-            : margin.top + chartHeight - normalized * chartHeight;
-    };
-
-    // Sections, behind everything else on the plot
-    SectionBands.draw(
-        ctx,
-        SectionBands.layout(sections, xRangeStart, config.numLayers - 1, margin.left, chartWidth),
-        margin.top,
-        chartHeight,
-        darkMode,
-    );
-
-    // Grid lines
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = colors.grid;
-    ctx.lineWidth = 1;
 
     const yTicks: number[] = [];
     const range = config.maxValue - config.minValue;
@@ -243,6 +183,86 @@ export function drawChart(
         }
     }
 
+    const yTickLabels = yTicks.map((tick) => {
+        if (mode === "probability") return tick.toFixed(2);
+        if (mode === "prob_diff") return tick >= 0 ? `+${tick.toFixed(2)}` : tick.toFixed(2);
+        return Math.round(tick).toString();
+    });
+    ctx.font = fonts.tick;
+    const yLabelWidth = Math.max(0, ...yTickLabels.map(measure));
+
+    const labelRoom = SectionBands.labelled(sections) ? SectionBands.LABEL_ROOM : 0;
+    const sides = PlotLayout.margin(compact, 0, labelRoom, yLabelWidth);
+    ctx.font = fonts.title;
+    const titleLines = title
+        ? PlotLayout.wrap(title, width - sides.left - 8, PlotLayout.TITLE_MAX_LINES, measure)
+        : [];
+    const margin = PlotLayout.margin(compact, titleLines.length, labelRoom, yLabelWidth);
+    const chartWidth = width - margin.left - margin.right;
+    const chartHeight = height - margin.top - margin.bottom;
+
+    const geometry: ChartGeometry = { margin, chartWidth, chartHeight, width, height };
+
+    const colors = {
+        background: darkMode ? "#0a0a0a" : "#fafafa",
+        text: "#71717a",
+        textMuted: darkMode ? "#52525b" : "#a1a1aa",
+        grid: darkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)",
+        axis: darkMode ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)",
+        titleText: darkMode ? "#e4e4e7" : "#27272a",
+    };
+
+    // Clear
+    if (options.transparentBackground) {
+        ctx.clearRect(0, 0, width, height);
+    } else {
+        ctx.fillStyle = colors.background;
+        ctx.fillRect(0, 0, width, height);
+    }
+
+    // Title
+    ctx.fillStyle = colors.titleText;
+    ctx.font = fonts.title;
+    ctx.textAlign = "left";
+    titleLines.forEach((line, i) => {
+        ctx.fillText(line, margin.left, offsets.title + i * PlotLayout.TITLE_LINE);
+    });
+
+    // Scale functions
+    const effectiveRange = (config.numLayers - 1) - xRangeStart;
+    const xScale = (layerIdx: number) => {
+        if (effectiveRange <= 0) return margin.left + chartWidth / 2;
+        return margin.left + ((layerIdx - xRangeStart) / effectiveRange) * chartWidth;
+    };
+
+    const yScale = (value: number) => {
+        let normalized: number;
+        if (logScale) {
+            const logVal = Math.log(Math.max(1, value));
+            normalized = (logMax - logMin) > 0 ? (logVal - logMin) / (logMax - logMin) : 0.5;
+        } else {
+            normalized = (value - config.minValue) / (config.maxValue - config.minValue);
+        }
+        return invertYAxis
+            ? margin.top + normalized * chartHeight
+            : margin.top + chartHeight - normalized * chartHeight;
+    };
+
+    // Sections, behind everything else on the plot
+    SectionBands.draw(
+        ctx,
+        SectionBands.layout(sections, xRangeStart, config.numLayers - 1, margin.left, chartWidth),
+        margin.top,
+        chartHeight,
+        darkMode,
+        width,
+    );
+
+    // Grid lines
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = colors.grid;
+    ctx.lineWidth = 1;
+
     yTicks.forEach((tick) => {
         const y = yScale(tick);
         ctx.beginPath();
@@ -267,45 +287,29 @@ export function drawChart(
 
     // Y-axis labels
     ctx.fillStyle = colors.text;
-    ctx.font = "400 11px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.font = fonts.tick;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
-    yTicks.forEach((tick) => {
-        const y = yScale(tick);
-        let label: string;
-        if (mode === "probability") {
-            label = tick.toFixed(2);
-        } else if (mode === "prob_diff") {
-            label = tick >= 0 ? `+${tick.toFixed(2)}` : tick.toFixed(2);
-        } else {
-            label = Math.round(tick).toString();
-        }
-        ctx.fillText(label, margin.left - 16, y);
+    yTicks.forEach((tick, i) => {
+        ctx.fillText(yTickLabels[i], margin.left - offsets.yLabel, yScale(tick));
     });
 
     // X-axis labels
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
 
-    const hasCustomXLabels = data.xLabels && data.xLabels.length > 0;
-    const layerStep = Math.max(1, Math.ceil(config.numLayers / 8));
+    const xLabel = (i: number) => String(data.xLabels?.[i] ?? i);
+    const spacing = effectiveRange > 0 ? chartWidth / effectiveRange : Infinity;
+    const xLabelWidth = Math.max(
+        0,
+        ...Array.from({ length: config.numLayers }, (_, i) => measure(xLabel(i))),
+    );
 
-    for (let i = 0; i < config.numLayers; i += layerStep) {
+    for (const i of PlotLayout.xTicks(config.numLayers, spacing, xLabelWidth)) {
         const x = xScale(i);
         if (x < margin.left - 5 || x > margin.left + chartWidth + 5) continue;
-        const label = hasCustomXLabels ? String(data.xLabels![i] ?? i) : i.toString();
-        ctx.fillText(label, x, margin.top + chartHeight + 12);
-    }
-    if ((config.numLayers - 1) % layerStep !== 0) {
-        const lastLabel = hasCustomXLabels
-            ? String(data.xLabels![config.numLayers - 1] ?? (config.numLayers - 1))
-            : (config.numLayers - 1).toString();
-        ctx.fillText(
-            lastLabel,
-            xScale(config.numLayers - 1),
-            margin.top + chartHeight + 12,
-        );
+        ctx.fillText(xLabel(i), x, margin.top + chartHeight + offsets.xLabel);
     }
 
     // Axes (L-shape)
@@ -319,13 +323,13 @@ export function drawChart(
 
     // Axis labels
     ctx.fillStyle = colors.textMuted;
-    ctx.font = "500 10px 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.font = fonts.axis;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.fillText(xAxisLabel.toUpperCase(), margin.left + chartWidth / 2, height - 16);
+    ctx.fillText(xAxisLabel.toUpperCase(), margin.left + chartWidth / 2, height - offsets.xTitle);
 
     ctx.save();
-    ctx.translate(14, margin.top + chartHeight / 2);
+    ctx.translate(offsets.yTitle, margin.top + chartHeight / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
@@ -375,6 +379,7 @@ export function drawChart(
     }
 
     // Draw lines
+    const markerRadius = PlotLayout.markerRadius(spacing);
     const fadedColor = darkMode ? "#3f3f46" : "#d4d4d8";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -396,24 +401,29 @@ export function drawChart(
         // Main line
         drawLinePath(line.values, color, 2, line.dashPattern);
 
-        // Data points
+        // Data points: crowded ones are left to the line, except the hovered
+        // one and a point with no neighbour to join.
         if (showDataPoints) {
             line.values.forEach((value, layerIdx) => {
                 if (value === null) return;
-                const x = xScale(layerIdx);
-                const y = yScale(value);
                 const isHovered =
                     tooltip?.lineIdx === lineIdx && tooltip?.layerIdx === layerIdx;
+                const alone =
+                    line.values[layerIdx - 1] == null && line.values[layerIdx + 1] == null;
+                const radius = isHovered ? 5 : markerRadius || (alone ? 2 : 0);
+                if (radius === 0) return;
+                const x = xScale(layerIdx);
+                const y = yScale(value);
 
                 ctx.beginPath();
                 ctx.strokeStyle = color;
                 ctx.lineWidth = isHovered ? 2 : 1.5;
-                ctx.arc(x, y, isHovered ? 5 : 3.5, 0, Math.PI * 2);
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
                 ctx.stroke();
 
                 ctx.beginPath();
                 ctx.fillStyle = darkMode ? "#18181b" : "#ffffff";
-                ctx.arc(x, y, isHovered ? 3.5 : 2.5, 0, Math.PI * 2);
+                ctx.arc(x, y, radius - (isHovered ? 1.5 : 1), 0, Math.PI * 2);
                 ctx.fill();
             });
         }

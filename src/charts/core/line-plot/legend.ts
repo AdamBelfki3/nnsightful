@@ -12,13 +12,19 @@ export interface LegendCallbacks {
     onRemove?: (lineIdx: number) => void;
 }
 
-export function createLegendElement(darkMode: boolean): HTMLDivElement {
+export function createLegendElement(darkMode: boolean, compact = false): HTMLDivElement {
     const el = document.createElement("div");
-    applyLegendStyles(el, darkMode);
+    applyLegendStyles(el, darkMode, compact);
     return el;
 }
 
-function applyLegendStyles(el: HTMLDivElement, darkMode: boolean): void {
+/** A panel beside the plot; `compact`, a bare wrapping row over it. */
+function applyLegendStyles(el: HTMLDivElement, darkMode: boolean, compact: boolean): void {
+    if (compact) {
+        el.style.cssText =
+            "flex-shrink:0;order:-1;display:flex;flex-direction:row;flex-wrap:wrap;gap:0 2px;padding:0 2px;";
+        return;
+    }
     const bg = darkMode ? "rgba(24,24,27,0.7)" : "rgba(255,255,255,0.7)";
     const border = darkMode ? "rgba(63,63,70,0.4)" : "rgba(228,228,231,0.4)";
     el.style.cssText =
@@ -28,7 +34,8 @@ function applyLegendStyles(el: HTMLDivElement, darkMode: boolean): void {
 }
 
 /** Rebuild the legend. With `callbacks` null the legend is a static key: plain
- *  rows with no toggle/remove affordances. */
+ *  rows with no toggle/remove affordances. `compact` lays it out as a row,
+ *  where the remove button shows without a pointer over it. */
 export function updateLegend(
     el: HTMLDivElement,
     labels: string[],
@@ -36,8 +43,9 @@ export function updateLegend(
     darkMode: boolean,
     callbacks: LegendCallbacks | null,
     data?: LinePlotData,
+    compact = false,
 ): void {
-    applyLegendStyles(el, darkMode);
+    applyLegendStyles(el, darkMode, compact);
     el.innerHTML = "";
 
     const fg = darkMode ? "rgba(250,250,250,0.8)" : "rgba(24,24,27,0.8)";
@@ -60,7 +68,8 @@ export function updateLegend(
 
         const btn = document.createElement(callbacks ? "button" : "div");
         btn.style.cssText =
-            `display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;` +
+            `display:flex;align-items:center;gap:${compact ? 6 : 8}px;` +
+            `padding:${compact ? "3px 6px" : "4px 8px"};border-radius:4px;` +
             `border:none;background:transparent;cursor:${callbacks ? "pointer" : "default"};transition:all 0.15s;` +
             `opacity:${isHidden ? "0.5" : "1"};`;
 
@@ -86,7 +95,7 @@ export function updateLegend(
         const span = document.createElement("span");
         span.style.cssText =
             `font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;` +
-            `white-space:nowrap;max-width:72px;transition:color 0.15s;` +
+            `white-space:nowrap;max-width:${compact ? 120 : 72}px;transition:color 0.15s;` +
             `color:${isHidden ? fgMuted : fg};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;`;
         span.title = label;
         span.innerHTML = renderTokenHTML(label);
@@ -101,7 +110,7 @@ export function updateLegend(
         if (removable && callbacks.onRemove) {
             const closeBtn = document.createElement("span");
             closeBtn.style.cssText =
-                `margin-left:auto;cursor:pointer;color:${mutedFg};opacity:0;` +
+                `margin-left:auto;cursor:pointer;color:${mutedFg};opacity:${compact ? 0.6 : 0};` +
                 `display:flex;align-items:center;transition:opacity 0.15s;padding:2px;`;
             closeBtn.innerHTML = CLOSE_SVG;
             closeBtn.title = "Remove";
@@ -115,9 +124,9 @@ export function updateLegend(
                 closeBtn.style.opacity = "0.6";
             });
             btn.addEventListener("mouseleave", () => {
-                closeBtn.style.opacity = "0";
+                closeBtn.style.opacity = compact ? "0.6" : "0";
             });
-        } else {
+        } else if (!compact || isHidden) {
             // Eye icon (toggle visibility)
             const icon = document.createElement("span");
             icon.style.cssText =
