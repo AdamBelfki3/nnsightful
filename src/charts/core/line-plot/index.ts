@@ -8,6 +8,7 @@ import {
     type TooltipState,
 } from "./tooltip";
 import { createLegendElement, updateLegend } from "./legend";
+import { PlotLayout } from "./layout";
 
 export class LinePlotCore implements LinePlotWidgetInterface {
     private container: HTMLElement;
@@ -27,26 +28,28 @@ export class LinePlotCore implements LinePlotWidgetInterface {
     private lastWidth = 0;
     private lastHeight = 0;
     private overlay: LinePlotLine | null = null;
+    private compact = false;
 
     constructor(container: HTMLElement, data: LinePlotData, options: LinePlotOptions = {}) {
         this.container = container;
         this.data = data;
         this.options = { darkMode: false, ...options };
+        this.compact = PlotLayout.compact(container.clientWidth);
 
-        // Root layout: flex row
+        // Root layout: the plot beside its legend, or under it when compact
         container.style.display = "flex";
         container.style.width = "100%";
         container.style.height = "100%";
         if (!container.style.minHeight) {
             container.style.minHeight = "300px";
         }
-        container.style.gap = "12px";
+        this.arrange();
         container.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
         container.style.overflow = "hidden";
 
         // Chart area
         this.chartContainer = document.createElement("div");
-        this.chartContainer.style.cssText = "position:relative;flex:1;min-width:0;overflow:hidden;";
+        this.chartContainer.style.cssText = "position:relative;flex:1;min-width:0;min-height:0;overflow:hidden;";
         container.appendChild(this.chartContainer);
 
         const interactive = this.options.interactive !== false;
@@ -58,7 +61,7 @@ export class LinePlotCore implements LinePlotWidgetInterface {
         this.tooltipEl = createTooltipElement(this.chartContainer);
 
         // Legend
-        this.legendEl = createLegendElement(this.options.darkMode ?? false);
+        this.legendEl = createLegendElement(this.options.darkMode ?? false, this.compact);
         if (this.options.legendPosition === "none") {
             this.legendEl.style.display = "none";
         }
@@ -70,22 +73,45 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.canvas.addEventListener("mouseleave", this.handleMouseLeave);
         }
 
-        // Resize — only redraw when container size actually changes to avoid infinite loops
+        // Resize — the root's width picks the layout; the canvas is redrawn only
+        // when its own size actually changes, to avoid infinite loops
         this.resizeObserver = new ResizeObserver((entries) => {
             if (this.destroyed) return;
-            const entry = entries[0];
-            if (!entry) return;
-            const w = Math.round(entry.contentRect.width);
-            const h = Math.round(entry.contentRect.height);
-            if (w === this.lastWidth && h === this.lastHeight) return;
-            this.lastWidth = w;
-            this.lastHeight = h;
-            this.draw();
+            for (const entry of entries) {
+                if (entry.target === this.container) {
+                    this.fit(entry.contentRect.width);
+                    continue;
+                }
+                const w = Math.round(entry.contentRect.width);
+                const h = Math.round(entry.contentRect.height);
+                if (w === this.lastWidth && h === this.lastHeight) continue;
+                this.lastWidth = w;
+                this.lastHeight = h;
+                this.draw();
+            }
         });
         this.resizeObserver.observe(this.chartContainer);
+        this.resizeObserver.observe(this.container);
 
         this.draw();
         this.updateLegendUI();
+    }
+
+    /** Lays the plot out again when `width`, its room with its legend,
+     *  crosses into or out of the compact layout. */
+    private fit(width: number): void {
+        const compact = PlotLayout.compact(width);
+        if (compact === this.compact) return;
+        this.compact = compact;
+        this.arrange();
+        this.draw();
+        this.updateLegendUI();
+    }
+
+    /** Puts the legend beside the plot, or in a row over it when compact. */
+    private arrange(): void {
+        this.container.style.flexDirection = this.compact ? "column" : "row";
+        this.container.style.gap = this.compact ? "4px" : "12px";
     }
 
     private getLabels(): string[] {
@@ -108,6 +134,7 @@ export class LinePlotCore implements LinePlotWidgetInterface {
             this.hiddenLines,
             this.tooltip,
             this.overlay,
+            this.compact,
         );
     }
 
@@ -131,7 +158,15 @@ export class LinePlotCore implements LinePlotWidgetInterface {
                 this.options.onLineRemoved!(idx);
             } : undefined,
         };
-        updateLegend(this.legendEl, labels, this.hiddenLines, this.options.darkMode ?? false, callbacks, this.data);
+        updateLegend(
+            this.legendEl,
+            labels,
+            this.hiddenLines,
+            this.options.darkMode ?? false,
+            callbacks,
+            this.data,
+            this.compact,
+        );
     }
 
     private handleMouseMove = (e: MouseEvent): void => {

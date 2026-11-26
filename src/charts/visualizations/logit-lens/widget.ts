@@ -39,6 +39,7 @@ const HDR_H = 22;
 // upper cap — fewer columns just means wider cells, never whitespace).
 const MIN_CELL = 48;   // smallest readable column → caps the column count
 const COL_CAP = 18;    // hard ceiling on visible columns regardless of width
+const NAV_STACK_BELOW = 480; // narrower, the navigator's strip takes a row of its own
 
 const RAMPS: Record<string, string> = {
     purple: "#9333ea",
@@ -708,6 +709,8 @@ export function createWidget(
             ticksHtml += `<span class="ll-nav-tick" style="left:${pct}%;transform:${tx}">${widgetData.layers[idx]}</span>`;
         }
 
+        const hostW = (container as HTMLElement)?.clientWidth || widgetEl.clientWidth;
+        navEl.classList.toggle("ll-nav-stacked", interactive && hostW > 0 && hostW < NAV_STACK_BELOW);
         navEl.innerHTML = `
             <div class="ll-nav-range">${rangeHtml}</div>
             <div class="ll-nav-mid">
@@ -1329,6 +1332,7 @@ export function createWidget(
             resizeRaf = 0;
             if (destroyed) return;
             renderHeatmap();
+            renderNavigator();
             if (!lpHidden) applyLinePlotHeight();
         });
     });
