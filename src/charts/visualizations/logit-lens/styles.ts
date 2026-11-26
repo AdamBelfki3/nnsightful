@@ -229,6 +229,12 @@ export function generateStyles(uid: string): string {
         ${root} .ll-nav-btn:hover:not(:disabled) { background: var(--ll-surface-3); color: var(--ll-text); }
         ${root} .ll-nav-btn:disabled { opacity: 0.35; cursor: default; }
         ${root} .ll-nav-sep { width: 1px; height: 16px; background: var(--ll-line-2); margin: 0 4px; }
+        /* A narrow widget: the label and the controls share a row, and the
+           strip, which they would squeeze to a sliver, takes the next one. */
+        ${root} .ll-nav.ll-nav-stacked { flex-wrap: wrap; row-gap: 8px; }
+        ${root} .ll-nav-stacked .ll-nav-range { min-width: 0; }
+        ${root} .ll-nav-stacked .ll-nav-controls { margin-left: auto; }
+        ${root} .ll-nav-stacked .ll-nav-mid { order: 3; flex-basis: 100%; }
 
         /* ── Line plot (kept on cell click) ── */
         ${root} .ll-lineplot-wrap {
