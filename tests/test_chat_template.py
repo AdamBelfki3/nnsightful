@@ -225,3 +225,77 @@ class TestJLens:
         data = j_lens(model, PROMPT, jacobians=self.identity(model), top_k=2)
         assert data.input == decode_each(model, model.tokenizer.encode(PROMPT))
         assert data.template is None
+
+
+class TestWhereTheReplyStarts:
+    """A chat prompt ends where the reply's text begins, past what the model would write first."""
+
+    @staticmethod
+    def tokenizer(template: str):
+        tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+        tokenizer.chat_template = template
+        return tokenizer
+
+    #: Like Inkling's: no generation prompt, the model writes its own turn marker.
+    NO_GENERATION_PROMPT = (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}<|user|>{{ message['content'] }}<|end|>"
+        "{% else %}<|model|><|text|>{{ message['content'] }}<|end|>{% endif %}"
+        "{% endfor %}"
+    )
+    #: Like gpt-oss's: the generation prompt stops before the channel a reply goes in.
+    CHANNELS = (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}<|start|>user<|message|>{{ message['content'] }}<|end|>"
+        "{% else %}<|start|>assistant<|channel|>final<|message|>{{ message['content'] }}<|end|>{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}<|start|>assistant{% endif %}"
+    )
+
+    def test_a_generation_prompt_that_reaches_the_reply_is_kept_as_it_is(self, tokenizer):
+        assert ChatTemplate.render(tokenizer, PROMPT) == tokenizer.apply_chat_template(
+            [{"role": "user", "content": PROMPT}], tokenize=False, add_generation_prompt=True
+        )
+
+    def test_a_template_without_a_generation_prompt_gets_the_models_turn(self):
+        tokenizer = self.tokenizer(self.NO_GENERATION_PROMPT)
+        assert ChatTemplate.render(tokenizer, PROMPT) == f"<|user|>{PROMPT}<|end|><|model|><|text|>"
+
+    def test_a_reply_that_opens_past_the_generation_prompt_is_opened(self):
+        tokenizer = self.tokenizer(self.CHANNELS)
+        assert ChatTemplate.render(tokenizer, PROMPT) == (
+            f"<|start|>user<|message|>{PROMPT}<|end|>"
+            "<|start|>assistant<|channel|>final<|message|>"
+        )
+
+    def test_the_opening_counts_as_the_templates(self):
+        tokenizer = self.tokenizer(self.NO_GENERATION_PROMPT)
+        encoded = ChatTemplate.encode(tokenizer, PROMPT, ChatTemplate.CHAT)
+        own = [i for i in range(len(encoded.ids)) if i not in encoded.template]
+        assert tokenizer.decode([encoded.ids[i] for i in own]) == PROMPT
+        assert tokenizer.decode(encoded.ids[own[-1] + 1 :]) == "<|end|><|model|><|text|>"
+
+    def test_a_prompt_holding_the_stand_in_reply_is_cut_at_the_real_one(self):
+        tokenizer = self.tokenizer(self.NO_GENERATION_PROMPT)
+        prompt = f"Say {ChatTemplate.REPLY} twice"
+        assert ChatTemplate.render(tokenizer, prompt) == f"<|user|>{prompt}<|end|><|model|><|text|>"
+
+    def test_a_template_that_cannot_render_a_reply_keeps_its_generation_prompt(self):
+        refuses = (
+            "{% for message in messages %}"
+            "{% if message['role'] != 'user' %}{{ raise_exception('user turns only') }}{% endif %}"
+            "<|user|>{{ message['content'] }}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}<|model|>{% endif %}"
+        )
+        tokenizer = self.tokenizer(refuses)
+        assert ChatTemplate.render(tokenizer, PROMPT) == f"<|user|>{PROMPT}<|model|>"
+
+    def test_a_template_that_rewrites_the_turns_before_a_reply_keeps_its_generation_prompt(self):
+        rewrites = (
+            "{% if messages | length > 1 %}<|history|>{% endif %}"
+            "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}{% endfor %}"
+            "{% if add_generation_prompt %}<|assistant|>{% endif %}"
+        )
+        tokenizer = self.tokenizer(rewrites)
+        assert ChatTemplate.render(tokenizer, PROMPT) == f"<|user|>{PROMPT}<|assistant|>"

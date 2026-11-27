@@ -34,6 +34,13 @@ class ChatTemplate:
 
         logit_lens(model, "Where is the Eiffel Tower?", template="chat")
 
+    The conversation ends where the text of the model's reply begins
+    (:meth:`render`), so the last position predicts the reply's first word.
+    That is past the markers some models would otherwise write themselves
+    before it: a turn or a channel marker, or the opening of a thinking block,
+    which the reply then skips. It is what the template writes in front of a
+    reply it is given, so nothing is guessed per model.
+
     The template is applied once, to token ids: its text already holds the
     special tokens, so tokenizing it again the usual way would add a second
     start token on many models.
@@ -49,10 +56,12 @@ class ChatTemplate:
         PLAIN: The ``template`` value for a prompt sent as written.
         CHAT: The one for a prompt sent as a user's message.
         OPTION: The ``template`` option, as the tools declare it.
+        REPLY: The stand-in reply :meth:`render` cuts the conversation at.
     """
 
     PLAIN = "plain"
     CHAT = "chat"
+    REPLY = "ZQXREPLYZQX"
     OPTION = ToolOption(
         name="template",
         label="Chat template",
@@ -71,8 +80,9 @@ class ChatTemplate:
                 label="Chat template",
                 description=(
                     "Sends the prompt as a user's message in the model's chat "
-                    "template, the layout it was trained on. The last position "
-                    "then predicts the start of the model's reply."
+                    "template, the layout it was trained on, up to where the "
+                    "model's reply begins. The last position then predicts the "
+                    "reply's first word, without the model thinking first."
                 ),
             ),
         ],
@@ -109,13 +119,38 @@ class ChatTemplate:
                 "tokenizer has none."
             )
 
-        text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        text = cls.render(tokenizer, prompt)
         ids = list(tokenizer.encode(text, add_special_tokens=False))
         return EncodedPrompt(ids, cls._around(tokenizer, text, ids, prompt))
+
+    @classmethod
+    def render(cls, tokenizer: "PreTrainedTokenizerBase", prompt: str) -> str:
+        """``prompt`` as a user's message, up to where the reply's text begins.
+
+        The conversation is rendered with a stand-in reply (:attr:`REPLY`) and
+        cut where that reply starts, which keeps everything the template
+        writes in front of a reply's text. On most models that is its
+        generation prompt. On others it is more: the model's turn marker where
+        the template has no generation prompt, the channel a final answer goes
+        in, or an empty thinking block.
+
+        Falls back to the generation prompt for a template that cannot render
+        a reply, or that renders the conversation before it differently.
+        """
+        user = {"role": "user", "content": prompt}
+        prompted = tokenizer.apply_chat_template(
+            [user], tokenize=False, add_generation_prompt=True
+        )
+        try:
+            replied = tokenizer.apply_chat_template(
+                [user, {"role": "assistant", "content": cls.REPLY}], tokenize=False
+            )
+        except Exception:
+            return prompted
+        cut = replied.rfind(cls.REPLY)
+        if cut < 0 or not replied.startswith(prompted):
+            return prompted
+        return replied[:cut]
 
     @staticmethod
     def _around(

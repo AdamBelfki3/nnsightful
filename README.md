@@ -41,9 +41,15 @@ data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_
 
 A prompt is sent as it is written, for the model to continue. A chat model is
 trained on conversations laid out by its tokenizer's chat template, and
-`template="chat"` sends the prompt that way instead: as a user's message, with
-the model about to reply. The last position then predicts the start of the
-reply.
+`template="chat"` sends the prompt that way instead: as a user's message, up
+to where the text of the model's reply begins. The last position then predicts
+the reply's first word.
+
+Some models write markers of their own before that word: a turn marker
+(Inkling 2 Mini), the channel an answer goes in (gpt-oss), the opening of a
+thinking block (Qwen3). The conversation ends past them, on what the template
+itself writes in front of a reply it is given (`ChatTemplate.render`), so the
+reply is read as a direct answer, without the model thinking first.
 
 ```python
 data = logit_lens(model, "Where is the Eiffel Tower?", template="chat")
