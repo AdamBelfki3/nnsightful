@@ -123,10 +123,15 @@ class _LensData(ToolData):
 
     @staticmethod
     def _prompt_ids(model: "StandardizedTransformer", prompt: "str | Sequence[int]") -> list[int]:
-        """A prompt's token ids: its own when given as ids, else as tokenized as written."""
-        from nnsightful.tools.chat import ChatTemplate
+        """A prompt's token ids: its own when given as ids, else as tokenized as written.
 
-        return ChatTemplate.encode(model.tokenizer, prompt).ids
+        Formatting runs inside the tool's session, on NDIF from a shipped copy
+        of this code, where nnsightful itself cannot be imported: this uses
+        the tokenizer alone.
+        """
+        if isinstance(prompt, str):
+            return list(model.tokenizer.encode(prompt))
+        return [int(token) for token in prompt]
 
     @staticmethod
     def _format_lens(
