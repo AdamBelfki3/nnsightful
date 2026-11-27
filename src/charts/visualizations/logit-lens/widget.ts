@@ -496,12 +496,20 @@ export function createWidget(
             : `<span class="hmx-cell-text"${active ? ' style="font-weight:600"' : ""}>${tokenInnerHTML(tok)}</span>`;
         return html;
     }
-    // Mark every row (cursor affordance), the active one (rail + tint), and
-    // generated rows (which CSS then renders with an italic token label).
+    // Mark every row (cursor affordance), the active one (rail + tint),
+    // generated rows (which CSS then renders with an italic token label) and
+    // a chat template's rows (a dimmed one).
     function rowClassName(r: number): string {
         return "ll-hmx-row"
             + (r === state.selectedRow || isPinnedRow(r) ? " ll-hmx-active" : "")
-            + (isGenRow(r) ? " ll-gen-row" : "");
+            + (isGenRow(r) ? " ll-gen-row" : "")
+            + (isTemplateRow(r) ? " ll-template-row" : "");
+    }
+
+    // A row of a token a chat template put around the prompt (the data's
+    // `template`), keyed by original index like the generated rows.
+    function isTemplateRow(r: number): boolean {
+        return !!v2Data?.template?.includes(r);
     }
 
     // First generated row = start of the data's `completion` tokens. Generated

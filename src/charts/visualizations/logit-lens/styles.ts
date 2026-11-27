@@ -158,6 +158,11 @@ export function generateStyles(uid: string): string {
            every other token label. */
         ${root} .ll-gen-row .hmx-rowlabel .hmx-cell-text { font-style: italic; }
 
+        /* A chat template's own tokens: dimmed labels, so the rows of the
+           prompt read as the subject. The active row keeps its weight. */
+        ${root} .ll-template-row .hmx-rowlabel .hmx-cell-text,
+        ${root} .ll-template-row .hmx-rowlabel .ll-bos-pill { opacity: 0.45; }
+
         /* On-demand fold handle (⊟) in the row-label gutter: revealed on row
            hover, lit while it's the fold anchor. margin-right:auto pushes it to
            the outer (left) edge so it reads as a side control and doesn't shift
