@@ -37,6 +37,32 @@ data = j_lens(model, prompt, max_new_tokens=5, positions=-1)
 data = activation_patching(model, src_prompt, tgt_prompt, src_pos, tgt_pos, tgt_freeze)
 ```
 
+### Chat models
+
+A prompt is sent as it is written, for the model to continue. A chat model is
+trained on conversations laid out by its tokenizer's chat template, and
+`template="chat"` sends the prompt that way instead: as a user's message, with
+the model about to reply. The last position then predicts the start of the
+reply.
+
+```python
+data = logit_lens(model, "Where is the Eiffel Tower?", template="chat")
+data.input      # every token the model saw: the template's and the prompt's
+data.template   # the positions of the template's own, which the chart dims
+```
+
+The three tools take it, on any model whose tokenizer has a chat template.
+Positions (`positions`, a patch's `src_pos` and `tgt_pos`) index the tokens
+the model sees, so under a template they count the template's tokens too.
+
+A prompt can also be given already tokenized, as a list of token ids, which is
+traced as it is. That is how to run a conversation of several turns:
+
+```python
+ids = model.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+data = logit_lens(model, ids)
+```
+
 ### Looped models
 
 Inkling 2 Mini and TML-d24-varloop-research run their middle layers several
@@ -95,14 +121,15 @@ with its values, their labels and descriptions and its default, which is all
 an interface needs to offer them:
 
 ```python
-logit_lens.options(model)                # (ToolOption(name="lens", ...),)
-activation_patching.options(LoopedTransformer)[0].values
+logit_lens.options(model)                # (..., ToolOption(name="lens", ...))
+activation_patching.options(LoopedTransformer)[-1].values
 # ("active_block", "live_state", "full_state")
 ```
 
 A tool that declares an option gets it in its `_run` by name: the base tool
-checks the value a call gives, or fills in the default. On a model the tool
-runs on as is, `options` is empty.
+checks the value a call gives, or fills in the default. `options` also lists
+`template` (see "Chat models") for a model whose tokenizer has a chat
+template, and for a model's class, since some of its models have one.
 
 Both tools' data carry the model's `sections`: the layers before the loop
 (`prelude`), each pass, and the layers after it (`coda`). The patching plot

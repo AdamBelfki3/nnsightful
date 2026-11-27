@@ -122,6 +122,13 @@ class _LensData(ToolData):
     """Formatting shared by :class:`LogitLensData` and :class:`JLensData`."""
 
     @staticmethod
+    def _prompt_ids(model: "StandardizedTransformer", prompt: "str | Sequence[int]") -> list[int]:
+        """A prompt's token ids: its own when given as ids, else as tokenized as written."""
+        from nnsightful.tools.chat import ChatTemplate
+
+        return ChatTemplate.encode(model.tokenizer, prompt).ids
+
+    @staticmethod
     def _format_lens(
         logits: "torch.Tensor",
         model: "StandardizedTransformer",
@@ -197,16 +204,18 @@ class LogitLensData(_LensData):
     topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
     sections: list[PlotSection] | None = None  # Spans of the layer axis to mark
+    template: list[int] | None = None  # Positions of `input` a chat template added
 
     @classmethod
     def format(
         cls,
         logits: "torch.Tensor",
         model: "StandardizedTransformer",
-        prompt: str,
+        prompt: "str | Sequence[int]",
         positions: list[int] | None = None,
         top_k: int = 5,
         include_entropy: bool = True,
+        template: list[int] | None = None,
     ) -> "LogitLensData":
         """Build the logit-lens data from ``[layer, pos, vocab]`` logits.
 
@@ -217,10 +226,15 @@ class LogitLensData(_LensData):
         model's device first: the raw tensor is on the CPU, whose reductions
         can round an entropy differently). ``logits`` is overwritten in place
         (see :meth:`_LensData._format_lens`).
+
+        ``prompt`` is the text the lens ran on as written, or the token ids
+        it ran on; ``template`` the positions among them a chat template
+        added (:class:`~nnsightful.tools.chat.EncodedPrompt`), which a chart
+        sets apart from the prompt's own.
         """
         input_tokens = [
             str(model.tokenizer.decode(token))
-            for token in model.tokenizer.encode(prompt)
+            for token in cls._prompt_ids(model, prompt)
         ]
         if positions is None:
             positions = list(range(len(input_tokens)))
@@ -230,6 +244,7 @@ class LogitLensData(_LensData):
             input=input_tokens,
             positions=positions,
             sections=PlotSection.of(model),
+            template=template,
             **lens,
         )
 
@@ -254,17 +269,19 @@ class JLensData(_LensData):
     tracked: list[dict[str, list[float]]]  # Per-position: token -> trajectory
     topk: list[list[list[str]]]  # [layer][position] -> list of selected tokens
     entropy: list[list[float]] | None = None  # Optional: [layer][position] -> entropy
+    template: list[int] | None = None  # Positions of `input` a chat template added
 
     @classmethod
     def format(
         cls,
         logits: "torch.Tensor | Sequence[torch.Tensor]",
         model: "StandardizedTransformer",
-        prompt: str,
+        prompt: "str | Sequence[int]",
         token_ids: list[int] | None = None,
         positions: list[int] | None = None,
         top_k: int = 5,
         include_entropy: bool = True,
+        template: list[int] | None = None,
     ) -> "JLensData":
         """Build the j-lens data from ``[layer, pos, vocab]`` logits.
 
@@ -284,11 +301,15 @@ class JLensData(_LensData):
         labels ``input`` and ``completion``; it defaults to the prompt's own
         tokens, which suffices when there are no generated rows
         (``max_new_tokens=1``).
+
+        ``prompt`` is the text the lens ran on as written, or the token ids
+        it ran on; ``template`` the positions among them a chat template
+        added, as for :meth:`LogitLensData.format`.
         """
         import torch
 
         steps = [logits] if isinstance(logits, torch.Tensor) else logits
-        prompt_ids = model.tokenizer.encode(prompt)
+        prompt_ids = cls._prompt_ids(model, prompt)
         prompt_len = len(prompt_ids)
         if token_ids is None:
             token_ids = prompt_ids
@@ -319,6 +340,7 @@ class JLensData(_LensData):
                 if positions is None
                 else positions + list(range(prompt_len, seq_len))
             ),
+            template=template,
             **lens,
         )
 

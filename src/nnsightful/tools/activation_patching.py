@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import math
@@ -8,6 +9,7 @@ import torch.nn.functional as F
 
 from ..types import ActivationPatchingData, PlotSection
 from ._base import Tool
+from .chat import ChatTemplate
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
@@ -17,21 +19,32 @@ class ActivationPatchingTool(Tool):
     """Activation patching: causal intervention across all layers."""
 
     data_class = ActivationPatchingData
+    PROMPT_OPTIONS = (ChatTemplate.OPTION,)
 
     def _prepare(
         self,
         model: "StandardizedTransformer",
-        src_prompt: str,
-        tgt_prompt: str,
+        src_prompt: str | Sequence[int],
+        tgt_prompt: str | Sequence[int],
         src_pos: list[int | list[int]],
         tgt_pos: list[int],
         tgt_freeze: list[int],
         *,
+        template: str = ChatTemplate.PLAIN,
         batch_size: int = 32,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve activation patching's arguments.
+
+        Both prompts are tokenized here, as ``template`` says
+        (:class:`~nnsightful.tools.chat.ChatTemplate`), and the run takes
+        their token ids. The positions index those tokens: under a chat
+        template they count the template's tokens too, so a prompt's own
+        tokens sit further along than in the prompt sent as written.
+        """
+        tokenizer = model.tokenizer
         run_kwargs = {
-            "src_prompt": src_prompt,
-            "tgt_prompt": tgt_prompt,
+            "src_prompt": ChatTemplate.encode(tokenizer, src_prompt, template).ids,
+            "tgt_prompt": ChatTemplate.encode(tokenizer, tgt_prompt, template).ids,
             "src_pos": src_pos,
             "tgt_pos": tgt_pos,
             "tgt_freeze": tgt_freeze,
@@ -43,8 +56,8 @@ class ActivationPatchingTool(Tool):
         self,
         model: "StandardizedTransformer",
         *,
-        src_prompt: str,
-        tgt_prompt: str,
+        src_prompt: list[int],
+        tgt_prompt: list[int],
         src_pos: list[int | list[int]],
         tgt_pos: list[int],
         tgt_freeze: list[int],
