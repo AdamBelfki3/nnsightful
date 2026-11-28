@@ -114,3 +114,10 @@ test("host sections merged with locked ones keep their indices", () => {
         { kind: "band", start: 12, end: 13, index: 0, locked: false, label: undefined, shown: 2 },
     ]);
 });
+
+test("a chat template's rows survive densifying, so the widget can dim them", () => {
+    const templated = { ...LL_SPARSE, template: [0, 1] };
+    assert.deepEqual(densifyLogitLensData(templated).data.template, [0, 1]);
+    assert.deepEqual(normalizeData(templated).v2Data?.template, [0, 1]);
+    assert.equal(normalizeData(LL_DENSE).v2Data?.template, undefined);
+});

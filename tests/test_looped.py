@@ -12,7 +12,7 @@ import pytest
 import torch
 from nnsight import TransformersModel
 
-from nnsightful import ExecMode, LoopedTransformer, ToolChoice, ToolOption
+from nnsightful import ChatTemplate, ExecMode, LoopedTransformer, ToolChoice, ToolOption
 from nnsightful.tools.activation_patching import activation_patching
 from nnsightful.tools.j_lens import j_lens
 from nnsightful.tools.logit_lens import logit_lens
@@ -121,11 +121,15 @@ class TestOptions:
         assert j_lens.options(looped) == ()
 
     def test_the_models_class_lists_them_without_a_model(self, looped):
-        assert logit_lens.options(LoopedTransformer) == logit_lens.options(looped)
+        """After the chat template, which a class is offered and this model has none of."""
+        assert logit_lens.options(LoopedTransformer) == (
+            ChatTemplate.OPTION,
+            *logit_lens.options(looped),
+        )
 
-    def test_a_model_the_tools_run_on_as_is_has_none(self):
-        assert logit_lens.options(TransformersModel) == ()
-        assert activation_patching.options(TransformersModel) == ()
+    def test_a_model_the_tools_run_on_as_is_has_none_of_its_own(self):
+        assert logit_lens.options(TransformersModel) == (ChatTemplate.OPTION,)
+        assert activation_patching.options(TransformersModel) == (ChatTemplate.OPTION,)
 
     @pytest.mark.parametrize(
         "option", [LoopedLogitLensTool.LENS, LoopedActivationPatchingTool.PATCH]

@@ -8,6 +8,7 @@ import torch
 
 from ..types import ToolData, ToolOption
 from ._utils import IndexSpec, resolve_indices
+from .chat import ChatTemplate
 from .execution import ExecMode
 
 if TYPE_CHECKING:
@@ -39,6 +40,12 @@ class Tool():
     each at its default when the call leaves it out; :meth:`options` lists
     them for an interface to offer.
 
+    An option about the prompt a tool is given, rather than about what it
+    computes, is one of its :attr:`PROMPT_OPTIONS` instead: checked the same
+    way, but handed to :meth:`_prepare`, which turns the prompt into the
+    tokens :meth:`_run` traces. The tools that take a prompt offer how it is
+    sent this way (:class:`~nnsightful.tools.chat.ChatTemplate`).
+
     Where it runs is the call's ``exec_mode`` (see
     :mod:`nnsightful.tools.execution`)::
 
@@ -55,6 +62,7 @@ class Tool():
 
     data_class: type[ToolData]
     OPTIONS: tuple[ToolOption, ...] = ()
+    PROMPT_OPTIONS: tuple[ToolOption, ...] = ()
 
     def __call__(
         self,
@@ -74,8 +82,11 @@ class Tool():
         """
         tool = self._for_model(model)
         session_kwargs = ExecMode.resolve(exec_mode, model)
-        options = tool._take_options(kwargs)
-        run_kwargs, format_kwargs = tool._prepare(model, *args, **kwargs)
+        prompt_options = tool._take_options(tool.PROMPT_OPTIONS, kwargs)
+        options = tool._take_options(tool.OPTIONS, kwargs)
+        run_kwargs, format_kwargs = tool._prepare(
+            model, *args, **prompt_options, **kwargs
+        )
         run_kwargs = {**run_kwargs, **options}
 
         with torch.no_grad(), model.session(**session_kwargs):
@@ -96,10 +107,16 @@ class Tool():
     ) -> tuple[ToolOption, ...]:
         """The options this tool takes on ``model``: a model, or the class of one.
 
-        They are the :attr:`OPTIONS` of the implementation that runs on it
-        (see :meth:`_for_model`), so none for a model the tool runs on as is.
+        They are the :attr:`PROMPT_OPTIONS` and :attr:`OPTIONS` of the
+        implementation that runs on it (see :meth:`_for_model`). A model
+        whose tokenizer has no chat template is not offered one; the class of
+        a model is offered it, since some of its models have one.
         """
-        return self._for_model(model).OPTIONS
+        tool = self._for_model(model)
+        offered = (*tool.PROMPT_OPTIONS, *tool.OPTIONS)
+        if isinstance(model, type) or ChatTemplate.available(model.tokenizer):
+            return offered
+        return tuple(option for option in offered if option is not ChatTemplate.OPTION)
 
     def _for_model(self, model: "StandardizedTransformer | type") -> Tool:
         """The implementation of this tool that runs on ``model``.
@@ -112,8 +129,11 @@ class Tool():
         model_class = model if isinstance(model, type) else type(model)
         return getattr(model_class, "TOOLS", {}).get(type(self), self)
 
-    def _take_options(self, kwargs: dict[str, Any]) -> dict[str, str]:
-        """Take this tool's :attr:`OPTIONS` out of a call's keyword arguments.
+    @staticmethod
+    def _take_options(
+        options: tuple[ToolOption, ...], kwargs: dict[str, Any]
+    ) -> dict[str, str]:
+        """Take ``options`` out of a call's keyword arguments.
 
         Returns each by name: the value given, or its default.
 
@@ -122,7 +142,7 @@ class Tool():
         """
         return {
             option.name: option.check(kwargs.pop(option.name, option.default))
-            for option in self.OPTIONS
+            for option in options
         }
 
     def format(self, *args, **kwargs) -> ToolData:

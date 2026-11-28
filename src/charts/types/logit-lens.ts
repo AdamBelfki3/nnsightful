@@ -29,6 +29,10 @@ export interface LogitLensData {
      *  passes: over the heatmap's columns, in the layer navigator and behind
      *  the trajectory plot. Absent or null for a model with nothing to mark. */
     sections?: LinePlotSection[] | null;
+    /** Row indices (over `input`) of the tokens a chat template put around
+     *  the prompt. The widget dims their labels, so the prompt's own rows
+     *  stand out. Absent or null for a prompt sent as it is written. */
+    template?: number[] | null;
 }
 
 /**

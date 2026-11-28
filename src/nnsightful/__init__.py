@@ -3,6 +3,7 @@
 from nnsightful.tools._base import Tool
 from nnsightful.tools._utils import IndexSpec, resolve_indices
 from nnsightful.tools.activation_patching import activation_patching
+from nnsightful.tools.chat import ChatTemplate
 from nnsightful.tools.execution import (
     AsyncToolBackend,
     ExecMode,
@@ -38,6 +39,7 @@ __all__ = [
     "j_lens",
     "logit_lens",
     "LoopedTransformer",
+    "ChatTemplate",
     "Tool",
     "ExecMode",
     "NonBlockingToolBackend",

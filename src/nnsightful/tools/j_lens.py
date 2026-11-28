@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional, Any
 
 import torch
@@ -8,6 +9,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from ..types import JLensData
 from ._base import Tool
 from ._utils import IndexSpec
+from .chat import ChatTemplate
 
 if TYPE_CHECKING:
     from nnterp import StandardizedTransformer
@@ -35,6 +37,7 @@ class JLensTool(Tool):
     """
 
     data_class = JLensData
+    PROMPT_OPTIONS = (ChatTemplate.OPTION,)
 
     NEURON_JLENS_REPO = "neuronpedia/jacobian-lens"
     NEURON_JLENS_SUFFIX = "_jacobian_lens.pt"
@@ -125,8 +128,9 @@ class JLensTool(Tool):
     def _prepare(
         self,
         model: StandardizedTransformer,
-        prompt: str,
+        prompt: str | Sequence[int],
         *,
+        template: str = ChatTemplate.PLAIN,
         positions: IndexSpec = None,
         jacobians: Optional[dict[int, torch.Tensor]] = None,
         max_new_tokens: int = 1,
@@ -135,6 +139,11 @@ class JLensTool(Tool):
         include_entropy: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Resolve j-lens's arguments for ``max_new_tokens`` generation steps.
+
+        ``prompt`` is tokenized here, as ``template`` says
+        (:class:`~nnsightful.tools.chat.ChatTemplate`), and the run and the
+        formatting take its token ids. Under a chat template the prompt's
+        positions count the template's tokens too.
 
         The lens is applied at every forward pass of ``model.generate``: the
         prefill pass covers all prompt positions, and each subsequent decode
@@ -167,10 +176,10 @@ class JLensTool(Tool):
         Raises:
             ValueError: if ``positions`` is empty or outside the prompt.
         """
-        prompt_len = len(model.tokenizer.encode(prompt))
-        selected = self._select_positions(positions, prompt_len)
+        encoded = ChatTemplate.encode(model.tokenizer, prompt, template)
+        selected = self._select_positions(positions, len(encoded.ids))
         run_kwargs = {
-            "prompt": prompt,
+            "prompt": encoded.ids,
             "positions": selected,
             "prompt_index": self._position_index(selected),
             "jacobians": jacobians or None,
@@ -184,10 +193,11 @@ class JLensTool(Tool):
             },
         }
         format_kwargs = {
-            "prompt": prompt,
+            "prompt": encoded.ids,
             "positions": selected,
             "top_k": top_k,
             "include_entropy": include_entropy,
+            "template": encoded.template or None,
         }
         return run_kwargs, format_kwargs
 
@@ -195,7 +205,7 @@ class JLensTool(Tool):
         self,
         model: StandardizedTransformer,
         *,
-        prompt: str,
+        prompt: list[int],
         positions: list[int] | None,
         prompt_index: slice | list[int],
         jacobians: dict[int, torch.Tensor] | None,
@@ -243,10 +253,11 @@ class JLensTool(Tool):
         model: StandardizedTransformer,
         outputs: dict[str, Any],
         *,
-        prompt: str,
+        prompt: list[int],
         positions: list[int] | None,
         top_k: int,
         include_entropy: bool,
+        template: list[int] | None,
     ) -> JLensData:
         return self.format(
             outputs["logits"],
@@ -256,6 +267,7 @@ class JLensTool(Tool):
             positions=positions,
             top_k=top_k,
             include_entropy=include_entropy,
+            template=template,
         )
 
     def _raw(
